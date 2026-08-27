@@ -1,0 +1,382 @@
+version: 1
+name: builtin.cloud
+description: Commands that delete cloud resources, container data or Kubernetes objects.
+
+rules:
+  - id: cloud.kubectl.delete
+    title: Deletion of a Kubernetes object
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command removes an object from the cluster. A controller can build most objects again from the manifest.
+    match:
+      action: exec
+      program: [kubectl, oc, k3s, microk8s, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:kubectl|oc)(?:\s|$)'
+        - argv_matches: '(?:^|\s)delete(?:\s|$)'
+    exceptions:
+      - argv_matches: '(?:^|\s)--dry-run'
+    tests:
+      - name: a pod delete is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 600, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, delete, pod, api-7f9] }
+      - name: a dry run is an exception and stays quiet
+        expect: allow
+        process: { pid: 601, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, delete, pod, api-7f9, --dry-run=client] }
+      - name: a list of pods stays quiet
+        expect: allow
+        process: { pid: 602, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, get, pods] }
+
+  - id: cloud.kubectl.delete-durable
+    title: Deletion of a Kubernetes object that holds data
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes a namespace, a volume claim or every object of a kind. The data of the volume is gone and no controller can build it again.
+    match:
+      action: exec
+      program: [kubectl, oc, k3s, microk8s, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:kubectl|oc)(?:\s|$)'
+        - argv_matches: '(?:^|\s)delete(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:namespace|ns|pvc|persistentvolumeclaims?|persistentvolumes?|pv|statefulsets?|sts|crd|customresourcedefinitions?)(?:[\s/]|$)|(?:^|\s)--all(?:\s|$)'
+    exceptions:
+      - argv_matches: '(?:^|\s)--dry-run'
+    tests:
+      - name: a namespace delete needs approval
+        expect: approval_required
+        process: { pid: 610, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, delete, namespace, payments] }
+      - name: a volume claim delete needs approval
+        expect: approval_required
+        process: { pid: 611, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, delete, pvc, postgres-data] }
+      - name: a delete of every object of a kind needs approval
+        expect: approval_required
+        process: { pid: 612, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, delete, pods, --all] }
+      - name: a single pod in a named space stays quiet
+        expect: allow
+        process: { pid: 613, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, delete, pod, api-7f9, -n, my-ns] }
+
+  - id: cloud.kubectl.production-context
+    title: Change of a production cluster
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command writes to a cluster or a namespace with a production name. Real users see the result at once.
+    match:
+      action: exec
+      program: [kubectl, oc, helm, k3s, microk8s, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:apply|delete|patch|replace|scale|rollout|drain|cordon|uninstall|upgrade)(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?i)(?:^|\s)--context[= ]\S*(?:prod|production|live)'
+            - argv_matches: '(?i)(?:^|\s)(?:-n|--namespace)[= ]\S*(?:prod|production|live)'
+            - env:
+                KUBECONFIG: '(?i)(?:prod|production|live)'
+    exceptions:
+      - argv_matches: '(?:^|\s)--dry-run'
+      - argv_matches: '(?i)(?:^|\s)--context[= ]\S*(?:minikube|kind-|k3d-|docker-desktop|rancher-desktop|localhost)'
+    tests:
+      - name: an apply against a production context needs approval
+        expect: approval_required
+        process: { pid: 620, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, apply, -f, deploy.yaml, --context, prod-eu] }
+      - name: a production namespace needs approval
+        expect: approval_required
+        process: { pid: 621, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, scale, deploy/api, "--replicas=0", -n, production] }
+      - name: a production kubeconfig needs approval
+        expect: approval_required
+        process:
+          pid: 622
+          comm: kubectl
+          exe: /usr/bin/kubectl
+          argv: [kubectl, apply, -f, deploy.yaml]
+          env: { KUBECONFIG: /home/dev/.kube/prod.yaml }
+      - name: a local cluster is an exception and stays quiet
+        expect: allow
+        process: { pid: 623, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, apply, -f, deploy.yaml, --context, kind-prod] }
+      - name: a staging namespace stays quiet
+        expect: allow
+        process: { pid: 624, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, apply, -f, deploy.yaml, -n, staging] }
+
+  - id: cloud.kubectl.drain
+    title: Move of every pod away from a node
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command stops every pod on the node. The scheduler starts the pods again on other nodes, and `uncordon` opens the node again.
+    match:
+      action: exec
+      program: [kubectl, oc, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:kubectl|oc)(?:\s|$)'
+        - argv_matches: '(?:^|\s)drain(?:\s|$)'
+    tests:
+      - name: a drain is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 630, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, drain, node-3, --ignore-daemonsets] }
+      - name: a node list stays quiet
+        expect: allow
+        process: { pid: 631, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, get, nodes] }
+
+  - id: cloud.openshift.delete-project
+    title: Deletion of an OpenShift project
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes a project with every object and every volume in it.
+    match:
+      action: exec
+      program: [oc, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)oc(?:\s|$)'
+        - argv_matches: '(?:^|\s)delete\s+projects?(?:\s|$)'
+    tests:
+      - name: a project delete needs approval
+        expect: approval_required
+        process: { pid: 640, comm: oc, exe: /usr/bin/oc, argv: [oc, delete, project, payments] }
+      - name: a project list stays quiet
+        expect: allow
+        process: { pid: 641, comm: oc, exe: /usr/bin/oc, argv: [oc, get, projects] }
+
+  - id: cloud.terraform.destroy
+    title: Destroy of managed infrastructure
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes every resource of the state file, with the databases and the disks in it.
+    match:
+      action: exec
+      program: [terraform, tofu, opentofu, terragrunt, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:terraform|tofu|terragrunt)(?:\s|$)'
+        - argv_matches: '(?:^|\s)destroy(?:\s|$)'
+    tests:
+      - name: a destroy needs approval
+        expect: approval_required
+        process: { pid: 650, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, destroy] }
+      - name: a plan stays quiet
+        expect: allow
+        process: { pid: 651, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, plan] }
+
+  - id: cloud.terraform.auto-approve
+    title: Infrastructure change without a review of the plan
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The flag `-auto-approve` removes the last human check before the change of the infrastructure.
+    match:
+      action: exec
+      program: [terraform, tofu, opentofu, terragrunt, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:apply|destroy)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-auto-approve|--auto-approve|--terragrunt-non-interactive)(?:\s|$)'
+    tests:
+      - name: an apply without a review needs approval
+        expect: approval_required
+        process: { pid: 660, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, apply, -auto-approve] }
+      - name: an apply with a saved plan stays quiet
+        expect: allow
+        process: { pid: 661, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, apply, tfplan] }
+
+  - id: cloud.aws.storage-delete
+    title: Deletion of stored objects in AWS
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes a bucket or every object under a prefix. Without versions on the bucket, the objects are gone.
+    match:
+      action: exec
+      program: [aws, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)aws(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)s3\s+rb(?:\s|$)'
+            - all_of:
+                - argv_matches: '(?:^|\s)s3\s+rm(?:\s|$)'
+                - argv_matches: '(?:^|\s)--recursive(?:\s|$)'
+            - argv_matches: '(?:^|\s)s3api\s+delete-(?:bucket|objects)(?:\s|$)'
+    exceptions:
+      - argv_matches: '(?:^|\s)--dryrun(?:\s|$)'
+    tests:
+      - name: a bucket delete needs approval
+        expect: approval_required
+        process: { pid: 670, comm: aws, exe: /usr/bin/aws, argv: [aws, s3, rb, "s3://app-backups", --force] }
+      - name: a recursive object delete needs approval
+        expect: approval_required
+        process: { pid: 671, comm: aws, exe: /usr/bin/aws, argv: [aws, s3, rm, "s3://app-backups/2024/", --recursive] }
+      - name: a dry run is an exception and stays quiet
+        expect: allow
+        process: { pid: 672, comm: aws, exe: /usr/bin/aws, argv: [aws, s3, rm, "s3://app-backups/2024/", --recursive, --dryrun] }
+      - name: a single object delete stays quiet
+        expect: allow
+        process: { pid: 673, comm: aws, exe: /usr/bin/aws, argv: [aws, s3, rm, "s3://app-backups/2024/one.tar"] }
+
+  - id: cloud.aws.resource-delete
+    title: Deletion of an AWS resource or of an access right
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command stops a machine, removes a database or takes away an access right. The step can lock out the team or lose the data of a disk.
+    match:
+      action: exec
+      program: [aws, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)aws(?:\s|$)'
+        - any_of:
+            - all_of:
+                - argv_matches: '(?:^|\s)iam(?:\s|$)'
+                - argv_matches: '(?:^|\s)delete-[a-z-]+(?:\s|$)'
+            - argv_matches: '(?:^|\s)ec2\s+terminate-instances(?:\s|$)'
+            - argv_matches: '(?:^|\s)ec2\s+delete-(?:volume|snapshot)(?:\s|$)'
+            - argv_matches: '(?:^|\s)rds\s+delete-db-[a-z-]+(?:\s|$)'
+            - argv_matches: '(?:^|\s)cloudformation\s+delete-stack(?:\s|$)'
+    tests:
+      - name: a delete of an access key needs approval
+        expect: approval_required
+        process: { pid: 680, comm: aws, exe: /usr/bin/aws, argv: [aws, iam, delete-access-key, --access-key-id, AKIAEXAMPLE] }
+      - name: a stop of machines needs approval
+        expect: approval_required
+        process: { pid: 681, comm: aws, exe: /usr/bin/aws, argv: [aws, ec2, terminate-instances, --instance-ids, i-0abc] }
+      - name: a database delete needs approval
+        expect: approval_required
+        process: { pid: 682, comm: aws, exe: /usr/bin/aws, argv: [aws, rds, delete-db-instance, --db-instance-identifier, app] }
+      - name: a list of machines stays quiet
+        expect: allow
+        process: { pid: 683, comm: aws, exe: /usr/bin/aws, argv: [aws, ec2, describe-instances] }
+
+  - id: cloud.azure.group-delete
+    title: Deletion of an Azure resource group
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes every resource of the group in one step.
+    match:
+      action: exec
+      program: [az, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)az(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:group|vm|storage\s+account|sql\s+server)\s+delete(?:\s|$)'
+    tests:
+      - name: a resource group delete needs approval
+        expect: approval_required
+        process: { pid: 690, comm: az, exe: /usr/bin/az, argv: [az, group, delete, --name, app-prod, --yes] }
+      - name: a resource group list stays quiet
+        expect: allow
+        process: { pid: 691, comm: az, exe: /usr/bin/az, argv: [az, group, list] }
+
+  - id: cloud.gcloud.project-delete
+    title: Deletion of a Google Cloud project or instance
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes a whole project or a database instance with all of its data.
+    match:
+      action: exec
+      program: [gcloud, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)gcloud(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)projects\s+delete(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:sql|compute|container)\s+(?:instances|clusters|disks)\s+delete(?:\s|$)'
+    tests:
+      - name: a project delete needs approval
+        expect: approval_required
+        process: { pid: 700, comm: gcloud, exe: /usr/bin/gcloud, argv: [gcloud, projects, delete, app-prod] }
+      - name: a database instance delete needs approval
+        expect: approval_required
+        process: { pid: 701, comm: gcloud, exe: /usr/bin/gcloud, argv: [gcloud, sql, instances, delete, app-db] }
+      - name: a project list stays quiet
+        expect: allow
+        process: { pid: 702, comm: gcloud, exe: /usr/bin/gcloud, argv: [gcloud, projects, list] }
+
+  - id: cloud.container.volume-destroy
+    title: Deletion of a container volume
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: A container volume holds the database of the development machine. The data has no copy in the image and no copy in Git.
+    match:
+      action: exec
+      program: [docker, podman, nerdctl, docker-compose, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:docker|podman|nerdctl|docker-compose)(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)volume\s+(?:rm|remove|prune)(?:\s|$)'
+            - all_of:
+                - argv_matches: '(?:^|\s)system\s+prune(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:--volumes|--all\s+--volumes)(?:\s|$)'
+            - all_of:
+                - argv_matches: '(?:^|\s)(?:compose\s+)?down(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:-v|--volumes)(?:\s|$)'
+    tests:
+      - name: a volume delete needs approval
+        expect: approval_required
+        process: { pid: 710, comm: docker, exe: /usr/bin/docker, argv: [docker, volume, rm, app_pgdata] }
+      - name: a compose down with volumes needs approval
+        expect: approval_required
+        process: { pid: 711, comm: docker, exe: /usr/bin/docker, argv: [docker, compose, down, -v] }
+      - name: the podman form also needs approval
+        expect: approval_required
+        process: { pid: 712, comm: podman, exe: /usr/bin/podman, argv: [podman, volume, prune, -f] }
+      - name: a compose down without volumes stays quiet
+        expect: allow
+        process: { pid: 713, comm: docker, exe: /usr/bin/docker, argv: [docker, compose, down] }
+      - name: a volume list stays quiet
+        expect: allow
+        process: { pid: 714, comm: docker, exe: /usr/bin/docker, argv: [docker, volume, ls] }
+
+  - id: cloud.container.force-remove
+    title: Forced removal of containers or of images
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command stops and removes containers or images. A new build or a new start can bring them back.
+    match:
+      action: exec
+      program: [docker, podman, nerdctl, docker-compose, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:docker|podman|nerdctl|docker-compose)(?:\s|$)'
+        - any_of:
+            - all_of:
+                - argv_matches: '(?:^|\s)(?:container\s+)?rm(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:-f|--force)(?:\s|$)'
+            - all_of:
+                - argv_matches: '(?:^|\s)system\s+prune(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:-a|--all)(?:\s|$)'
+    tests:
+      - name: a forced container removal is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 720, comm: docker, exe: /usr/bin/docker, argv: [docker, rm, -f, api] }
+      - name: a full image prune is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 721, comm: docker, exe: /usr/bin/docker, argv: [docker, system, prune, -a] }
+      - name: a container list stays quiet
+        expect: allow
+        process: { pid: 722, comm: docker, exe: /usr/bin/docker, argv: [docker, ps, -a] }
+
+  - id: cloud.helm.uninstall
+    title: Removal of a Helm release
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command removes every object of the release. A new `helm install` with the same values can build them again.
+    match:
+      action: exec
+      program: [helm, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)helm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:uninstall|delete)(?:\s|$)'
+    exceptions:
+      - argv_matches: '(?:^|\s)--dry-run'
+    tests:
+      - name: a release removal is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 730, comm: helm, exe: /usr/bin/helm, argv: [helm, uninstall, api] }
+      - name: a release list stays quiet
+        expect: allow
+        process: { pid: 731, comm: helm, exe: /usr/bin/helm, argv: [helm, list] }

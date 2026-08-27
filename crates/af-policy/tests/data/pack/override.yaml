@@ -1,0 +1,15 @@
+version: 1
+name: local.override
+description: A rule file that switches a built-in rule off, for the loader test.
+
+rules:
+  - id: filesystem.shred
+    title: Overwrite of a file so that it cannot be recovered
+    category: filesystem
+    risk: info
+    decision: allow
+    reason: This team uses `shred` in its cleanup scripts.
+    enabled: false
+    match:
+      action: exec
+      program: [shred]

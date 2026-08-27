@@ -1,0 +1,112 @@
+version: 1
+name: builtin.allowlist
+description: >
+  Known safe forms of commands that look dangerous. These rules only write a
+  note at the level `info`. They cannot make a strong decision weak, because
+  the verdict takes the strongest decision of all matches. Real suppression
+  belongs in the `exceptions` list of the rule that would fire.
+
+rules:
+  - id: allowlist.filesystem.build-output
+    title: Deletion of build output in the project
+    category: allowlist
+    risk: info
+    decision: allow
+    reason: The command deletes a build directory of the project. A new build makes the same files again.
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, sudo, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:\./)?(?:target|node_modules|dist|build|out|\.venv|venv|__pycache__|\.next|\.nuxt|\.cache|coverage)/?(?:\s|$)'
+    tests:
+      - name: a delete of the target directory is a known safe step
+        expect: allow
+        expect_match: true
+        process: { pid: 1000, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./target], cwd: /home/dev/app }
+      - name: a delete of the module directory is a known safe step
+        expect: allow
+        expect_match: true
+        process: { pid: 1001, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, node_modules], cwd: /home/dev/app }
+      - name: a delete of the source directory is not a build output
+        expect: allow
+        process: { pid: 1002, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./src], cwd: /home/dev/app }
+
+  - id: allowlist.filesystem.temp-cleanup
+    title: Deletion inside a temporary directory
+    category: allowlist
+    risk: info
+    decision: allow
+    reason: The command deletes a file or a directory under a temporary directory. The operating system deletes the same files at the next start.
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, sudo, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:/tmp|/var/tmp|/dev/shm)/\S+'
+    tests:
+      - name: a delete of a temporary build cache is a known safe step
+        expect: allow
+        expect_match: true
+        process: { pid: 1010, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /tmp/build-cache] }
+      - name: a delete of the whole temporary directory is not a known safe step
+        expect: allow
+        process: { pid: 1011, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /tmp] }
+
+  - id: allowlist.git.dry-run
+    title: Git command that only shows what it would do
+    category: allowlist
+    risk: info
+    decision: allow
+    reason: The flag `--dry-run` stops Git before it writes. The command only shows a report.
+    match:
+      action: exec
+      program: [git, hub]
+      argv_matches: '(?:^|\s)--dry-run(?:\s|$)'
+    tests:
+      - name: a dry run of a force push is a known safe step
+        expect: allow
+        expect_match: true
+        process: { pid: 1020, comm: git, exe: /usr/bin/git, argv: [git, push, --force, --dry-run, origin, main] }
+      - name: a real push is not a dry run
+        expect: allow
+        process: { pid: 1021, comm: git, exe: /usr/bin/git, argv: [git, push, origin, feature/x] }
+
+  - id: allowlist.cloud.local-cluster
+    title: Kubernetes command against a local cluster
+    category: allowlist
+    risk: info
+    decision: allow
+    reason: The context points to a cluster on this machine. A wrong step there reaches no user.
+    match:
+      action: exec
+      program: [kubectl, oc, helm, k3s, microk8s]
+      argv_matches: '(?i)(?:^|\s)--context[= ]\S*(?:minikube|kind-|k3d-|docker-desktop|rancher-desktop|localhost)'
+    tests:
+      - name: a local cluster context is a known safe step
+        expect: allow
+        expect_match: true
+        process: { pid: 1030, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, apply, -f, deploy.yaml, --context, kind-prod] }
+      - name: a remote cluster context is not a local cluster
+        expect: allow
+        process: { pid: 1031, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, apply, -f, deploy.yaml, --context, staging-eu] }
+
+  - id: allowlist.database.local-host
+    title: Database client with an explicit local server
+    category: allowlist
+    risk: info
+    decision: allow
+    reason: The command line names a server on this machine, so the work stays on the development database.
+    match:
+      action: exec
+      program: [psql, mysql, mariadb, mysqlsh, mongosh, mongo, redis-cli, valkey-cli, clickhouse-client]
+      argv_matches: '(?i)(?:^|\s)(?:-h|--host)[= ](?:localhost|127\.0\.0\.1|::1)(?:\s|$)'
+    tests:
+      - name: an explicit local server is a known safe step
+        expect: allow
+        expect_match: true
+        process: { pid: 1040, comm: psql, exe: /usr/bin/psql, argv: [psql, -h, localhost, -c, "SELECT 1"] }
+      - name: a command without a server name stays quiet
+        expect: allow
+        process: { pid: 1041, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "SELECT 1"] }

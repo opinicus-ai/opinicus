@@ -1,0 +1,19 @@
+# Build output of the Cargo workspace.
+/target
+
+# Recorded traces. A trace can hold command lines of the user.
+*.jsonl
+
+# Working directory of the demonstration and of the end-to-end test.
+/tmp
+
+# Local agent workspace.
+.lavish/
+
+# Editor and desktop files.
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+.DS_Store

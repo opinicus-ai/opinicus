@@ -1,0 +1,12 @@
+[package]
+name = "af-approval"
+description = "Interactive approval handling for the Agent Firewall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+af-core = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }

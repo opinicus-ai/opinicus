@@ -1,0 +1,346 @@
+version: 1
+name: builtin.filesystem
+description: Deletion of data outside the work tree, and writes to credential files and system files.
+
+rules:
+  - id: filesystem.delete.root
+    title: Recursive deletion of the whole file system
+    category: filesystem
+    risk: blocked
+    decision: deny
+    reason: The command deletes the root directory of the machine. No development task needs this.
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)rm(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:/|/\*|/\.\*)(?:\s|$)'
+        - argv_matches: '(?:^|\s)--no-preserve-root(?:\s|$)'
+    tests:
+      - name: a recursive delete of the root directory is denied
+        expect: deny
+        process: { pid: 100, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /] }
+      - name: the same command inside a shell is denied
+        expect: deny
+        process: { pid: 101, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf /"] }
+        ancestry: [{ comm: claude }]
+      - name: the no-preserve-root flag is denied
+        expect: deny
+        process: { pid: 102, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, --no-preserve-root, /home/dev] }
+      - name: a delete of a build directory stays quiet
+        expect: allow
+        process: { pid: 103, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./target], cwd: /home/dev/app }
+      - name: a delete under a temporary directory stays quiet
+        expect: allow
+        process: { pid: 104, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /tmp/build-cache] }
+
+  - id: filesystem.delete.home
+    title: Recursive deletion of the home directory
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes the home directory of the user, with every key, every setting and every project in it.
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:~|\$HOME|\$\{HOME\}|/home/[^/\s]+|/Users/[^/\s]+|/root)/?(?:\s|$)'
+    tests:
+      - name: a recursive delete of the home directory needs approval
+        expect: approval_required
+        process: { pid: 110, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "~"] }
+      - name: the expanded home path also needs approval
+        expect: approval_required
+        process: { pid: 111, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /home/dev] }
+      - name: a delete inside the home directory stays quiet
+        expect: allow
+        process: { pid: 112, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "~/app/node_modules"] }
+
+  - id: filesystem.delete.system-path
+    title: Recursive deletion of a system directory
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes a directory of the operating system. The machine can stop working.
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)/(?:etc|usr|bin|sbin|lib|lib64|boot|opt|srv|var|dev|proc|sys|data)(?:/\S*)?(?:\s|$)'
+    exceptions:
+      - argv_matches: '(?:^|\s)/(?:var/tmp|var/cache|dev/shm)/\S+'
+    tests:
+      - name: a recursive delete of a system directory needs approval
+        expect: approval_required
+        process: { pid: 120, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /etc] }
+      - name: a recursive delete of application data needs approval
+        expect: approval_required
+        process: { pid: 121, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /var/lib/postgresql] }
+      - name: a delete under a temporary directory is an exception and stays quiet
+        expect: allow
+        process: { pid: 122, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /var/tmp/build-cache] }
+      - name: a delete inside the project stays quiet
+        expect: allow
+        process: { pid: 123, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./target], cwd: /home/dev/app }
+
+  - id: filesystem.delete.parent-directory
+    title: Recursive deletion of the directory above the work tree
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes the directory that holds the project, and therefore also every other project beside it.
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)\.\./?(?:\s|$)'
+    tests:
+      - name: a recursive delete of the parent directory needs approval
+        expect: approval_required
+        process: { pid: 130, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ..], cwd: /home/dev/app }
+      - name: a delete of a directory beside the project stays quiet
+        expect: allow
+        process: { pid: 131, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ../old-build], cwd: /home/dev/app }
+
+  - id: filesystem.delete.git-directory
+    title: Deletion of the Git directory
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes the .git directory. All local history, all branches and all stashes are lost.
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)\S*\.git/?(?:\s|$)'
+    tests:
+      - name: a delete of the git directory needs approval
+        expect: approval_required
+        process: { pid: 140, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, .git], cwd: /home/dev/app }
+      - name: a delete of the ignore file stays quiet
+        expect: allow
+        process: { pid: 141, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, .gitignore], cwd: /home/dev/app }
+
+  - id: filesystem.credentials.write
+    title: Write to a credential file
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The action writes to a file that holds a key or a token. A change here can give away access or lock the user out.
+    references: ["https://owasp.org/www-community/vulnerabilities/Insecure_Storage_of_Sensitive_Information"]
+    match:
+      action: file_open
+      write: true
+      any_of:
+        - path_glob: ["**/.ssh/*", "**/.ssh/**/*"]
+        - path_matches: '(?:^|/)\.aws/credentials$'
+        - path_matches: '(?:^|/)\.config/gh/hosts\.yml$'
+        - path_matches: '(?:^|/)\.kube/config$'
+        - path_matches: '(?:^|/)\.docker/config\.json$'
+        - path_matches: '(?:^|/)\.(?:netrc|npmrc|pypirc|git-credentials)$'
+    tests:
+      - name: a write to an ssh key needs approval
+        expect: approval_required
+        process: { pid: 150, comm: bash }
+        file_open: { path: /home/dev/.ssh/id_ed25519, write: true }
+      - name: a write to the aws credentials needs approval
+        expect: approval_required
+        process: { pid: 151, comm: bash }
+        file_open: { path: /home/dev/.aws/credentials, write: true }
+      - name: a write to the github host file needs approval
+        expect: approval_required
+        process: { pid: 152, comm: gh }
+        file_open: { path: /home/dev/.config/gh/hosts.yml, write: true }
+      - name: a read of an ssh file stays quiet here
+        expect: allow
+        process: { pid: 153, comm: ssh }
+        file_open: { path: /home/dev/.ssh/config, write: false }
+      - name: a write to a source file stays quiet
+        expect: allow
+        process: { pid: 154, comm: cargo }
+        file_open: { path: /home/dev/app/src/main.rs, write: true }
+
+  - id: filesystem.sensitive.exec-write
+    title: Command that changes a credential file or a system file
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes or rewrites a credential file or a file of the operating system.
+    match:
+      action: exec
+      program: [rm, mv, tee, sed, dd, chmod, chown, truncate, install, ln, shred, sh, bash, zsh, sudo]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:rm|mv|tee|sed|dd|chmod|chown|truncate|install|ln|shred)(?:\s|$)'
+        - argv_matches: '(?:^|\s)\S*(?:/etc/|\.ssh/|\.aws/credentials|\.config/gh/hosts\.yml|\.kube/config|\.git-credentials|\.netrc)'
+    tests:
+      - name: a rewrite of a system file needs approval
+        expect: approval_required
+        process: { pid: 160, comm: tee, exe: /usr/bin/tee, argv: [tee, /etc/hosts] }
+      - name: a delete of an ssh key needs approval
+        expect: approval_required
+        process: { pid: 161, comm: rm, exe: /usr/bin/rm, argv: [rm, -f, /home/dev/.ssh/id_ed25519] }
+      - name: reading a system file stays quiet
+        expect: allow
+        process: { pid: 162, comm: cat, exe: /usr/bin/cat, argv: [cat, /etc/os-release] }
+
+  - id: filesystem.etc.write
+    title: Write to the system configuration
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The action writes to /etc. A wrong change there can stop the machine from starting.
+    match:
+      action: file_open
+      write: true
+      path_prefix: ["/etc/"]
+    tests:
+      - name: a write to the system configuration needs approval
+        expect: approval_required
+        process: { pid: 170, comm: sed }
+        file_open: { path: /etc/passwd, write: true }
+      - name: a read of the system configuration stays quiet
+        expect: allow
+        process: { pid: 171, comm: cat }
+        file_open: { path: /etc/passwd, write: false }
+
+  - id: filesystem.credentials.read
+    title: Read of a private key or a credential file
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The action reads a private key or a stored credential. This is normal for a login, and it is also the first step of a data theft.
+    match:
+      action: file_open
+      write: false
+      any_of:
+        - path_matches: '(?:^|/)\.ssh/id_[A-Za-z0-9_]+$'
+        - path_matches: '(?:^|/)\.aws/credentials$'
+        - path_matches: '(?:^|/)\.(?:netrc|git-credentials)$'
+    tests:
+      - name: a read of a private key is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 180, comm: cat }
+        file_open: { path: /home/dev/.ssh/id_rsa, write: false }
+      - name: a read of the public key stays quiet
+        expect: allow
+        process: { pid: 181, comm: cat }
+        file_open: { path: /home/dev/.ssh/id_rsa.pub, write: false }
+
+  - id: filesystem.dotenv.write
+    title: Write to an environment file
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The action rewrites a .env file. Such a file often holds the only copy of a local secret.
+    match:
+      action: file_open
+      write: true
+      path_matches: '(?:^|/)\.env(?:\.[A-Za-z0-9_-]+)?$'
+    tests:
+      - name: a write to an environment file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 190, comm: bash }
+        file_open: { path: /home/dev/app/.env, write: true }
+      - name: a write to a direnv file stays quiet
+        expect: allow
+        process: { pid: 191, comm: bash }
+        file_open: { path: /home/dev/app/.envrc, write: true }
+
+  - id: filesystem.perm.world-writable
+    title: Permission change that opens a file to everybody
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The command gives every user of the machine the right to read and to change the file.
+    match:
+      action: exec
+      program: [chmod, sudo, sh, bash, zsh]
+      argv_matches: '(?:^|\s)chmod(?:\s+-[a-zA-Z-]+)*\s+(?:0?777|0?666|a\+rwx|a=rwx)(?:\s|$)'
+    tests:
+      - name: a world writable permission is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 200, comm: chmod, exe: /usr/bin/chmod, argv: [chmod, "777", deploy.sh] }
+      - name: a recursive world writable permission is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 201, comm: chmod, exe: /usr/bin/chmod, argv: [chmod, -R, "777", /var/www] }
+      - name: a normal permission stays quiet
+        expect: allow
+        process: { pid: 202, comm: chmod, exe: /usr/bin/chmod, argv: [chmod, "755", deploy.sh] }
+
+  - id: filesystem.device.destroy
+    title: Write of raw data to a disk
+    category: filesystem
+    risk: blocked
+    decision: deny
+    reason: The command writes over a whole disk. Every file system on that disk is lost and no undo exists.
+    match:
+      action: exec
+      program: [dd, mkfs, mkfs.ext2, mkfs.ext3, mkfs.ext4, mkfs.xfs, mkfs.btrfs, mkfs.vfat, mkfs.fat, mkfs.ntfs, sudo, sh, bash, zsh]
+      any_of:
+        - argv_matches: '(?:^|\s)of=/dev/(?:sd[a-z]|nvme\d+n\d+|vd[a-z]|hd[a-z]|mmcblk\d+|xvd[a-z]|disk\d+)'
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:\S*/)?mkfs(?:\.[a-z0-9]+)?(?:\s|$)'
+            - argv_matches: '(?:^|\s)/dev/\S+'
+    tests:
+      - name: raw data written to a disk is denied
+        expect: deny
+        process: { pid: 210, comm: dd, exe: /usr/bin/dd, argv: [dd, if=/dev/zero, of=/dev/sda, bs=1M] }
+      - name: a new file system on a disk is denied
+        expect: deny
+        process: { pid: 211, comm: mkfs.ext4, exe: /usr/sbin/mkfs.ext4, argv: [mkfs.ext4, /dev/sdb1] }
+      - name: a disk image inside the project stays quiet
+        expect: allow
+        process: { pid: 212, comm: dd, exe: /usr/bin/dd, argv: [dd, if=/dev/urandom, of=./test.img, bs=1M, count=10] }
+
+  - id: filesystem.device.truncate
+    title: Truncate or shred of a device file
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command sets the length of a device file to zero or writes over it. The data of the device is lost.
+    match:
+      action: exec
+      program: [truncate, shred, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:truncate|shred)(?:\s|$)'
+        - argv_matches: '(?:^|\s)/dev/(?:sd[a-z]|nvme\d+n\d+|vd[a-z]|hd[a-z]|mmcblk\d+|xvd[a-z]|disk\d+)'
+    tests:
+      - name: a truncate of a disk needs approval
+        expect: approval_required
+        process: { pid: 220, comm: truncate, exe: /usr/bin/truncate, argv: [truncate, -s, "0", /dev/sda] }
+      - name: a truncate of a log file stays quiet
+        expect: allow
+        process: { pid: 221, comm: truncate, exe: /usr/bin/truncate, argv: [truncate, -s, "0", app.log] }
+
+  - id: filesystem.shred
+    title: Overwrite of a file so that it cannot be recovered
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The command writes over a file so that no tool can recover it. This is a normal cleanup step and also a way to remove evidence.
+    match:
+      action: exec
+      program: [shred, sudo, sh, bash, zsh]
+      argv_matches: '(?:^|\s)shred(?:\s|$)'
+    tests:
+      - name: an overwrite of a file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 230, comm: shred, exe: /usr/bin/shred, argv: [shred, -u, secrets.txt] }
+      - name: a normal delete stays quiet
+        expect: allow
+        process: { pid: 231, comm: rm, exe: /usr/bin/rm, argv: [rm, secrets.txt] }

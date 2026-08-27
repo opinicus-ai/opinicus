@@ -1,0 +1,16 @@
+[package]
+name = "af-monitor"
+description = "Linux user-space process-tree monitor built on ptrace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+af-core = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

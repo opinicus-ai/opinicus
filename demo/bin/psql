@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+#
+# Fake PostgreSQL client for the Agent Firewall demonstration.
+#
+# This program never connects to a database. It never sends a statement to a
+# server. It only prints what it received. No real database can change when
+# you run this demonstration.
+#
+# The marker file is the proof of the demonstration.
+#
+#   * The demonstration scripts put this directory in front of PATH.
+#   * A script that calls "psql" therefore starts this program.
+#   * This program prints the statement that it received.
+#   * At the point where a real client sends the statement to the server,
+#     this program appends one line to the marker file:
+#         EXECUTED: <statement>
+#   * The marker file names the environment variable AFW_DEMO_MARKER. The
+#     default is /tmp/afw-demo-marker.
+#
+# Read the marker file after a demonstration run:
+#
+#   * The firewall stopped the action when the file holds NO line for the
+#     dangerous statement. The program never started, so it printed nothing
+#     and it wrote nothing.
+#   * The user allowed the action when the file holds the line. This shows
+#     that the user stays in control.
+#
+# The firewall stops the process at the exec boundary. It stops this program
+# before its first instruction. An empty marker line is therefore a true
+# proof, and not a decision of this program. This program has no knowledge
+# of the firewall.
+#
+# Supported options: -c, --command, -f, --file, -h, -U, -d, -p, -V,
+# --version. The program also reads statements from standard input.
+
+set -euo pipefail
+
+MARKER_FILE="${AFW_DEMO_MARKER:-/tmp/afw-demo-marker}"
+FAKE_VERSION="psql (PostgreSQL) 16.0 (agent-firewall demo client)"
+
+host="${PGHOST:-localhost}"
+user="${PGUSER:-$(id -un)}"
+database="${PGDATABASE:-postgres}"
+port="${PGPORT:-5432}"
+
+statements=()
+read_stdin=1
+
+# Removes line breaks and repeated spaces, so that one statement is one line.
+normalize() {
+    printf '%s' "$1" | tr '\n\t\r' '   ' | sed -e 's/  */ /g' -e 's/^ //' -e 's/ *$//'
+}
+
+# Splits text into statements on the semicolon and stores each statement.
+# The comment removal is simple. It does not know about quoted text.
+add_statements() {
+    local text="$1"
+    local rest part
+    rest="$(printf '%s\n' "$text" | sed -e 's/--.*$//')"
+    while [ -n "$rest" ]; do
+        if [[ "$rest" == *";"* ]]; then
+            part="${rest%%;*}"
+            rest="${rest#*;}"
+        else
+            part="$rest"
+            rest=""
+        fi
+        part="$(normalize "$part")"
+        if [ -n "$part" ]; then
+            statements+=("$part")
+        fi
+    done
+}
+
+add_file() {
+    local path="$1"
+    if [ ! -r "$path" ]; then
+        printf 'psql: error: could not read file "%s"\n' "$path" >&2
+        exit 1
+    fi
+    add_statements "$(cat -- "$path")"
+    read_stdin=0
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -c | --command)
+            add_statements "${2-}"
+            read_stdin=0
+            shift 2
+            ;;
+        --command=*)
+            add_statements "${1#--command=}"
+            read_stdin=0
+            shift
+            ;;
+        -c*)
+            add_statements "${1#-c}"
+            read_stdin=0
+            shift
+            ;;
+        -f | --file)
+            add_file "${2-}"
+            shift 2
+            ;;
+        --file=*)
+            add_file "${1#--file=}"
+            shift
+            ;;
+        -f*)
+            add_file "${1#-f}"
+            shift
+            ;;
+        -h | --host)
+            host="${2-}"
+            shift 2
+            ;;
+        --host=*)
+            host="${1#--host=}"
+            shift
+            ;;
+        -h*)
+            host="${1#-h}"
+            shift
+            ;;
+        -U | --username)
+            user="${2-}"
+            shift 2
+            ;;
+        --username=*)
+            user="${1#--username=}"
+            shift
+            ;;
+        -U*)
+            user="${1#-U}"
+            shift
+            ;;
+        -d | --dbname)
+            database="${2-}"
+            shift 2
+            ;;
+        --dbname=*)
+            database="${1#--dbname=}"
+            shift
+            ;;
+        -d*)
+            database="${1#-d}"
+            shift
+            ;;
+        -p | --port)
+            port="${2-}"
+            shift 2
+            ;;
+        --port=*)
+            port="${1#--port=}"
+            shift
+            ;;
+        -V | --version)
+            printf '%s\n' "$FAKE_VERSION"
+            exit 0
+            ;;
+        --help)
+            printf '%s\n' "$FAKE_VERSION"
+            printf 'This is a demonstration client. It never connects to a server.\n'
+            exit 0
+            ;;
+        --)
+            shift
+            ;;
+        -*)
+            printf 'psql: demo client ignores option "%s"\n' "$1" >&2
+            shift
+            ;;
+        *)
+            database="$1"
+            shift
+            ;;
+    esac
+done
+
+# A real client reads standard input when it gets no -c option and no file.
+if [ "$read_stdin" -eq 1 ] && [ ! -t 0 ]; then
+    add_statements "$(cat)"
+fi
+
+printf '%s\n' "$FAKE_VERSION"
+printf 'target: host=%s port=%s user=%s dbname=%s\n' "$host" "$port" "$user" "$database"
+printf 'note: this client prints statements. It sends nothing to a server.\n'
+
+if [ "${#statements[@]}" -eq 0 ]; then
+    printf 'no statement received\n'
+    exit 0
+fi
+
+marker_dir="$(dirname -- "$MARKER_FILE")"
+mkdir -p -- "$marker_dir"
+
+for statement in "${statements[@]}"; do
+    printf 'statement: %s\n' "$statement"
+    # A real client sends the statement to the server here. This line is the
+    # proof of the demonstration. The firewall must stop the program before
+    # this point.
+    printf 'EXECUTED: %s\n' "$statement" >>"$MARKER_FILE"
+    printf 'result: accepted by the demo client (no server, no data changed)\n'
+done
+
+exit 0

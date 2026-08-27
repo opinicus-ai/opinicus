@@ -1,0 +1,19 @@
+version: 1
+name: local.extra
+description: A rule file of a team, for the loader test.
+
+rules:
+  - id: local.extra.marker
+    title: Start of the internal deployment tool
+    category: local
+    risk: suspicious
+    decision: allow
+    reason: The internal deployment tool changes shared systems.
+    match:
+      action: exec
+      program: [deployctl]
+    tests:
+      - name: the deployment tool is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 10, comm: deployctl, exe: /opt/bin/deployctl, argv: [deployctl, release] }

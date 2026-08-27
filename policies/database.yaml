@@ -1,0 +1,316 @@
+version: 1
+name: builtin.database
+description: Database commands that delete data, change a schema or touch a production server.
+
+rules:
+  - id: database.destructive.drop-database
+    title: Drop of a whole database
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes a whole database and all of its data. Only a backup can bring the data back.
+    references: ["https://www.postgresql.org/docs/current/sql-dropdatabase.html"]
+    match:
+      any_of:
+        - action: exec
+          program: [psql, mysql, mariadb, mysqlsh, sqlite3, cockroach, clickhouse-client, mongosh, mongo, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          argv_matches: '(?i)\bdrop\s+database\b'
+        - action: input
+          input_matches: '(?i)\bdrop\s+database\b'
+    tests:
+      - name: a psql drop needs approval
+        expect: approval_required
+        process:
+          pid: 400
+          comm: psql
+          exe: /usr/bin/psql
+          argv: [psql, -c, "DROP DATABASE customer_prod"]
+          cwd: /home/dev/app
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a drop in the standard input needs approval
+        expect: approval_required
+        process: { pid: 401, comm: psql, exe: /usr/bin/psql, argv: [psql, -q] }
+        input: { source: stdin, data: "drop database customer_prod;" }
+      - name: a select stays quiet
+        expect: allow
+        process: { pid: 402, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "SELECT 1"] }
+
+  - id: database.destructive.drop-object
+    title: Drop of a table or of a schema
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes a table or a schema with all of its rows. Only a backup can bring the rows back.
+    match:
+      any_of:
+        - action: exec
+          program: [psql, mysql, mariadb, mysqlsh, sqlite3, cockroach, clickhouse-client, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          argv_matches: '(?i)\bdrop\s+(?:table|schema|view|materialized\s+view)\b'
+        - action: input
+          input_matches: '(?i)\bdrop\s+(?:table|schema|view|materialized\s+view)\b'
+    exceptions:
+      - argv_matches: '(?i)\bdrop\s+\w+\s+(?:if\s+exists\s+)?(?:temp|tmp|test|scratch)[\w."]*'
+      - input_matches: '(?i)\bdrop\s+\w+\s+(?:if\s+exists\s+)?(?:temp|tmp|test|scratch)[\w."]*'
+    tests:
+      - name: a table drop needs approval
+        expect: approval_required
+        process: { pid: 410, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "DROP TABLE orders"] }
+      - name: a schema drop needs approval
+        expect: approval_required
+        process: { pid: 411, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "DROP SCHEMA public CASCADE"] }
+      - name: a scratch table is an exception and stays quiet
+        expect: allow
+        process: { pid: 412, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "DROP TABLE IF EXISTS tmp_import"] }
+      - name: a create stays quiet
+        expect: allow
+        process: { pid: 413, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "CREATE TABLE orders (id int)"] }
+
+  - id: database.destructive.truncate
+    title: Truncate of a table
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes every row of the table in one step and writes no undo information.
+    match:
+      any_of:
+        - action: exec
+          program: [psql, mysql, mariadb, mysqlsh, sqlite3, cockroach, clickhouse-client, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          argv_matches: '(?i)\btruncate\s+(?:table\s+)?[\w."]'
+        - action: input
+          input_matches: '(?i)\btruncate\s+(?:table\s+)?[\w."]'
+    exceptions:
+      - argv_matches: '(?i)\btruncate\s+(?:table\s+)?(?:temp|tmp|test|scratch)[\w."]*'
+      - input_matches: '(?i)\btruncate\s+(?:table\s+)?(?:temp|tmp|test|scratch)[\w."]*'
+    tests:
+      - name: a truncate needs approval
+        expect: approval_required
+        process: { pid: 420, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "TRUNCATE TABLE events"] }
+      - name: a scratch table is an exception and stays quiet
+        expect: allow
+        process: { pid: 421, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "TRUNCATE tmp_events"] }
+      - name: a count stays quiet
+        expect: allow
+        process: { pid: 422, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "SELECT count(*) FROM events"] }
+
+  - id: database.destructive.delete-without-where
+    title: Delete over a whole table
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The statement has no `where` part, so it deletes every row of the table.
+    match:
+      any_of:
+        - action: exec
+          program: [psql, mysql, mariadb, mysqlsh, sqlite3, cockroach, clickhouse-client, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          argv_matches: '(?i)\bdelete\s+from\s+[\w."]'
+          argv_not_matches: '(?i)\bwhere\b'
+        - action: input
+          input_matches: '(?i)\bdelete\s+from\s+[\w."]'
+          not:
+            input_matches: '(?i)\bwhere\b'
+    tests:
+      - name: a delete of every row needs approval
+        expect: approval_required
+        process: { pid: 430, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "DELETE FROM users"] }
+      - name: a delete in the standard input needs approval
+        expect: approval_required
+        process: { pid: 431, comm: psql, exe: /usr/bin/psql, argv: [psql] }
+        input: { source: stdin, data: "delete from users;" }
+      - name: a delete with a condition stays quiet
+        expect: allow
+        process: { pid: 432, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "DELETE FROM users WHERE id = 7"] }
+      - name: a conditional delete in the standard input stays quiet
+        expect: allow
+        process: { pid: 433, comm: psql, exe: /usr/bin/psql, argv: [psql] }
+        input: { source: stdin, data: "delete from users where id = 7;" }
+
+  - id: database.destructive.update-without-where
+    title: Update over a whole table
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The statement has no `where` part, so it changes every row of the table. The old values are gone.
+    match:
+      any_of:
+        - action: exec
+          program: [psql, mysql, mariadb, mysqlsh, sqlite3, cockroach, clickhouse-client, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          argv_matches: '(?i)\bupdate\s+[\w."]+\s+set\b'
+          argv_not_matches: '(?i)\bwhere\b'
+        - action: input
+          input_matches: '(?i)\bupdate\s+[\w."]+\s+set\b'
+          not:
+            input_matches: '(?i)\bwhere\b'
+    tests:
+      - name: an update of every row needs approval
+        expect: approval_required
+        process: { pid: 440, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "UPDATE users SET plan = 'free'"] }
+      - name: an update with a condition stays quiet
+        expect: allow
+        process: { pid: 441, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "UPDATE users SET plan = 'free' WHERE id = 7"] }
+
+  - id: database.schema.drop-column
+    title: Drop of a column
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes a column with the values of every row. Only a backup can bring the values back.
+    match:
+      any_of:
+        - action: exec
+          program: [psql, mysql, mariadb, mysqlsh, sqlite3, cockroach, clickhouse-client, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          all_of:
+            - argv_matches: '(?i)\balter\s+table\b'
+            - argv_matches: '(?i)\bdrop\s+column\b'
+        - action: input
+          all_of:
+            - input_matches: '(?i)\balter\s+table\b'
+            - input_matches: '(?i)\bdrop\s+column\b'
+    tests:
+      - name: a column drop needs approval
+        expect: approval_required
+        process: { pid: 450, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "ALTER TABLE users DROP COLUMN legacy_id"] }
+      - name: a column add stays quiet
+        expect: allow
+        process: { pid: 451, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "ALTER TABLE users ADD COLUMN plan text"] }
+
+  - id: database.grant.all
+    title: Grant of all rights
+    category: database
+    risk: suspicious
+    decision: allow
+    reason: The statement gives full rights on a database object. A `revoke` can take the rights back.
+    match:
+      any_of:
+        - action: exec
+          program: [psql, mysql, mariadb, mysqlsh, cockroach, clickhouse-client, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          argv_matches: '(?i)\bgrant\s+all\b'
+        - action: input
+          input_matches: '(?i)\bgrant\s+all\b'
+    tests:
+      - name: a grant of all rights is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 460, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "GRANT ALL PRIVILEGES ON DATABASE app TO reader"] }
+      - name: a narrow grant stays quiet
+        expect: allow
+        process: { pid: 461, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "GRANT SELECT ON users TO reader"] }
+
+  - id: database.redis.flush
+    title: Flush of a Redis database
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes every key of the server. Redis writes no undo information, so the data is gone.
+    match:
+      any_of:
+        - action: exec
+          program: [redis-cli, valkey-cli, keydb-cli, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          argv_matches: '(?i)(?:^|\s)flush(?:all|db)\b'
+        - action: input
+          input_matches: '(?i)(?:^|\s)flush(?:all|db)\b'
+    exceptions:
+      - not:
+          argv_matches: '(?i)(?:^|\s)(?:-h|--host|-u|--uri)(?:[= ])'
+      - argv_matches: '(?i)(?:^|\s)(?:-h|--host)[= ](?:localhost|127\.0\.0\.1|::1)(?:\s|$)'
+    tests:
+      - name: a flush of a remote server needs approval
+        expect: approval_required
+        process: { pid: 470, comm: redis-cli, exe: /usr/bin/redis-cli, argv: [redis-cli, -h, cache.internal, FLUSHALL] }
+      - name: a flush of the local server stays quiet
+        expect: allow
+        process: { pid: 471, comm: redis-cli, exe: /usr/bin/redis-cli, argv: [redis-cli, FLUSHALL] }
+      - name: a flush of an explicit local server stays quiet
+        expect: allow
+        process: { pid: 472, comm: redis-cli, exe: /usr/bin/redis-cli, argv: [redis-cli, -h, localhost, FLUSHDB] }
+      - name: reading a key stays quiet
+        expect: allow
+        process: { pid: 473, comm: redis-cli, exe: /usr/bin/redis-cli, argv: [redis-cli, -h, cache.internal, GET, session] }
+
+  - id: database.mongo.drop
+    title: Drop of a MongoDB database or collection
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes a whole database or collection. Only a backup can bring the documents back.
+    match:
+      any_of:
+        - action: exec
+          program: [mongosh, mongo, sudo, sh, bash, zsh, docker, podman, kubectl, oc]
+          argv_matches: '(?i)\bdb\s*\.\s*(?:dropDatabase\s*\(|[\w$]+\s*\.\s*drop\s*\()'
+        - action: input
+          input_matches: '(?i)\bdb\s*\.\s*(?:dropDatabase\s*\(|[\w$]+\s*\.\s*drop\s*\()'
+    tests:
+      - name: a database drop needs approval
+        expect: approval_required
+        process: { pid: 480, comm: mongosh, exe: /usr/bin/mongosh, argv: [mongosh, --eval, "db.dropDatabase()"] }
+      - name: a collection drop needs approval
+        expect: approval_required
+        process: { pid: 481, comm: mongosh, exe: /usr/bin/mongosh, argv: [mongosh, --eval, "db.orders.drop()"] }
+      - name: a count stays quiet
+        expect: allow
+        process: { pid: 482, comm: mongosh, exe: /usr/bin/mongosh, argv: [mongosh, --eval, "db.orders.countDocuments()"] }
+
+  - id: database.production.connect
+    title: Connection to a production database
+    category: database
+    risk: suspicious
+    decision: allow
+    reason: The name of the server or of the connection string looks like a production system. A read is safe, but every write goes to real user data.
+    match:
+      action: exec
+      program: [psql, mysql, mariadb, mysqlsh, mongosh, mongo, redis-cli, valkey-cli, cockroach, clickhouse-client, pg_dump, pg_restore, mysqldump]
+      any_of:
+        - argv_matches: '(?i)(?:^|\s)(?:-h|--host)[= ]\S*(?:prod|production|live)'
+        - argv_matches: '(?i)(?:postgres|postgresql|mysql|mongodb|redis)(?:\+\w+)?://\S*(?:prod|production|live)'
+        - env:
+            PGHOST: '(?i)(?:prod|production|live)'
+        - env:
+            DATABASE_URL: '(?i)(?:prod|production|live)'
+    tests:
+      - name: a production host in the command line is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 490, comm: psql, exe: /usr/bin/psql, argv: [psql, -h, prod-db.internal, -c, "SELECT count(*) FROM users"] }
+      - name: a production host in the environment is reported
+        expect: allow
+        expect_match: true
+        process:
+          pid: 491
+          comm: psql
+          exe: /usr/bin/psql
+          argv: [psql, -c, "SELECT 1"]
+          env: { PGHOST: prod-db.internal }
+      - name: a local host stays quiet
+        expect: allow
+        process: { pid: 492, comm: psql, exe: /usr/bin/psql, argv: [psql, -h, localhost, -c, "SELECT 1"] }
+      - name: a plain query stays quiet
+        expect: allow
+        process: { pid: 493, comm: psql, exe: /usr/bin/psql, argv: [psql, -c, "SELECT 1"] }
+
+  - id: database.admin.drop-command
+    title: Administration tool that drops a database
+    category: database
+    risk: approval_required
+    decision: approval_required
+    reason: The tool removes a whole database from the server. Only a backup can bring the data back.
+    match:
+      action: exec
+      any_of:
+        - program: [dropdb, mongodrop]
+        - all_of:
+            - program: [mysqladmin, sudo, sh, bash, zsh]
+            - argv_matches: '(?:^|\s)mysqladmin\b'
+            - argv_matches: '(?:^|\s)drop(?:\s|$)'
+    tests:
+      - name: dropdb needs approval
+        expect: approval_required
+        process: { pid: 500, comm: dropdb, exe: /usr/bin/dropdb, argv: [dropdb, customer_prod] }
+      - name: a mysqladmin drop needs approval
+        expect: approval_required
+        process: { pid: 501, comm: mysqladmin, exe: /usr/bin/mysqladmin, argv: [mysqladmin, drop, customer_prod] }
+      - name: a mysqladmin status stays quiet
+        expect: allow
+        process: { pid: 502, comm: mysqladmin, exe: /usr/bin/mysqladmin, argv: [mysqladmin, status] }
+      - name: creating a database stays quiet
+        expect: allow
+        process: { pid: 503, comm: createdb, exe: /usr/bin/createdb, argv: [createdb, app_dev] }
