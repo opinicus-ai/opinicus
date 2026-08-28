@@ -70,6 +70,8 @@ Two axes are almost entirely blocked without them:
 That is why the firewall today is strong against a destructive command and
 weak against data leaving the machine. `policies/` already holds 7 rules
 written against these observables. They have never fired.
+That was the state when this document was derived. The monitor now produces
+both observables, and the rules are active.
 `agent-firewall policy list` marks them `(inactive)`.
 
 ### A.1 Detail the observables must carry

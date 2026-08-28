@@ -166,6 +166,8 @@ system call inside a program that already runs. A process that opens a file
 and writes to it, with no new `execve`, is invisible at this level. That is
 the honest limit of the first version, and it is the reason for the
 `file_open_events` and `network_events` gaps above.
+That was the state when this document was derived. A `seccomp` observation
+layer now closes it; see `docs/DETECTION-RESEARCH.md` section 4, L1.
 
 **A second surprise.** `PTRACE_O_TRACEEXIT` fires **even after `SIGKILL`** on
 kernel 7.0. A monitor that kills a tracee and does not resume it waits for

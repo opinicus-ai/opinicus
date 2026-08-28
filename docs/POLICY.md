@@ -240,6 +240,12 @@ action that carries no such value adds nothing to the count.
 `action: network_connect`. The lint reports the other combinations, because
 they can never count.
 
+A rule with a `threshold` fires again on every hit once the window holds
+enough of them, and a runaway loop can cross that line hundreds of times. The
+firewall asks one time for a threshold rule. The answer holds for the
+session, so the other hits of the same burst stay quiet instead of asking the
+same question again and again.
+
 #### `baseline_missing` — is the value new?
 
 A match field. The launcher records named sets of text at session start. This
