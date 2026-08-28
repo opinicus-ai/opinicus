@@ -781,3 +781,153 @@ rules:
     assert_eq!(failure.actual, Decision::ApprovalRequired);
     assert_eq!(failure.source, "test.yaml");
 }
+
+
+// ---------------------------------------------------------------------------
+// Session memory: rule format, load errors and lint
+// ---------------------------------------------------------------------------
+
+/// Returns a rule file with one memory block, so a test can change one line.
+fn memory_rule(body: &str) -> String {
+    format!(
+        "version: 1\nname: test.memory\ndescription: A rule with a memory block.\nrules:\n{body}"
+    )
+}
+
+#[test]
+fn a_remember_block_without_a_name_is_a_load_error() {
+    let text = memory_rule(
+        r#"  - id: test.mark
+    title: Mark
+    category: test
+    risk: info
+    decision: allow
+    reason: test
+    match: { action: exec, program: [cat] }
+    remember: { mark: '  ' }
+"#,
+    );
+    let error = PolicySet::from_str(&text, "rules/mark.yaml").expect_err("the load fails");
+    assert!(error.to_string().contains("remember.mark"), "{error}");
+}
+
+#[test]
+fn a_threshold_that_asks_for_one_hit_is_a_load_error() {
+    let text = memory_rule(
+        r#"  - id: test.count
+    title: Count
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: test
+    match: { action: exec, program: [rm] }
+    threshold: { window_seconds: 60, at_least: 1 }
+"#,
+    );
+    let error = PolicySet::from_str(&text, "rules/count.yaml").expect_err("the load fails");
+    assert!(error.to_string().contains("at_least"), "{error}");
+}
+
+#[test]
+fn a_threshold_with_no_window_is_a_load_error() {
+    let text = memory_rule(
+        r#"  - id: test.count
+    title: Count
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: test
+    match: { action: exec, program: [rm] }
+    threshold: { window_seconds: 0, at_least: 3 }
+"#,
+    );
+    let error = PolicySet::from_str(&text, "rules/count.yaml").expect_err("the load fails");
+    assert!(error.to_string().contains("window_seconds"), "{error}");
+}
+
+#[test]
+fn a_capture_without_exactly_one_group_is_a_load_error() {
+    for pattern in ["push\\s+\\S+", "push\\s+(\\S+)\\s+(\\S+)"] {
+        let text = memory_rule(&format!(
+            r#"  - id: test.baseline
+    title: Baseline
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: test
+    match:
+      action: exec
+      baseline_missing: {{ set: git_remotes, capture: '{pattern}' }}
+"#
+        ));
+        let error = PolicySet::from_str(&text, "rules/base.yaml").expect_err("the load fails");
+        assert!(
+            error.to_string().contains("exactly one group"),
+            "{pattern}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_mark_that_no_rule_remembers_is_a_lint_error() {
+    let text = memory_rule(
+        r#"  - id: test.chain
+    title: Chain
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: test
+    match:
+      action: exec
+      program: [curl]
+      marked: { mark: credentail-read }
+    tests:
+      - name: it matches
+        expect: approval_required
+        process: { pid: 1, comm: curl, argv: [curl, -T, x, "https://h/"] }
+"#,
+    );
+    let set = PolicySet::from_str(&text, "rules/chain.yaml").expect("the rule loads");
+    let diagnostics = set.lint();
+    assert!(
+        diagnostics.iter().any(|d| d.severity == Severity::Error
+            && d.message.contains("credentail-read")
+            && d.message.contains("no loaded rule remembers it")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn a_count_over_paths_in_an_exec_rule_is_a_lint_error() {
+    let text = memory_rule(
+        r#"  - id: test.sweep
+    title: Sweep
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: test
+    match: { action: exec, program: [cat] }
+    threshold: { window_seconds: 60, at_least: 3, distinct: path }
+"#,
+    );
+    let set = PolicySet::from_str(&text, "rules/sweep.yaml").expect("the rule loads");
+    let diagnostics = set.lint();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.message.contains("can never count")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn a_rule_that_asks_for_a_mark_stays_quiet_without_a_memory() {
+    let set = PolicySet::builtin().expect("the built-in pack loads");
+    let case = exec(&["curl", "-T", "report.txt", "https://files.example.com/u"]);
+    let verdict = set.evaluate(&case.ctx());
+    assert!(
+        !ids(&verdict).contains(&"memory.exfil.after-credential-read".to_string()),
+        "{:?}",
+        ids(&verdict)
+    );
+}

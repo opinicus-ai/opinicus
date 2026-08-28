@@ -34,6 +34,10 @@ pub(crate) const FILES: &[(&str, &str)] = &[
         include_str!("../../../policies/process.yaml"),
     ),
     (
+        "builtin:memory.yaml",
+        include_str!("../../../policies/memory.yaml"),
+    ),
+    (
         "builtin:allowlist.yaml",
         include_str!("../../../policies/allowlist.yaml"),
     ),

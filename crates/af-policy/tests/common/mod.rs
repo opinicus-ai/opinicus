@@ -10,8 +10,11 @@ use std::collections::BTreeMap;
 use af_core::process::InputSource;
 use af_core::{
     Action, AgentKind, AgentMeta, Decision, EvalContext, ProcessInfo, RiskLevel, SessionId,
-    SessionMeta, Verdict, EVENT_SCHEMA_VERSION,
+    SessionMemory, SessionMeta, TimestampNanos, Verdict, EVENT_SCHEMA_VERSION,
 };
+
+/// How many nanoseconds are in one second.
+pub const SECOND: TimestampNanos = 1_000_000_000;
 
 /// Holds the parts of a context, because `EvalContext` only borrows them.
 pub struct Case {
@@ -25,6 +28,11 @@ impl Case {
     /// Returns the context that the policy engine reads.
     pub fn ctx(&self) -> EvalContext<'_> {
         EvalContext::new(&self.session, &self.action, &self.process, &self.ancestry)
+    }
+
+    /// Returns the context at one event time.
+    pub fn ctx_at(&self, ts: TimestampNanos) -> EvalContext<'_> {
+        self.ctx().at(ts)
     }
 
     /// Sets the parents of the process, nearest parent first.
@@ -159,4 +167,26 @@ pub fn ids(verdict: &Verdict) -> Vec<String> {
 /// Returns true when no rule reported more than the level `info`.
 pub fn is_quiet(verdict: &Verdict) -> bool {
     verdict.decision == Decision::Allow && verdict.risk <= RiskLevel::Info
+}
+
+/// Plays a list of actions through an engine and keeps the memory.
+///
+/// The helper does exactly what the launcher and the replay command do: it
+/// evaluates one action, applies the effects that the engine asks for, and
+/// then goes to the next action. The list of verdicts comes back in order.
+pub fn play(
+    policy: &dyn af_core::PolicyEngine,
+    steps: &[(TimestampNanos, &Case)],
+) -> Vec<Verdict> {
+    let mut memory = SessionMemory::new();
+    let mut out = Vec::new();
+    for (ts, case) in steps {
+        let ctx = case.ctx_at(*ts);
+        let (verdict, effects) = policy.evaluate_with_memory(&ctx, &memory);
+        for effect in effects {
+            memory.apply(effect, *ts);
+        }
+        out.push(verdict);
+    }
+    out
 }

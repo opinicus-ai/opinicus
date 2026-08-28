@@ -188,12 +188,12 @@ pub(crate) fn build_history(test: &TestSource) -> Vec<TestCase> {
     let mut out: Vec<TestCase> = Vec::new();
     let mut clock = 0u64;
     for step in &test.history {
-        let times = step.repeat.unwrap_or(1).max(1);
-        for _ in 0..times {
-            let at = step.at_seconds.unwrap_or(clock);
-            out.push(build_step(step, at));
-            clock = at + 1;
+        let times = step.repeat.unwrap_or(1).max(1) as u64;
+        let start = step.at_seconds.unwrap_or(clock);
+        for index in 0..times {
+            out.push(build_step(step, start + index));
         }
+        clock = start + times;
     }
     out
 }
@@ -202,10 +202,8 @@ pub(crate) fn build_history(test: &TestSource) -> Vec<TestCase> {
 fn history_length(test: &TestSource) -> u64 {
     let mut clock = 0u64;
     for step in &test.history {
-        let times = step.repeat.unwrap_or(1).max(1);
-        for _ in 0..times {
-            clock = step.at_seconds.unwrap_or(clock) + 1;
-        }
+        let times = step.repeat.unwrap_or(1).max(1) as u64;
+        clock = step.at_seconds.unwrap_or(clock) + times;
     }
     clock
 }
@@ -342,9 +340,23 @@ fn to_action(
 
 #[cfg(test)]
 mod tests {
-    use super::build_case;
+    use super::{build_case, build_history, build_memory};
+    use crate::source::TestSource;
     use crate::PolicySet;
-    use af_core::{Decision, PolicyEngine};
+    use af_core::{Decision, PolicyEngine, SessionMemory};
+
+    /// Plays the history of a test through the whole pack.
+    fn memory_of(set: &PolicySet, test: &TestSource) -> SessionMemory {
+        let mut memory = build_memory(test);
+        for step in build_history(test) {
+            let ctx = step.context();
+            let (_, effects) = set.evaluate_with_memory(&ctx, &memory);
+            for effect in effects {
+                memory.apply(effect, ctx.ts);
+            }
+        }
+        memory
+    }
 
     /// Runs every declared test against the whole built-in pack.
     ///
@@ -358,9 +370,10 @@ mod tests {
         let mut problems: Vec<String> = Vec::new();
         for rule in &set.rules {
             for test in &rule.tests {
+                let memory = memory_of(&set, test);
                 let case = build_case(test);
                 let ctx = case.context();
-                let verdict = set.evaluate(&ctx);
+                let (verdict, _) = set.evaluate_with_memory(&ctx, &memory);
                 let names: Vec<&str> = verdict
                     .matches
                     .iter()
