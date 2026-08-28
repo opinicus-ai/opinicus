@@ -14,7 +14,13 @@ Runbook (also in `research/threats/README.md`):
 1. Read `research/threats/LEDGER.md` and `research/threats/threat-research.workflow.js`.
 2. Call the `workflow` tool with:
    - `script`: the full content of `research/threats/threat-research.workflow.js`
-   - `args`: JSON string `{"ledger": <full current content of LEDGER.md>}`
+   - `args`: JSON string with the current state:
+     - `ledger`: full current content of `research/threats/LEDGER.md`
+     - `knownReports`: `[{"f": "<file>.md", "t": "<title>"}, ...]` for every
+       report already in `incidents/` (so nothing is researched twice)
+     - `seedTodo`: `[{"id": "INC-001", "axis": "cloud", "slug": "...",
+       "title": "...", "source": "https://..."}, ...]` for ledger rows whose
+       report column is still `missing`
    - `background: true`
 3. While it runs, tell the user what is happening (10 research agents + ledger merge).
 4. When the run settles: `git status research/threats/`, spot-check 2-3 new

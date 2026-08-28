@@ -20,6 +20,7 @@ web research  ->  incident reports (incidents/)  ->  ledger (LEDGER.md)
 | --- | --- |
 | `LEDGER.md` | the single source of truth: every incident (INC-###) and every scenario (SC-###) with ids, status, and coverage |
 | `incidents/` | one report per real-world failure of a coding agent or its toolchain, named `<axis>-<slug>.md` |
+| `scenarios/` | one catalog per axis, named `<axis>.md`; full scenario detail (behavior, example, detection signal) that feeds rule writing |
 | `threat-research.workflow.js` | the reusable multi-agent research workflow (script for the pi `workflow` tool, not runnable directly) |
 
 ## Research axes
@@ -47,7 +48,12 @@ Ask the agent to **"run the threat research workflow"** (or
 1. Read this directory: `LEDGER.md` and `threat-research.workflow.js`.
 2. Call the pi `workflow` tool with:
    - `script`: the full content of `threat-research.workflow.js`
-   - `args`: JSON `{"ledger": "<full content of LEDGER.md>"}`
+   - `args`: JSON with the current state:
+     - `ledger`: full content of `LEDGER.md`
+     - `knownReports`: list of `{f, t}` (filename, title) for every report
+       already in `incidents/`, so no incident is researched twice
+     - `seedTodo`: list of `{id, axis, slug, title, source}` for ledger rows
+       whose report is still `missing`
    - `background: true`
 3. When the run settles: check `git status`, spot-check the new incident
    reports, and summarize what the ledger gained.
@@ -55,6 +61,10 @@ Ask the agent to **"run the threat research workflow"** (or
 
 Every run deduplicates against the ledger passed in `args`, so it is safe to
 run as often as wanted. The merge step is the only writer of `LEDGER.md`.
+
+A few incidents were reported twice by different axes (run 1 wrote two reports
+from two angles). One ledger row points at the primary report; the alternate
+report stays in `incidents/` as a second angle on the same incident.
 
 ## Scenario lifecycle
 

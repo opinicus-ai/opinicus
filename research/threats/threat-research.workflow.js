@@ -2,13 +2,23 @@
 //
 // This file is a script for the pi `workflow` tool. Do not run it with
 // node or bun. To run it, the agent reads this file, passes its content
-// as `script` and the current ledger as `args` (JSON: {"ledger": "..."}).
+// as `script` and the current state as `args` (JSON):
+//   { "ledger": "<content of LEDGER.md>",
+//     "knownReports": [{ "f": "<file>.md", "t": "<title>" }, ...],
+//     "seedTodo": [{ "id": "INC-001", "axis": "cloud", "slug": "...",
+//                    "title": "...", "source": "https://..." }, ...] }
+// knownReports lists incident reports already on disk (do not redo them).
+// seedTodo lists ledger rows that still need their report written.
 //
 // The run:
-//   1. fans out one research agent per threat axis (web research,
-//      incident reports written to research/threats/incidents/),
-//   2. merges everything into research/threats/LEDGER.md with stable ids,
-//      deduplicated against the ledger passed in args.
+//   1. fans out one research agent per threat axis (web research; incident
+//      reports to incidents/, scenario catalogs to scenarios/<axis>.md),
+//   2. retries an axis once if its agent failed,
+//   3. merges a compact digest into research/threats/LEDGER.md with stable
+//      ids, deduplicated against the ledger passed in args.
+// The merge gets only a digest (title/category/pack/decision/severity/
+// coverage/sources), never the full scenario prose - a fat prompt fails
+// with "invalid agent request". Full details live on disk in scenarios/.
 //
 // See README.md in this directory for the runbook.
 
@@ -20,6 +30,8 @@ export const meta = {
 
 const state = typeof args === 'string' ? JSON.parse(args) : (args ?? {})
 const LEDGER = state.ledger ?? '(empty ledger: first run)'
+const KNOWN = (state.knownReports ?? []).map((r) => `- ${r.f} | ${r.t}`).join('\n') || '(none)'
+const SEEDS = state.seedTodo ?? []
 const ROOT = '/home/vfeenstr/devel/lab/opinicus-56sol/research/threats'
 
 const CONTEXT = `
@@ -129,15 +141,15 @@ const INCIDENT_SCHEMA = {
     slug: { type: 'string' },
     title: { type: 'string' },
     date: { type: 'string' },
-    agent_or_tool: { type: 'string' },
+    axis: { type: 'string' },
     summary: { type: 'string' },
-    failure_mechanism: { type: 'string' },
     firewall_lesson: { type: 'string' },
     sources: { type: 'array', items: { type: 'string' } },
     report_file: { type: 'string' },
+    seed_id: { type: 'string' },
     status: { type: 'string', enum: ['new-report-written', 'seed-verified', 'known-referenced'] },
   },
-  required: ['slug', 'title', 'summary', 'failure_mechanism', 'sources', 'status'],
+  required: ['slug', 'title', 'axis', 'summary', 'sources', 'report_file', 'status'],
 }
 
 const SCENARIO_SCHEMA = {
@@ -145,16 +157,13 @@ const SCENARIO_SCHEMA = {
   properties: {
     title: { type: 'string' },
     category: { type: 'string' },
-    behavior: { type: 'string' },
-    example: { type: 'string' },
-    detection_signal: { type: 'string' },
-    suggested_decision: { type: 'string', enum: ['allow', 'approval_required', 'deny', 'terminate'] },
-    policy_pack: { type: 'string' },
-    coverage: { type: 'string', enum: ['gap', 'partial', 'covered'] },
+    pack: { type: 'string' },
+    decision: { type: 'string', enum: ['allow', 'approval_required', 'deny', 'terminate'] },
     severity: { type: 'number' },
+    coverage: { type: 'string', enum: ['gap', 'partial', 'covered'] },
     source_slugs: { type: 'array', items: { type: 'string' } },
   },
-  required: ['title', 'category', 'behavior', 'example', 'detection_signal', 'suggested_decision', 'policy_pack', 'coverage', 'severity'],
+  required: ['title', 'category', 'pack', 'decision', 'severity', 'coverage'],
 }
 
 const RESEARCH_SCHEMA = {
@@ -162,140 +171,158 @@ const RESEARCH_SCHEMA = {
   properties: {
     incidents: { type: 'array', items: INCIDENT_SCHEMA },
     scenarios: { type: 'array', items: SCENARIO_SCHEMA },
+    catalog_file: { type: 'string' },
     notes: { type: 'string' },
   },
-  required: ['incidents', 'scenarios'],
+  required: ['incidents', 'scenarios', 'catalog_file'],
 }
 
 const MERGE_SCHEMA = {
   type: 'object',
   properties: {
     incidents_added: { type: 'number' },
+    seed_reports_linked: { type: 'number' },
     scenarios_added: { type: 'number' },
     duplicates_merged: { type: 'number' },
     ledger_written: { type: 'boolean' },
     summary: { type: 'string' },
   },
-  required: ['incidents_added', 'scenarios_added', 'duplicates_merged', 'ledger_written', 'summary'],
+  required: ['incidents_added', 'seed_reports_linked', 'scenarios_added', 'duplicates_merged', 'ledger_written', 'summary'],
 }
 
-function researchPrompt(axis) {
-  return `You are a security researcher on the Agent Firewall project.
+function seedLinesFor(axis) {
+  const mine = SEEDS.filter((s) => s.axis === axis.code)
+  if (!mine.length) return '(no seed assignments for your axis)'
+  return mine
+    .map((s) => `- ${s.id}: write ${axis.code}-${s.slug}.md — "${s.title}" — start from ${s.source}`)
+    .join('\n')
+}
+
+function researchPrompt(axis, retry) {
+  return `You are a security researcher on the Agent Firewall project.${retry ? '\nA previous attempt at this axis died; work efficiently and return your structured result.' : ''}
 ${CONTEXT}
 YOUR AXIS: ${axis.title} (axis code "${axis.code}")
 ${axis.focus}
 
-KNOWN INCIDENT LEDGER (do NOT write a new report for anything listed here; reference by slug):
-${LEDGER}
+INCIDENT REPORTS ALREADY ON DISK (never rewrite or duplicate these; you may reference a
+report by its filename without the .md as a source slug):
+${KNOWN}
+
+SEED ASSIGNMENTS for your axis (ledger rows still missing a report — write these FIRST,
+verify facts and dates against the source, set seed_id to the given id, status seed-verified):
+${seedLinesFor(axis)}
+
+PRIORITY THIS RUN: incident coverage is already broad. Spend MOST of your effort on the
+scenario catalog. Find at most 1-2 genuinely new incidents for your axis; if nothing new
+is worth reporting, report zero new incidents and put all effort into scenarios.
 
 TASK — three deliverables:
 
-1) REAL INCIDENTS. Use web search (and scrape pages that need reading) to find real,
-documented incidents where a coding agent (Claude Code, Codex, Cursor, Replit Agent,
-Gemini CLI, Windsurf, Aider, Copilot agent mode, Devin, ...) or its toolchain (npm
-packages, MCP servers, build tools, dotfiles managers) caused damage of your axis kind.
-Verification bar: at least one authoritative URL (vendor postmortem, security company
-writeup, official advisory, or reputable news). NEVER invent URLs, dates, numbers or
-quotes. If you cannot verify, leave it out. Pick at most the 4 best NEW incidents
-(not already in the ledger above, not an axis another known row already covers).
-
-2) INCIDENT REPORTS. For each new incident, write one markdown file with the write tool to
-${ROOT}/incidents/${axis.code}-<short-slug>.md   (kebab-case slug, keep it stable, it becomes the row id anchor)
-
-Use exactly this structure:
+1) SEED + NEW INCIDENT REPORTS. For each seed and each new incident, write one markdown
+file with the write tool to ${ROOT}/incidents/<axis>-<short-slug>.md (kebab-case, stable).
+Structure exactly:
 
 # <Title>
-- Date: <when it happened> | Agent/tool: <what was involved> | Axis: ${axis.code}
+- Date: <when> | Agent/tool: <what was involved> | Axis: ${axis.code}${SEEDS.length ? '' : ''}
 ## What happened
-<4-10 short sentences. Plain English, short sentences, like the project docs.>
+<4-10 short sentences, plain English.>
 ## How it went wrong
-<the mechanism: what instruction, what command, what process tree, what OS-level events>
+<mechanism: instruction, command, process tree, OS-level events>
 ## What the firewall should learn
-<which observable signal (exec/file_open/network_connect/input + ancestry) would have
-caught it, and the rule idea (decision: approval_required, deny, ...)>
+<observable signal (exec/file_open/network_connect/input + ancestry) and the rule idea>
 ## Sources
 - [<label>](<url>)
 
-Style rule: plain English, short sentences. After writing the files, verify they exist with ls.
+Verification bar for NEW incidents: at least one authoritative URL you actually loaded
+(search + scrape). NEVER invent URLs, dates, numbers or quotes. If unverifiable, drop it.
 
-3) TEST SCENARIOS. Derive 8-15 concrete scenarios for your axis that the firewall must
-handle (block, gate behind approval, or at least observe and report). Include scenarios
-with no public incident if the behavior is plausible or known in the wild; leave
-source_slugs empty for those. Fields:
-- title: short, behavior-focused ("rm with unquoted variable deletes wrong directory")
-- category: one of filesystem|git|process|network|database|cloud|secrets|supply-chain|prompt-injection|agent-behavior|mcp|evasion
-- behavior: what happens, in observable OS terms
-- example: a concrete command line or event sequence (realistic, minimal)
-- detection_signal: phrased ONLY in terms of exec(program/exe/argv/cwd/env/ancestry), file_open(path,write), network_connect(host), input(text)
-- suggested_decision: allow (observe only) | approval_required | deny | terminate
-- policy_pack: filesystem|git|process|network|database|cloud|cross
-- coverage: gap (no builtin rule would match today) | partial | covered
-- severity: 1-5 (5 = worst realistic outcome for a developer machine)
-Rules: detection_signal must be realistically implementable; if the firewall cannot see
-it with the listed observables, say so in the signal and mark coverage "gap" with a note
-in behavior. Do not duplicate scenarios the builtin packs already cover unless you mark
-them covered.
+2) SCENARIO CATALOG (the main deliverable). Derive 10-15 concrete scenarios for your axis
+that the firewall must handle (block, gate behind approval, or at least observe and
+report). Write the FULL catalog with all detail to
+${ROOT}/scenarios/${axis.code}.md with the write tool, one section per scenario:
 
-Special rule for your axis${axis.code === 'evade' ? '' : ' (only if incidents are scarce)'}: for the evasion axis, incidents are
-optional — spend the effort on 12-18 scenarios of evasions instead, and verify Linux
-mechanics from documentation.
+### SC <title>
+- category: <filesystem|git|process|network|database|cloud|secrets|supply-chain|prompt-injection|agent-behavior|mcp|evasion>
+- decision: <allow|approval_required|deny|terminate> | severity: <1-5>
+- pack: <filesystem|git|process|network|database|cloud|cross> | coverage: <gap|partial|covered>
+- sources: <incident slugs or ->
+behavior: <what happens, in observable OS terms>
+example: <a concrete command line or event sequence>
+signal: <phrased ONLY in terms of exec(program/exe/argv/cwd/env/ancestry), file_open(path,write), network_connect(host), input(text); if the firewall cannot see it with these, say so and mark coverage "gap">
 
-RETURN ONLY the structured result for your axis. Never write files other than your own
-incident reports under ${ROOT}/incidents/.`
+3) STRUCTURED RESULT. Return one scenario entry per catalog section with the SHORT fields
+(title, category, pack, decision, severity, coverage, source_slugs) — the prose lives in
+the catalog file, do not repeat it in the result. For incidents return: slug, title, date,
+axis, one-line summary, firewall_lesson, sources, report_file, seed_id (empty unless it is
+a seed), status (new-report-written | seed-verified | known-referenced).
+
+Rules: detection signals must be realistically implementable from the listed observables.
+Do not duplicate what the builtin packs already cover unless you mark it covered. Never
+write files other than: your incident reports under ${ROOT}/incidents/ and exactly one
+catalog ${ROOT}/scenarios/${axis.code}.md. Verify both with ls before returning.`
 }
 
 phase('Research')
-const results = await parallel(
-  AXES.map((axis) => () =>
-    agent(researchPrompt(axis), {
-      label: `research:${axis.code}`,
-      phase: 'Research',
-      schema: RESEARCH_SCHEMA,
-    }),
-  ),
+async function runAxis(axis, retry) {
+  return agent(researchPrompt(axis, retry), {
+    label: `research:${axis.code}${retry ? ':retry' : ''}`,
+    phase: 'Research',
+    schema: RESEARCH_SCHEMA,
+  })
+}
+
+const first = await parallel(AXES.map((a) => () => runAxis(a, false)), { concurrency: 4 })
+const retries = await parallel(
+  AXES.map((a, i) => () => (first[i].ok ? null : runAxis(a, true))),
   { concurrency: 4 },
 )
-
+const results = first.map((r, i) => (r.ok ? r : (retries[i] ?? r)))
 const good = results.filter((r) => r.ok && r.structured)
 const failed = results.filter((r) => !r.ok)
 
 phase('Ledger merge')
+// Compact digest only - the merge agent must not receive full scenario prose.
+const digest = good.map((r) => ({
+  incidents: r.structured.incidents.map((i) => ({
+    slug: i.slug, title: i.title, date: i.date ?? '', axis: i.axis,
+    report_file: i.report_file ?? '', seed_id: i.seed_id ?? '',
+    status: i.status, sources: i.sources ?? [],
+  })),
+  scenarios: r.structured.scenarios,
+  catalog_file: r.structured.catalog_file,
+}))
+
 const mergePrompt = `You are the ledger keeper of the Agent Firewall threat research.
-${CONTEXT}
 CURRENT LEDGER (the source of truth you will rewrite):
 ${LEDGER}
 
-RESEARCH RESULTS from ${good.length} researchers (JSON):
-${JSON.stringify(good.map((r) => r.structured))}
+RESEARCH DIGEST from ${good.length} researchers (JSON; full scenario prose lives in
+${ROOT}/scenarios/<axis>.md and is NOT part of the ledger):
+${JSON.stringify(digest)}
 
 REWRITE ${ROOT}/LEDGER.md with the write tool, applying these rules:
 
-1. Keep the overall section structure of the current ledger (Coverage summary,
-   Incident ledger, Scenario ledger, Run log) and the exact column layouts.
-2. INCIDENT LEDGER: keep every existing row, same id, same columns. Fix date/title
-   if a researcher verified the facts and marked the entry seed-verified with a report
-   file. For incidents with status new-report-written or seed-verified, set the report
-   column to the actual filename (run: ls ${ROOT}/incidents/ to check which files exist;
-   the filename for a row is <axis>-<slug>.md). Rows still without a report keep "missing".
-   Append new rows for incidents with status new-report-written, assigning ids
-   INC-### continuing from the highest existing id.
-3. SCENARIO LEDGER: assign ids SC-### continuing from the highest existing id.
-   Deduplicate first: scenarios whose core behavior is the same merge into one row —
-   keep the richer title/behavior, union the source slugs, keep the higher severity;
-   count merges in duplicates_merged. Columns: id | title | category | pack | decision
-   | sev | coverage | status | sources. sources = INC ids (comma separated) or "-".
-   New rows get status "proposed". Existing rows keep their existing status
-   (proposed / rule-written / tested) even if research re-reports them.
-4. COVERAGE SUMMARY: recompute the counts of scenario rows per policy pack
-   (filesystem, git, process, network, database, cloud, cross) split by coverage
-   (gap, partial, covered). Keep the table shape.
-5. RUN LOG: append one row. Get today's date with: date -I. Put incidents added
-   (new INC rows), scenarios added (new SC rows after dedup), duplicates merged,
-   and a one-line note listing which axes failed to return results, if any:
-   ${failed.length ? failed.map((r) => r.error || 'failed').join('; ') : 'none'}
-6. Do not editorialize; the ledger is a table document. Keep plain English, short sentences.
-
-Write the complete file, then verify it reads back (wc -l). Return the counts.`
+1. Keep the section structure (Coverage summary, Incident ledger, Scenario ledger,
+   Run log) and the exact column layouts.
+2. INCIDENT LEDGER: keep every existing row and its id. For digest incidents with a
+   seed_id matching an existing row, set that row's report column to report_file
+   (verify against: ls ${ROOT}/incidents/). Append new rows for incidents with status
+   new-report-written and empty seed_id, ids INC-### continuing from the highest
+   existing id, axis column = the digest axis, report column = report_file,
+   sources = first source URL. Rows still without a report keep "missing".
+3. SCENARIO LEDGER: one row per digest scenario after dedup. Dedup: same core behavior
+   merges into one row — keep the richer title, union source slugs, keep higher severity;
+   count merges in duplicates_merged. Ids SC-### continuing from the highest existing id.
+   Columns: id | title | category | pack | decision | sev | coverage | status | sources.
+   sources = INC ids derived from the source slugs' ledger rows, or "-". New rows get
+   status "proposed"; existing rows keep their existing status.
+4. COVERAGE SUMMARY: counts of scenario rows per pack (filesystem, git, process, network,
+   database, cloud, cross) split by coverage (gap, partial, covered).
+5. RUN LOG: append one row. Get today's date with: date -I. incidents added = new INC rows,
+   scenarios added = new SC rows after dedup, duplicates merged, notes = failed axes:
+   ${failed.length ? failed.map((_, i) => AXES[i]?.code ?? '?').join(', ') : 'none'}
+6. Plain English, short sentences, no editorializing. Write the complete file, then
+   verify with wc -l. Return the counts.`
 
 const merged = await agent(mergePrompt, { label: 'ledger-merge', phase: 'Ledger merge', schema: MERGE_SCHEMA })
 

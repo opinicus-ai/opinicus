@@ -219,6 +219,9 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 * [docs/DETECTION-RESEARCH.md](docs/DETECTION-RESEARCH.md) — which mechanism
   the firewall should watch with, measured across four spikes, and the
   layered recommendation that follows.
+* [research/threats/](research/threats/) — the threat research ledger: real
+  coding-agent failure incidents and the block scenarios they justify, kept
+  by a reusable research workflow.
 
 ## Licence
 
