@@ -20,6 +20,7 @@ use nix::unistd::Pid as NixPid;
 use af_core::MonitorCapability;
 
 use crate::tracer::TRACE_OPTIONS;
+use crate::{seccomp, SyscallFilter};
 
 /// How long the probe waits for its own test process.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -37,7 +38,11 @@ fn available_with(name: &str, detail: &str) -> MonitorCapability {
 }
 
 /// Reports what this machine lets the monitor observe and stop.
-pub fn capabilities() -> Vec<MonitorCapability> {
+///
+/// `filter` is the mode that the session will use. A mode changes the answer,
+/// because the kernel filter decides in the kernel which calls ever reach the
+/// monitor at all.
+pub fn capabilities(filter: SyscallFilter) -> Vec<MonitorCapability> {
     let mut caps = Vec::new();
 
     match probe_launch() {
@@ -92,17 +97,57 @@ pub fn capabilities() -> Vec<MonitorCapability> {
         )),
     }
 
-    caps.push(MonitorCapability::missing(
-        "file_open_events",
-        "this version stops only at exec; a file open needs a stop at every system call (PTRACE_SYSCALL) or a kernel facility such as fanotify or eBPF",
-    ));
-    caps.push(MonitorCapability::missing(
-        "network_events",
-        "this version stops only at exec; a connection needs a stop at every system call (PTRACE_SYSCALL) or a kernel facility such as eBPF",
-    ));
+    caps.extend(probe_syscall_filter(filter));
 
     caps.push(probe_unprivileged());
     caps
+}
+
+/// Reports what the kernel filter of this session can observe.
+///
+/// The probe asks the kernel itself whether it offers the trace action, and
+/// it then reports what the chosen mode really watches. It never claims more
+/// than the mode gives: a mode that drops a read-only open in the kernel
+/// cannot report the read of a credential file, and the user has to know
+/// that.
+fn probe_syscall_filter(filter: SyscallFilter) -> Vec<MonitorCapability> {
+    if filter == SyscallFilter::Off {
+        let reason =
+            "the option `--syscall-filter off` switched the kernel filter off for this session";
+        return vec![
+            MonitorCapability::missing("syscall_filter", reason),
+            MonitorCapability::missing("file_open_events", reason),
+            MonitorCapability::missing("network_events", reason),
+        ];
+    }
+
+    if let Err(reason) = seccomp::availability() {
+        return vec![
+            MonitorCapability::missing("syscall_filter", reason.clone()),
+            MonitorCapability::missing("file_open_events", reason.clone()),
+            MonitorCapability::missing("network_events", reason),
+        ];
+    }
+
+    let file_detail = if filter.observes_read_opens() {
+        "every open reaches the firewall, a read included; a rule about the path of a read can fire"
+    } else {
+        "only an open that asks to change the file reaches the firewall; a rule that needs the path of a read stays silent, use `--syscall-filter all-opens` for it"
+    };
+    vec![
+        available_with(
+            "syscall_filter",
+            &format!(
+                "a seccomp filter in mode {} holds the calls that a rule can judge",
+                filter.label()
+            ),
+        ),
+        available_with("file_open_events", file_detail),
+        available_with(
+            "network_events",
+            "every outgoing connection to an IPv4 or an IPv6 address reaches the firewall; a local socket is passed by",
+        ),
+    ]
 }
 
 /// Reads the Yama setting and reports whether a normal user can trace.

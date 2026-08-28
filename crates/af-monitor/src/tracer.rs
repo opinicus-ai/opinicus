@@ -1,9 +1,17 @@
 //! The `ptrace` event loop that follows a whole process tree.
 //!
 //! The loop launches one command, follows every descendant, and holds each
-//! process at the moment the kernel loaded a new program but did not yet run
-//! one instruction of it. That moment is the point where the firewall can
-//! still stop a dangerous program.
+//! process at two moments.
+//!
+//! The first is the moment the kernel loaded a new program but did not yet
+//! run one instruction of it. That is the point where the firewall can still
+//! stop a dangerous program.
+//!
+//! The second is the moment a running program asks the kernel for something
+//! that a rule can judge: a file open that can change the file, or an
+//! outgoing connection. A `seccomp` filter picks those calls out in the
+//! kernel and the loop meets them at a `PTRACE_EVENT_SECCOMP` stop. See
+//! [`crate::seccomp`] for the filter and for the limits of what it proves.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt;
@@ -15,20 +23,30 @@ use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid as NixPid;
 
-use af_core::{Error, Event, EventKind, InputStream, Pid, ProcessInfo, Result, SessionMeta};
+use af_core::{
+    Action, Error, Event, EventKind, InputStream, Pid, ProcessInfo, Result, SessionMeta,
+};
 
-use crate::{procfs, InputSnapshot, Intercept, MonitorConfig, MonitorHandler, SessionOutcome};
+use crate::{
+    procfs, seccomp, InputSnapshot, Intercept, MonitorConfig, MonitorHandler, SessionOutcome,
+    SyscallFilter,
+};
 
 /// Trace options that the monitor uses for every process of the tree.
 ///
 /// `PTRACE_O_EXITKILL` is important for safety. It tells the kernel to kill
 /// every traced process when the monitor dies, so no process of the tree ever
 /// stays stopped without a monitor.
+///
+/// `PTRACE_O_TRACESECCOMP` is what brings a held system call to this loop.
+/// The option costs nothing when no filter is installed, because the kernel
+/// then never answers `SECCOMP_RET_TRACE`.
 pub const TRACE_OPTIONS: ptrace::Options = ptrace::Options::PTRACE_O_TRACEFORK
     .union(ptrace::Options::PTRACE_O_TRACEVFORK)
     .union(ptrace::Options::PTRACE_O_TRACECLONE)
     .union(ptrace::Options::PTRACE_O_TRACEEXEC)
     .union(ptrace::Options::PTRACE_O_TRACEEXIT)
+    .union(ptrace::Options::PTRACE_O_TRACESECCOMP)
     .union(ptrace::Options::PTRACE_O_EXITKILL);
 
 /// Highest depth that the ancestry walk accepts.
@@ -36,6 +54,13 @@ pub const TRACE_OPTIONS: ptrace::Options = ptrace::Options::PTRACE_O_TRACEFORK
 /// The parent map can never hold a cycle, but a guard keeps the monitor safe
 /// against damaged data.
 const MAX_ANCESTRY: usize = 256;
+
+/// Programs that ask the kernel to raise the privilege of the user.
+///
+/// None of them can work inside a traced session, and the error that they
+/// print names neither the firewall nor the reason. The monitor says it
+/// itself, so the user does not blame the program.
+const PRIVILEGE_PROGRAMS: [&str; 4] = ["sudo", "su", "passwd", "pkexec"];
 
 /// State of one traced session.
 struct Tracer<'a> {
@@ -58,6 +83,15 @@ struct Tracer<'a> {
     terminated: bool,
     root_code: Option<i32>,
     root_signal: Option<i32>,
+    /// The filter mode that this session really got.
+    ///
+    /// It is [`SyscallFilter::Off`] when the machine cannot carry the filter,
+    /// whatever the configuration asked for.
+    filter: SyscallFilter,
+    /// Why the session did not get the filter that it asked for.
+    ///
+    /// The loop reports it one time, as a warning event, before it starts.
+    filter_warning: Option<String>,
 }
 
 /// Launches the command and follows it until the whole tree ends.
@@ -68,6 +102,17 @@ pub fn run(
 ) -> Result<SessionOutcome> {
     let Some(program) = config.command.first() else {
         return Err(Error::monitor("the command of the session is empty"));
+    };
+
+    // The machine decides whether the kernel filter can run at all. A machine
+    // that says no keeps the exec boundary and the session goes on; the
+    // firewall must never fail because it cannot see everything.
+    let (filter, filter_warning) = match config.syscall_filter {
+        SyscallFilter::Off => (SyscallFilter::Off, None),
+        wanted => match seccomp::availability() {
+            Ok(()) => (wanted, None),
+            Err(reason) => (SyscallFilter::Off, Some(reason)),
+        },
     };
 
     let mut command = Command::new(program);
@@ -84,9 +129,20 @@ pub fn run(
     // monitor thread for ever. The kernel raises SIGTRAP after `execve`
     // instead, which gives the monitor the same first stop.
     //
-    // SAFETY: the closure only calls ptrace, which is safe in a forked child.
+    // The kernel filter is installed here, in the child, after the request to
+    // be traced and before `execve`. A filter is inherited by every child and
+    // it survives `execve`, so this one install covers the whole session and
+    // no descendant can escape it. The install never fails the session: see
+    // `seccomp::install`.
+    //
+    // SAFETY: the closure only calls ptrace, prctl and seccomp, which all act
+    // on the forked child alone and are safe between fork and exec.
     unsafe {
-        command.pre_exec(|| ptrace::traceme().map_err(std::io::Error::from));
+        command.pre_exec(move || {
+            ptrace::traceme().map_err(std::io::Error::from)?;
+            seccomp::install(filter);
+            Ok(())
+        });
     }
 
     let child = command.spawn().map_err(|error| {
@@ -110,6 +166,8 @@ pub fn run(
         terminated: false,
         root_code: None,
         root_signal: None,
+        filter,
+        filter_warning,
     };
 
     tracer.run_loop()?;
@@ -119,9 +177,20 @@ pub fn run(
 impl Tracer<'_> {
     /// Waits for the first stop of the root and then follows the whole tree.
     fn run_loop(&mut self) -> Result<()> {
+        if let Some(reason) = self.filter_warning.take() {
+            self.emit(
+                self.root,
+                EventKind::MonitorWarning {
+                    message: format!(
+                        "the firewall observes no file open and no connection: {reason}"
+                    ),
+                },
+            );
+        }
         if !self.await_root_start()? {
             return Ok(());
         }
+        self.check_filter();
         while !self.tracked.is_empty() {
             let Some(status) = wait_any(None)? else {
                 // No child is left. This only happens when another part of the
@@ -168,6 +237,26 @@ impl Tracer<'_> {
                 _ => {}
             }
         }
+    }
+
+    /// Proves that the kernel really holds the filter, and says so when not.
+    ///
+    /// The child installed the filter itself and had no way to report a
+    /// failure, so the only honest proof is the state of the root process
+    /// after its first program started. `/proc/<pid>/status` holds it.
+    fn check_filter(&mut self) {
+        if self.filter == SyscallFilter::Off || seccomp::is_active(self.root) {
+            return;
+        }
+        self.filter = SyscallFilter::Off;
+        self.emit(
+            self.root,
+            EventKind::MonitorWarning {
+                message: "the kernel refused the system-call filter, so the firewall observes \
+                          no file open and no connection in this session"
+                    .to_string(),
+            },
+        );
     }
 
     /// Handles one state change of one process of the tree.
@@ -222,6 +311,10 @@ impl Tracer<'_> {
         }
         if event == ptrace::Event::PTRACE_EVENT_EXEC as i32 {
             self.handle_exec(pid);
+            return;
+        }
+        if event == ptrace::Event::PTRACE_EVENT_SECCOMP as i32 {
+            self.handle_seccomp(pid);
             return;
         }
         if event == ptrace::Event::PTRACE_EVENT_FORK as i32
@@ -281,6 +374,7 @@ impl Tracer<'_> {
                 process: Box::new(info.clone()),
             },
         );
+        self.warn_about_privilege(pid, &info);
         if let Some(data) = snapshot.as_ref().and_then(|snap| snap.stdin.clone()) {
             self.emit(
                 pid,
@@ -295,6 +389,79 @@ impl Tracer<'_> {
         let answer = self.handler.on_exec(&info, &ancestry, snapshot.as_ref());
         match answer {
             Intercept::Continue => self.resume(pid, None),
+            // There is no call to fail at an exec stop, so a refusal can only
+            // mean the same as a denial: the program must not run.
+            Intercept::Deny | Intercept::Refuse => self.kill_one(pid),
+            Intercept::TerminateSession => {
+                self.terminated = true;
+                self.kill_tree();
+            }
+        }
+    }
+
+    /// Tells the user why a program that raises privilege will not work.
+    ///
+    /// The kernel takes the setuid bit away from any program that a normal
+    /// user traces. That is true of the shipping monitor and it was true
+    /// before the kernel filter existed. The filter also needs `no_new_privs`,
+    /// which takes the same thing away a second time. Neither is new, but the
+    /// error that `sudo` prints names none of it, so the user would blame
+    /// `sudo` and not the firewall.
+    fn warn_about_privilege(&mut self, pid: Pid, info: &ProcessInfo) {
+        let program = info.program_name().to_string();
+        if !PRIVILEGE_PROGRAMS.contains(&program.as_str()) {
+            return;
+        }
+        self.emit(
+            pid,
+            EventKind::MonitorWarning {
+                message: format!(
+                    "{program} cannot raise the privilege of this session. The kernel takes the \
+                     setuid bit away from every program that a traced session starts, so \
+                     {program} fails with an error of its own that does not name the firewall. \
+                     Run the command outside the firewall when you really need it."
+                ),
+            },
+        );
+    }
+
+    /// Holds a process at a system-call stop and asks the handler what to do.
+    ///
+    /// The kernel picked this call out with the filter and has not made it
+    /// yet. Nothing has happened, so a refusal here is complete: no byte is
+    /// written and no packet leaves.
+    ///
+    /// The monitor lets a call it cannot read run. It never guesses what a
+    /// program is about to do.
+    fn handle_seccomp(&mut self, pid: Pid) {
+        let Some(action) = seccomp::observe(pid) else {
+            self.resume(pid, None);
+            return;
+        };
+
+        self.emit(pid, event_of(&action));
+
+        let ancestry = self.ancestry(pid);
+        match self.handler.on_syscall(pid, &action, &ancestry) {
+            Intercept::Continue => self.resume(pid, None),
+            Intercept::Refuse => {
+                if let Err(error) = seccomp::refuse(pid) {
+                    // The monitor could not write the registers, so it cannot
+                    // let the call fail. Killing the process is the only
+                    // answer left that does not let the action through.
+                    self.emit(
+                        pid,
+                        EventKind::MonitorWarning {
+                            message: format!(
+                                "cannot refuse the call of process {pid} ({error}); \
+                                 the firewall stops the process instead"
+                            ),
+                        },
+                    );
+                    self.kill_one(pid);
+                }
+                self.resume(pid, None);
+            }
             Intercept::Deny => self.kill_one(pid),
             Intercept::TerminateSession => {
                 self.terminated = true;
@@ -485,6 +652,27 @@ fn forwardable(signal: Signal) -> Option<Signal> {
             None
         }
         other => Some(other),
+    }
+}
+
+/// Makes the event that reports one held system call.
+fn event_of(action: &Action) -> EventKind {
+    match action {
+        Action::FileOpen { path, write } => EventKind::FileOpen {
+            path: path.clone(),
+            write: *write,
+        },
+        Action::NetworkConnect { addr, port, host } => EventKind::NetworkConnect {
+            addr: addr.clone(),
+            port: *port,
+            host: host.clone(),
+        },
+        // `seccomp::observe` makes no other shape. A future call would have
+        // to bring its own event, and until then the monitor says what it saw
+        // rather than reporting the wrong kind.
+        other => EventKind::MonitorWarning {
+            message: format!("the monitor has no event for a {} action", other.kind()),
+        },
     }
 }
 

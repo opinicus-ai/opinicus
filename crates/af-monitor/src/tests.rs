@@ -10,11 +10,11 @@ use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use af_core::{Event, EventKind, Pid, ProcessInfo, SessionMeta};
+use af_core::{Action, Event, EventKind, Pid, ProcessInfo, SessionMeta};
 
 use crate::{
     inspect, procfs, InputSnapshot, Intercept, Monitor, MonitorConfig, MonitorHandler,
-    SessionOutcome,
+    SessionOutcome, SyscallFilter,
 };
 
 /// Keeps two sessions from running at the same time.
@@ -36,6 +36,12 @@ struct Recorder {
     inputs: HashMap<String, InputSnapshot>,
     deny: Option<String>,
     terminate: Option<String>,
+    /// Every action that the kernel filter held, in the order it held them.
+    actions: Vec<Action>,
+    /// A file open whose path holds this text is refused.
+    refuse_path: Option<String>,
+    /// A connection to this port is refused.
+    refuse_port: Option<u16>,
 }
 
 impl Recorder {
@@ -63,9 +69,54 @@ impl Recorder {
             .collect()
     }
 
+    /// Makes a handler that refuses every open of a path with this text.
+    fn refusing_path(text: &str) -> Self {
+        Self {
+            refuse_path: Some(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Makes a handler that refuses every connection to one port.
+    fn refusing_port(port: u16) -> Self {
+        Self {
+            refuse_port: Some(port),
+            ..Default::default()
+        }
+    }
+
     /// Returns the identifier of the process of the first exec event.
     fn root_pid(&self) -> Pid {
         self.execs.first().expect("at least one exec").pid
+    }
+
+    /// Returns every file open that the kernel filter held.
+    fn opens(&self) -> Vec<(&str, bool)> {
+        self.actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::FileOpen { path, write } => Some((path.as_str(), *write)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns every connection that the kernel filter held.
+    fn connects(&self) -> Vec<(&str, u16)> {
+        self.actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::NetworkConnect { addr, port, .. } => Some((addr.as_str(), *port)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns true when one held open names a path with this text.
+    fn opened(&self, text: &str, write: bool) -> bool {
+        self.opens()
+            .iter()
+            .any(|(path, is_write)| path.contains(text) && *is_write == write)
     }
 }
 
@@ -91,6 +142,24 @@ impl MonitorHandler for Recorder {
         }
         if self.terminate.as_deref() == Some(program.as_str()) {
             return Intercept::TerminateSession;
+        }
+        Intercept::Continue
+    }
+
+    fn on_syscall(&mut self, _pid: Pid, action: &Action, _ancestry: &[Pid]) -> Intercept {
+        self.actions.push(action.clone());
+        match action {
+            Action::FileOpen { path, .. } => {
+                if let Some(text) = self.refuse_path.as_deref() {
+                    if path.contains(text) {
+                        return Intercept::Refuse;
+                    }
+                }
+            }
+            Action::NetworkConnect { port, .. } if self.refuse_port == Some(*port) => {
+                return Intercept::Refuse;
+            }
+            _ => {}
         }
         Intercept::Continue
     }
@@ -126,6 +195,24 @@ fn run_session(command: &[&str], handler: Recorder, seconds: u64) -> (SessionOut
 /// Runs a shell command under the monitor.
 fn run_shell(script: &str, handler: Recorder, seconds: u64) -> (SessionOutcome, Recorder) {
     run_session(&["/bin/sh", "-c", script], handler, seconds)
+}
+
+/// Runs a shell command with one filter mode.
+fn run_filtered(
+    script: &str,
+    filter: SyscallFilter,
+    handler: Recorder,
+    seconds: u64,
+) -> (SessionOutcome, Recorder) {
+    let command = ["/bin/sh", "-c", script]
+        .iter()
+        .map(|word| word.to_string())
+        .collect();
+    let config = MonitorConfig {
+        syscall_filter: filter,
+        ..MonitorConfig::new(command)
+    };
+    run_config(config, handler, seconds)
 }
 
 #[test]
@@ -473,7 +560,7 @@ fn missing_program_is_an_error() {
 #[test]
 fn capabilities_report_the_real_machine() {
     let _guard = lock();
-    let caps = Monitor::capabilities();
+    let caps = Monitor::capabilities(SyscallFilter::default());
     let by_name: HashMap<&str, &af_core::MonitorCapability> =
         caps.iter().map(|cap| (cap.name.as_str(), cap)).collect();
 
@@ -483,6 +570,7 @@ fn capabilities_report_the_real_machine() {
         "argv_capture",
         "cwd_capture",
         "stdin_inspection",
+        "syscall_filter",
         "file_open_events",
         "network_events",
         "unprivileged",
@@ -495,9 +583,11 @@ fn capabilities_report_the_real_machine() {
     assert!(by_name["argv_capture"].available);
     assert!(by_name["cwd_capture"].available);
 
-    assert!(!by_name["file_open_events"].available);
+    // The default mode installs the kernel filter, so this machine reports a
+    // file and a network event. Both carry a remark that names their limit.
+    assert!(by_name["file_open_events"].available);
     assert!(by_name["file_open_events"].detail.is_some());
-    assert!(!by_name["network_events"].available);
+    assert!(by_name["network_events"].available);
     assert!(by_name["network_events"].detail.is_some());
 }
 
@@ -750,4 +840,326 @@ fn target_scenario_finds_psql_with_its_full_provenance() {
         .find(|text| text.starts_with("#!/bin/sh"))
         .expect("the monitor reads the script of an interpreter");
     assert!(script_text.contains("-f"));
+}
+
+// ---------------------------------------------------------------------------
+// The kernel filter: what a running program does
+// ---------------------------------------------------------------------------
+
+/// Returns the shell that can open a connection, when the machine has one.
+///
+/// A connection needs a program that calls `connect`. `bash` can do it with
+/// its `/dev/tcp` path and needs nothing installed. A machine without `bash`
+/// cannot run these two tests, and the test says so instead of failing.
+fn connect_shell() -> Option<&'static str> {
+    ["/bin/bash", "/usr/bin/bash"]
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+}
+
+/// Opens a port that nothing answers on, and keeps it open for the test.
+fn listening_port() -> (std::net::TcpListener, u16) {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("a free port on the loopback address");
+    let port = listener.local_addr().expect("the address of the port").port();
+    (listener, port)
+}
+
+#[test]
+fn a_write_open_is_observed_and_a_read_is_not() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let written = dir.path().join("written.txt");
+    let read = dir.path().join("read-me.txt");
+    std::fs::write(&read, "content\n").expect("write the file to read");
+
+    let script = format!("/bin/cat {} > {}; true", read.display(), written.display());
+    let (outcome, handler) =
+        run_filtered(&script, SyscallFilter::WriteOnly, Recorder::default(), 20);
+
+    assert_eq!(outcome.exit_code, Some(0));
+    assert!(
+        handler.opened("written.txt", true),
+        "the write-intent open must reach the firewall, but it saw {:?}",
+        handler.opens()
+    );
+    assert!(
+        !handler
+            .opens()
+            .iter()
+            .any(|(path, _)| path.contains("read-me.txt")),
+        "the kernel drops a read-only open in this mode, but it reported {:?}",
+        handler.opens()
+    );
+
+    // The action also becomes a recorded event, which is what the policy
+    // engine and the trace both read.
+    let events = handler.of_kind("file_open");
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::FileOpen { path, write: true } if path.contains("written.txt")
+        )),
+        "the monitor records the open as an event"
+    );
+}
+
+#[test]
+fn all_opens_mode_observes_a_read() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let read = dir.path().join("read-me.txt");
+    std::fs::write(&read, "content\n").expect("write the file to read");
+
+    let script = format!("/bin/cat {} > /dev/null; true", read.display());
+    let (outcome, handler) =
+        run_filtered(&script, SyscallFilter::AllOpens, Recorder::default(), 20);
+
+    assert_eq!(outcome.exit_code, Some(0));
+    assert!(
+        handler.opened("read-me.txt", false),
+        "every open reaches the firewall in this mode, but it saw {:?}",
+        handler.opens()
+    );
+}
+
+#[test]
+fn the_filter_reaches_a_program_two_levels_deep() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let deep = dir.path().join("deep.txt");
+    // The open happens in a shell inside a shell, and neither of them
+    // installed a filter. Both got it from the root of the session.
+    let script = format!(
+        "/bin/sh -c '/bin/sh -c \"/bin/touch {}\"'; true",
+        deep.display()
+    );
+
+    let (outcome, handler) =
+        run_filtered(&script, SyscallFilter::WriteOnly, Recorder::default(), 20);
+
+    assert_eq!(outcome.exit_code, Some(0));
+    assert!(deep.exists(), "the program itself ran");
+    assert!(
+        handler.opened("deep.txt", true),
+        "the filter is inherited by every child, but the firewall saw {:?}",
+        handler.opens()
+    );
+}
+
+#[test]
+fn a_refused_open_fails_and_the_program_runs_on() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let refused = dir.path().join("secret.env");
+    let after = dir.path().join("after.txt");
+    // The first command is refused. The second one proves that the shell
+    // itself survived the refusal and went on with its work.
+    let script = format!(
+        "/bin/touch {} 2>/dev/null; /bin/touch {}; true",
+        refused.display(),
+        after.display()
+    );
+
+    let (outcome, handler) = run_filtered(
+        &script,
+        SyscallFilter::WriteOnly,
+        Recorder::refusing_path("secret.env"),
+        20,
+    );
+
+    assert!(
+        !refused.exists(),
+        "the refused open must never make the file {}",
+        refused.display()
+    );
+    assert!(
+        after.exists(),
+        "the program keeps running after a refusal, so the next command works"
+    );
+    assert_eq!(outcome.exit_code, Some(0), "the session itself is untouched");
+    assert!(!outcome.terminated_by_firewall);
+    assert!(
+        handler.opened("secret.env", true),
+        "the firewall saw the open"
+    );
+}
+
+#[test]
+fn a_connection_is_observed_with_its_address_and_port() {
+    let Some(shell) = connect_shell() else {
+        eprintln!("no bash on this machine, so the connection test cannot run");
+        return;
+    };
+    let (_listener, port) = listening_port();
+    let script = format!("exec 3<>/dev/tcp/127.0.0.1/{port} && exec 3>&-");
+
+    let config = MonitorConfig {
+        syscall_filter: SyscallFilter::WriteOnly,
+        ..MonitorConfig::new(vec![shell.to_string(), "-c".to_string(), script])
+    };
+    let (_outcome, handler) = run_config(config, Recorder::default(), 20);
+
+    assert!(
+        handler.connects().contains(&("127.0.0.1", port)),
+        "the firewall must see the address and the port, but it saw {:?}",
+        handler.connects()
+    );
+    let events = handler.of_kind("network_connect");
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::NetworkConnect { addr, port: seen, host: None }
+                if addr == "127.0.0.1" && *seen == port
+        )),
+        "the monitor records the connection as an event, with no host name"
+    );
+}
+
+#[test]
+fn a_refused_connection_fails_in_the_program() {
+    let Some(shell) = connect_shell() else {
+        eprintln!("no bash on this machine, so the connection test cannot run");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let marker = dir.path().join("connected.txt");
+    let (_listener, port) = listening_port();
+    // The marker is only made when the connection worked.
+    let script = format!(
+        "exec 3<>/dev/tcp/127.0.0.1/{port} 2>/dev/null && /bin/touch {}; true",
+        marker.display()
+    );
+
+    let config = MonitorConfig {
+        syscall_filter: SyscallFilter::WriteOnly,
+        ..MonitorConfig::new(vec![shell.to_string(), "-c".to_string(), script])
+    };
+    let (outcome, handler) = run_config(config, Recorder::refusing_port(port), 20);
+
+    assert!(
+        !marker.exists(),
+        "the refused connection must not reach the port"
+    );
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "the program handles the error itself"
+    );
+    assert!(handler.connects().contains(&("127.0.0.1", port)));
+}
+
+#[test]
+fn the_off_mode_installs_no_filter_and_takes_no_privilege() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let status = dir.path().join("status.txt");
+    let script = format!("/bin/cat /proc/self/status > {}", status.display());
+
+    let (outcome, handler) = run_filtered(&script, SyscallFilter::Off, Recorder::default(), 20);
+    assert_eq!(outcome.exit_code, Some(0));
+
+    assert!(
+        handler.actions.is_empty(),
+        "a session with no filter observes no action, but it saw {:?}",
+        handler.actions
+    );
+
+    let text = std::fs::read_to_string(&status).expect("the child wrote its own state");
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(|value| value.trim().to_string())
+            .unwrap_or_else(|| panic!("the field {name} is in /proc/<pid>/status"))
+    };
+    assert_eq!(
+        field("NoNewPrivs:"),
+        "0",
+        "the monitor only takes the right to raise privilege when it really installs a filter"
+    );
+    assert_eq!(field("Seccomp:"), "0", "no filter is installed");
+}
+
+#[test]
+fn the_write_only_mode_installs_the_filter_in_the_child() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let status = dir.path().join("status.txt");
+    let script = format!("/bin/cat /proc/self/status > {}", status.display());
+
+    let (outcome, _handler) =
+        run_filtered(&script, SyscallFilter::WriteOnly, Recorder::default(), 20);
+    assert_eq!(outcome.exit_code, Some(0));
+
+    let text = std::fs::read_to_string(&status).expect("the child wrote its own state");
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default()
+    };
+    // `Seccomp: 2` is the filter mode. The value proves that the filter of the
+    // root reached a program two processes later, with no install of its own.
+    assert_eq!(field("Seccomp:"), "2", "the filter is inherited");
+    assert_eq!(
+        field("NoNewPrivs:"),
+        "1",
+        "an unprivileged filter needs this promise"
+    );
+}
+
+#[test]
+fn a_program_that_raises_privilege_gets_an_explanation() {
+    // The test needs no real `sudo` and no privilege. The monitor reads the
+    // name of the program from its own path, so a copy of `true` under the
+    // name `sudo` reaches exactly the same code. It must be a real program
+    // and not a script, because a script runs under the name of its
+    // interpreter.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let fake = dir.path().join("sudo");
+    let source = ["/bin/true", "/usr/bin/true"]
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+        .expect("a program to copy");
+    std::fs::copy(source, &fake).expect("copy the program");
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+        .expect("make the program runnable");
+
+    let (_outcome, handler) = run_shell(
+        &format!("{} ; true", fake.display()),
+        Recorder::default(),
+        20,
+    );
+
+    let warned = handler.of_kind("monitor_warning").into_iter().any(|event| {
+        matches!(&event.kind, EventKind::MonitorWarning { message }
+            if message.contains("sudo") && message.contains("setuid"))
+    });
+    assert!(
+        warned,
+        "the monitor explains why sudo cannot work, instead of leaving the user to guess"
+    );
+}
+
+#[test]
+fn the_capability_report_follows_the_filter_mode() {
+    let detail_of = |caps: &[af_core::MonitorCapability], name: &str| {
+        caps.iter()
+            .find(|cap| cap.name == name)
+            .map(|cap| (cap.available, cap.detail.clone().unwrap_or_default()))
+            .unwrap_or_else(|| panic!("the report holds {name}"))
+    };
+
+    let off = Monitor::capabilities(SyscallFilter::Off);
+    assert!(!detail_of(&off, "file_open_events").0);
+    assert!(!detail_of(&off, "network_events").0);
+
+    let write_only = Monitor::capabilities(SyscallFilter::WriteOnly);
+    assert!(detail_of(&write_only, "file_open_events").0);
+    assert!(detail_of(&write_only, "network_events").0);
+    assert!(
+        detail_of(&write_only, "file_open_events").1.contains("read"),
+        "the report must name the read that this mode does not see"
+    );
+
+    let all_opens = Monitor::capabilities(SyscallFilter::AllOpens);
+    assert!(detail_of(&all_opens, "file_open_events").0);
+    assert!(detail_of(&all_opens, "syscall_filter")
+        .1
+        .contains("all-opens"));
 }
