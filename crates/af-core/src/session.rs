@@ -1,5 +1,7 @@
 //! Session and agent metadata.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Pid, TimestampNanos};
@@ -136,6 +138,15 @@ pub struct SessionMeta {
     /// Version of the event schema of this session.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    /// Named sets of text that the launcher read at session start.
+    ///
+    /// The launcher records, for example, the git remotes of the work tree
+    /// under the name `git_remotes`. A rule can then ask whether a value is
+    /// new. The sets travel inside the `SessionStart` event, so a replay
+    /// rebuilds the same baseline from the trace and never reads the machine
+    /// again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub baseline: BTreeMap<String, BTreeSet<String>>,
 }
 
 fn default_schema_version() -> u32 {
@@ -157,6 +168,7 @@ impl SessionMeta {
             cwd,
             agent: AgentMeta::from_program(&program),
             schema_version: crate::EVENT_SCHEMA_VERSION,
+            baseline: BTreeMap::new(),
         }
     }
 }

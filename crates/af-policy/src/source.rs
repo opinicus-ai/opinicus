@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use af_core::{Decision, RiskLevel};
+use af_core::{Decision, MarkScope, RiskLevel};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 
@@ -129,6 +129,12 @@ pub struct RuleSource {
     /// Conditions that switch the rule off for one action.
     #[serde(default)]
     pub exceptions: Vec<MatchSource>,
+    /// A fact that the session writes down when the condition matches.
+    #[serde(default)]
+    pub remember: Option<RememberSource>,
+    /// A window and a count that the rule must reach before it fires.
+    #[serde(default)]
+    pub threshold: Option<ThresholdSource>,
     /// The tests that the rule declares.
     #[serde(default)]
     pub tests: Vec<TestSource>,
@@ -136,6 +142,87 @@ pub struct RuleSource {
 
 fn yes() -> bool {
     true
+}
+
+/// What the session writes down when a rule matches.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RememberSource {
+    /// Name of the mark, for example `credential-read`.
+    pub mark: String,
+    /// How far the mark reaches. The default is the whole session.
+    #[serde(default)]
+    pub scope: MarkScope,
+    /// How long the mark counts, in seconds. No value means the session.
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+}
+
+/// A window and a count that a rule must reach before it fires.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThresholdSource {
+    /// Length of the trailing window, in seconds.
+    pub window_seconds: u64,
+    /// How many hits the window must hold, this action included.
+    pub at_least: usize,
+    /// What makes two hits different. The default counts every hit.
+    #[serde(default)]
+    pub distinct: DistinctKey,
+}
+
+/// What makes two hits of a rule different.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DistinctKey {
+    /// Count every hit, not the different values.
+    #[default]
+    None,
+    /// The path of the file.
+    Path,
+    /// The host name or the address of the connection.
+    Host,
+    /// The program name.
+    Program,
+    /// The command line, joined with one space.
+    ArgvJoined,
+}
+
+impl DistinctKey {
+    /// Returns the label that the rule file uses.
+    pub fn label(&self) -> &'static str {
+        match self {
+            DistinctKey::None => "none",
+            DistinctKey::Path => "path",
+            DistinctKey::Host => "host",
+            DistinctKey::Program => "program",
+            DistinctKey::ArgvJoined => "argv_joined",
+        }
+    }
+}
+
+/// A question about a mark that an earlier action wrote down.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarkedSource {
+    /// Name of the mark.
+    pub mark: String,
+    /// How old the mark may be, in seconds. No value means any age.
+    #[serde(default)]
+    pub within_seconds: Option<u64>,
+    /// How far the reader looks. The default is the whole session.
+    #[serde(default)]
+    pub scope: MarkScope,
+}
+
+/// A question about a value that the session did not know at its start.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineMissingSource {
+    /// Name of the baseline set, for example `git_remotes`.
+    pub set: String,
+    /// Pattern with exactly one group that reads the value from the arguments.
+    pub capture: String,
 }
 
 /// One condition.
@@ -225,6 +312,12 @@ pub struct MatchSource {
     /// Conditions of which one must match.
     #[serde(default)]
     pub any_of: Option<Vec<MatchSource>>,
+    /// A mark that an earlier action of the session wrote down.
+    #[serde(default)]
+    pub marked: Option<MarkedSource>,
+    /// A value that the session did not know at its start.
+    #[serde(default)]
+    pub baseline_missing: Option<BaselineMissingSource>,
 }
 
 /// One process record of a declared test.
@@ -304,6 +397,42 @@ pub enum TestInputSource {
     Environment,
 }
 
+/// One step that happened before the action of a test.
+///
+/// A step has the same shape as the action of a test. It builds the memory of
+/// the session, and the test judges only the action that comes after it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestStep {
+    /// Time of the step, in seconds after the start of the test.
+    ///
+    /// Without a value the steps stand one second apart, and the action of
+    /// the test comes last.
+    #[serde(default)]
+    pub at_seconds: Option<u64>,
+    /// The process that performs the step.
+    #[serde(default)]
+    pub process: TestProcess,
+    /// Ancestry of the process, nearest parent first and session root last.
+    #[serde(default)]
+    pub ancestry: Vec<TestProcess>,
+    /// A file open instead of the default program start.
+    #[serde(default)]
+    pub file_open: Option<TestFileOpen>,
+    /// A network connection instead of the default program start.
+    #[serde(default)]
+    pub connect: Option<TestConnect>,
+    /// Observed content instead of the default program start.
+    #[serde(default)]
+    pub input: Option<TestInput>,
+    /// How many times the step repeats. The default is one.
+    ///
+    /// A repeated step stands one second after the one before it, so a test
+    /// can write twenty deletes in one line.
+    #[serde(default)]
+    pub repeat: Option<usize>,
+}
+
 /// One test that a rule declares.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -334,4 +463,15 @@ pub struct TestSource {
     /// Observed content instead of the default program start.
     #[serde(default)]
     pub input: Option<TestInput>,
+    /// The steps that happened before the action of the test.
+    #[serde(default)]
+    pub history: Vec<TestStep>,
+    /// Time of the action, in seconds after the start of the test.
+    ///
+    /// Without a value the action comes one second after the last step.
+    #[serde(default)]
+    pub at_seconds: Option<u64>,
+    /// The named sets that the launcher recorded at session start.
+    #[serde(default)]
+    pub baseline: BTreeMap<String, Vec<String>>,
 }

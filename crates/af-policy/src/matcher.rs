@@ -6,11 +6,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use af_core::{Action, EvalContext, ProcessInfo};
+use af_core::{Action, EvalContext, MarkScope, Pid, ProcessInfo, SessionMemory, TimestampNanos};
 use regex::Regex;
 
 use crate::glob::Glob;
-use crate::source::{ActionKind, MatchSource, Words};
+use crate::source::{ActionKind, DistinctKey, MatchSource, Words};
+
+/// An empty memory for a caller that keeps none.
+///
+/// A rule that asks about an earlier action then finds nothing and stays
+/// quiet, which is the safe answer.
+static NO_MEMORY: SessionMemory = SessionMemory::new();
 
 /// A compile failure of one condition. The caller adds the rule and the file.
 pub(crate) type CompileError = String;
@@ -49,6 +55,28 @@ pub(crate) struct Matcher {
     any_of: Vec<Matcher>,
     /// True when `any_of` is present but holds no condition.
     empty_any_of: bool,
+    marked: Option<MarkedCondition>,
+    baseline_missing: Option<BaselineCondition>,
+}
+
+/// A compiled question about a mark of an earlier action.
+#[derive(Debug)]
+pub(crate) struct MarkedCondition {
+    /// Name of the mark.
+    pub(crate) mark: String,
+    /// How old the mark may be, in seconds.
+    within_seconds: Option<u64>,
+    /// How far the reader looks.
+    scope: MarkScope,
+}
+
+/// A compiled question about a value that the session start did not hold.
+#[derive(Debug)]
+pub(crate) struct BaselineCondition {
+    /// Name of the baseline set.
+    set: String,
+    /// Pattern with exactly one group over the joined command line.
+    capture: Regex,
 }
 
 impl Matcher {
@@ -89,6 +117,8 @@ impl Matcher {
             all_of: compile_list(source.all_of.as_deref())?,
             any_of: compile_list(source.any_of.as_deref())?,
             empty_any_of,
+            marked: compile_marked(source)?,
+            baseline_missing: compile_baseline(source)?,
         })
     }
 
@@ -257,6 +287,16 @@ impl Matcher {
         if !self.any_of.is_empty() && !self.any_of.iter().any(|m| m.matches(subject)) {
             return false;
         }
+        if let Some(condition) = &self.marked {
+            if !subject.has_mark(condition) {
+                return false;
+            }
+        }
+        if let Some(condition) = &self.baseline_missing {
+            if !subject.baseline_missing(condition) {
+                return false;
+            }
+        }
         true
     }
 
@@ -349,6 +389,8 @@ impl Matcher {
             && self.all_of.is_empty()
             && self.any_of.is_empty()
             && !self.empty_any_of
+            && self.marked.is_none()
+            && self.baseline_missing.is_none()
     }
 
     /// Returns true when `any_of` is present but holds no condition.
@@ -360,6 +402,56 @@ impl Matcher {
     pub(crate) fn has_zero_depth(&self) -> bool {
         self.ancestor_depth_at_least == Some(0)
     }
+
+    /// Returns the mark that this block asks about, when it asks about one.
+    pub(crate) fn marked(&self) -> Option<&MarkedCondition> {
+        self.marked.as_ref()
+    }
+}
+
+/// Compiles the `marked` block of a condition.
+fn compile_marked(source: &MatchSource) -> Result<Option<MarkedCondition>, CompileError> {
+    let Some(marked) = &source.marked else {
+        return Ok(None);
+    };
+    if marked.mark.trim().is_empty() {
+        return Err("field `marked.mark` has no name".to_string());
+    }
+    Ok(Some(MarkedCondition {
+        mark: marked.mark.clone(),
+        within_seconds: marked.within_seconds,
+        scope: marked.scope,
+    }))
+}
+
+/// Compiles the `baseline_missing` block of a condition.
+///
+/// The pattern must hold exactly one group, because the group is the value
+/// that the rule compares against the baseline set.
+fn compile_baseline(source: &MatchSource) -> Result<Option<BaselineCondition>, CompileError> {
+    let Some(baseline) = &source.baseline_missing else {
+        return Ok(None);
+    };
+    if baseline.set.trim().is_empty() {
+        return Err("field `baseline_missing.set` has no name".to_string());
+    }
+    let capture = Regex::new(&baseline.capture).map_err(|err| {
+        format!(
+            "field `baseline_missing.capture` has a bad pattern `{}`: {err}",
+            baseline.capture
+        )
+    })?;
+    let groups = capture.captures_len() - 1;
+    if groups != 1 {
+        return Err(format!(
+            "field `baseline_missing.capture` needs exactly one group, but `{}` has {groups}",
+            baseline.capture
+        ));
+    }
+    Ok(Some(BaselineCondition {
+        set: baseline.set.clone(),
+        capture,
+    }))
 }
 
 fn words(source: &Option<Words>) -> Vec<String> {
@@ -431,11 +523,23 @@ pub(crate) struct Subject<'a> {
     port: Option<u16>,
     input: Option<&'a str>,
     ancestry: &'a [ProcessInfo],
+    ts: TimestampNanos,
+    subtree_root: Pid,
+    memory: &'a SessionMemory,
 }
 
 impl<'a> Subject<'a> {
     /// Builds the subject from the context that the monitor gives.
+    ///
+    /// The memory comes from the context. A context with no memory reads an
+    /// empty store, so a rule about an earlier action stays quiet.
     pub(crate) fn new(ctx: &EvalContext<'a>) -> Self {
+        let memory = ctx.memory.unwrap_or(&NO_MEMORY);
+        Subject::with_memory(ctx, memory)
+    }
+
+    /// Builds the subject and reads a memory that the caller owns.
+    pub(crate) fn with_memory(ctx: &EvalContext<'a>, memory: &'a SessionMemory) -> Self {
         let process = ctx.process;
         let mut subject = Self {
             kind: kind_of(ctx.action),
@@ -454,6 +558,9 @@ impl<'a> Subject<'a> {
             port: None,
             input: None,
             ancestry: ctx.ancestry,
+            ts: ctx.ts,
+            subtree_root: ctx.subtree_root(),
+            memory,
         };
         match ctx.action {
             Action::Exec {
@@ -542,6 +649,76 @@ impl<'a> Subject<'a> {
             Some(addr) => pattern.is_match(addr),
             None => false,
         }
+    }
+
+    /// Returns true when a live mark answers the question of the condition.
+    fn has_mark(&self, condition: &MarkedCondition) -> bool {
+        self.memory.has_mark(
+            &condition.mark,
+            self.ts,
+            condition.within_seconds,
+            condition.scope,
+            self.subtree_root,
+        )
+    }
+
+    /// Returns true when the captured value is not in the baseline set.
+    ///
+    /// The answer is false when the pattern captures nothing, and also when
+    /// the session recorded no set with this name. An unknown set would make
+    /// every value look new, and a rule that fires on everything is worse
+    /// than a rule that stays quiet.
+    fn baseline_missing(&self, condition: &BaselineCondition) -> bool {
+        let Some(found) = condition.capture.captures(&self.argv_joined) else {
+            return false;
+        };
+        let Some(value) = found.get(1).map(|m| m.as_str()) else {
+            return false;
+        };
+        match self.memory.baseline_has(&condition.set, value) {
+            Some(known) => !known,
+            None => false,
+        }
+    }
+
+    /// Returns the value that makes two hits of a rule different.
+    pub(crate) fn distinct_key(&self, kind: DistinctKey) -> Option<String> {
+        match kind {
+            DistinctKey::None => None,
+            DistinctKey::Path => self.path.map(str::to_string),
+            DistinctKey::Host => self
+                .host
+                .or(self.addr)
+                .map(str::to_string),
+            DistinctKey::Program => self
+                .action_program
+                .filter(|name| !name.is_empty())
+                .or(Some(self.process_program))
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+            DistinctKey::ArgvJoined => {
+                if self.argv_joined.is_empty() {
+                    None
+                } else {
+                    Some(self.argv_joined.clone())
+                }
+            }
+        }
+    }
+
+    /// Returns the time of the action.
+    pub(crate) fn ts(&self) -> TimestampNanos {
+        self.ts
+    }
+
+    /// Returns the root of the process subtree that performs the action.
+    pub(crate) fn subtree_root(&self) -> Pid {
+        self.subtree_root
+    }
+
+    /// Returns the memory that the subject reads.
+    pub(crate) fn memory(&self) -> &SessionMemory {
+        self.memory
     }
 
     /// Returns the value of an environment name of the action or the process.

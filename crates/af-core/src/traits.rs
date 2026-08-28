@@ -6,9 +6,10 @@ use crate::{
     decision::{RuleInfo, Verdict},
     error::Result,
     event::Event,
+    memory::{MemoryEffect, SessionMemory},
     process::{Action, ProcessInfo},
     session::{AgentMeta, SessionMeta},
-    Pid,
+    Pid, TimestampNanos,
 };
 
 /// Everything the policy engine needs to evaluate one action.
@@ -26,6 +27,17 @@ pub struct EvalContext<'a> {
     pub ancestry: &'a [ProcessInfo],
     /// What an agent log adapter added, when one is available.
     pub agent: Option<&'a AgentMeta>,
+    /// Time of the event that produced the action.
+    ///
+    /// A rule with a window compares against this value and never against a
+    /// clock, so a replay of a trace gives the same answer as the live
+    /// session.
+    pub ts: TimestampNanos,
+    /// What the session remembers, when the caller keeps a memory.
+    ///
+    /// A rule that asks about an earlier action stays quiet while this is
+    /// `None`, so a caller that keeps no memory sees the old behaviour.
+    pub memory: Option<&'a SessionMemory>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -42,7 +54,21 @@ impl<'a> EvalContext<'a> {
             process,
             ancestry,
             agent: None,
+            ts: 0,
+            memory: None,
         }
+    }
+
+    /// Sets the time of the event that produced the action.
+    pub fn at(mut self, ts: TimestampNanos) -> Self {
+        self.ts = ts;
+        self
+    }
+
+    /// Gives the context a read view of the session memory.
+    pub fn with_memory(mut self, memory: &'a SessionMemory) -> Self {
+        self.memory = Some(memory);
+        self
     }
 
     /// Returns true when a program with this name is anywhere in the ancestry.
@@ -53,6 +79,22 @@ impl<'a> EvalContext<'a> {
     /// Returns the nearest parent process, when there is one.
     pub fn parent(&self) -> Option<&ProcessInfo> {
         self.ancestry.first()
+    }
+
+    /// Returns the root of the process subtree that performs the action.
+    ///
+    /// The value is the process under the root of the session, so every
+    /// process of one agent task gets the same answer. A mark with the scope
+    /// `subtree` uses it, so a credential read in one task cannot arm a rule
+    /// in another task.
+    pub fn subtree_root(&self) -> Pid {
+        let root = self.session.root_pid;
+        for parent in self.ancestry.iter().rev() {
+            if parent.pid != root {
+                return parent.pid;
+            }
+        }
+        self.process.pid
     }
 }
 
@@ -75,8 +117,26 @@ pub trait PolicyEngine: Send + Sync {
     /// Evaluates one action and returns the verdict.
     ///
     /// The engine must be deterministic. The same context always gives the
-    /// same verdict.
+    /// same verdict. The call has no side effect.
     fn evaluate(&self, ctx: &EvalContext<'_>) -> Verdict;
+
+    /// Evaluates one action against the memory of the session.
+    ///
+    /// The engine reads the memory and returns what the session must write
+    /// down, but it never writes itself. **The caller applies the effects, in
+    /// event order.** That keeps the evaluation free of side effects, so a
+    /// replay of a trace gives the same verdicts as the live session.
+    ///
+    /// The default implementation calls [`PolicyEngine::evaluate`] and asks
+    /// for nothing, which is right for an engine with no memory.
+    fn evaluate_with_memory(
+        &self,
+        ctx: &EvalContext<'_>,
+        memory: &SessionMemory,
+    ) -> (Verdict, Vec<MemoryEffect>) {
+        let _ = memory;
+        (self.evaluate(ctx), Vec::new())
+    }
 
     /// Returns a description of every loaded rule.
     fn rules(&self) -> Vec<RuleInfo>;

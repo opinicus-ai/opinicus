@@ -5,6 +5,7 @@
 //! * the normalized event schema ([`event`]);
 //! * process and provenance types ([`process`]);
 //! * policy decisions and verdicts ([`decision`]);
+//! * the memory that the engine keeps for one session ([`memory`]);
 //! * session and agent metadata ([`session`]);
 //! * the traits that connect the layers ([`traits`]).
 //!
@@ -15,6 +16,7 @@ pub mod decision;
 pub mod display;
 pub mod error;
 pub mod event;
+pub mod memory;
 pub mod process;
 pub mod session;
 pub mod traits;
@@ -22,6 +24,7 @@ pub mod traits;
 pub use decision::{Decision, RiskLevel, RuleInfo, RuleMatch, Verdict};
 pub use error::{Error, Result};
 pub use event::{Event, EventKind, InputStream, MonitorCapability};
+pub use memory::{MarkScope, MemoryEffect, SessionMemory};
 pub use process::{Action, InputSource, ProcessInfo, ProcessKey};
 pub use session::{AgentKind, AgentMeta, SessionId, SessionMeta};
 pub use traits::{

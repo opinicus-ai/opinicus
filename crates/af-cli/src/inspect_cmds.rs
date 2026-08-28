@@ -1,6 +1,8 @@
 //! The `replay`, `tree` and `doctor` sub-commands.
 
-use af_core::{display, Action, EvalContext, Event, EventKind, PolicyEngine, SessionMeta};
+use af_core::{
+    display, Action, EvalContext, Event, EventKind, PolicyEngine, SessionMemory, SessionMeta,
+};
 use af_provenance::ProcessGraph;
 use af_recorder::read_trace;
 use anyhow::{Context, Result};
@@ -40,6 +42,10 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
     let policy = load_policy(&args.policy)?;
     let graph = ProcessGraph::from_trace(&events);
     let session = session_of(&events);
+    // The baseline comes from the `SessionStart` event of the trace, never
+    // from this machine. A replay must read no state of the machine, or the
+    // same trace could give two answers.
+    let mut memory = SessionMemory::with_baseline(session.baseline.clone());
 
     let mut hits: Vec<ReplayHit> = Vec::new();
     let mut evaluated = 0usize;
@@ -59,7 +65,16 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
             cwd: judged.cwd.clone(),
             env: judged.env.clone(),
         };
-        let verdict = policy.evaluate(&EvalContext::new(&session, &action, &judged, &ancestry));
+        // The memory carries a fact from an earlier action to this one. The
+        // effects are applied in event order, exactly as the live handler
+        // does it, so a replay repeats the verdicts of the live session.
+        let (verdict, effects) = policy.evaluate_with_memory(
+            &EvalContext::new(&session, &action, &judged, &ancestry).at(event.ts),
+            &memory,
+        );
+        for effect in effects {
+            memory.apply(effect, event.ts);
+        }
 
         if verdict.matches.is_empty() {
             if args.verbose && !args.json {

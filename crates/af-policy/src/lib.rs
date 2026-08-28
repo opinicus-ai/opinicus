@@ -49,14 +49,15 @@ mod testing;
 use std::path::{Path, PathBuf};
 
 use af_core::{
-    Decision, Error, EvalContext, PolicyEngine, Result, RiskLevel, RuleInfo, RuleMatch, Verdict,
+    Decision, Error, EvalContext, MarkScope, MemoryEffect, PolicyEngine, Result, RiskLevel,
+    RuleInfo, RuleMatch, SessionMemory, Verdict,
 };
 
 pub use lint::{Diagnostic, Severity};
 pub use testing::{TestFailure, TestReport};
 
 use matcher::{Matcher, Subject};
-use source::{PolicyFile, RuleSource, TestSource, FORMAT_VERSION};
+use source::{DistinctKey, PolicyFile, RuleSource, TestSource, FORMAT_VERSION};
 
 /// One rule after compilation.
 #[derive(Debug)]
@@ -83,8 +84,34 @@ pub(crate) struct CompiledRule {
     pub(crate) matcher: Matcher,
     /// Conditions that switch the rule off for one action.
     pub(crate) exceptions: Vec<Matcher>,
+    /// The fact that the session writes down when the rule matches.
+    pub(crate) remember: Option<Remember>,
+    /// The window and the count that the rule must reach before it fires.
+    pub(crate) threshold: Option<Threshold>,
     /// The tests that the rule declares.
     pub(crate) tests: Vec<TestSource>,
+}
+
+/// What a rule writes into the memory of the session.
+#[derive(Debug, Clone)]
+pub(crate) struct Remember {
+    /// Name of the mark.
+    pub(crate) mark: String,
+    /// How far the mark reaches.
+    pub(crate) scope: MarkScope,
+    /// How long the mark counts, in seconds.
+    pub(crate) ttl_seconds: Option<u64>,
+}
+
+/// The window and the count that a rule must reach before it fires.
+#[derive(Debug, Clone)]
+pub(crate) struct Threshold {
+    /// Length of the trailing window, in seconds.
+    pub(crate) window_seconds: u64,
+    /// How many hits the window must hold, this action included.
+    pub(crate) at_least: usize,
+    /// What makes two hits different.
+    pub(crate) distinct: DistinctKey,
 }
 
 impl CompiledRule {
@@ -97,6 +124,50 @@ impl CompiledRule {
             return false;
         }
         !self.exceptions.iter().any(|e| e.matches(subject))
+    }
+
+    /// Evaluates one action against this rule alone.
+    ///
+    /// The result says whether the rule fires, and what the session must
+    /// write down. A rule with a `threshold` stays quiet until the window
+    /// holds enough hits, but it counts the hit in both cases.
+    pub(crate) fn evaluate_one(&self, subject: &Subject<'_>) -> (bool, Vec<MemoryEffect>) {
+        if !self.matches(subject) {
+            return (false, Vec::new());
+        }
+        let mut effects: Vec<MemoryEffect> = Vec::new();
+        if let Some(remember) = &self.remember {
+            effects.push(MemoryEffect::SetMark {
+                name: remember.mark.clone(),
+                scope: remember.scope,
+                root: subject.subtree_root(),
+                ttl_seconds: remember.ttl_seconds,
+            });
+        }
+        let Some(threshold) = &self.threshold else {
+            return (true, effects);
+        };
+        let key = subject.distinct_key(threshold.distinct);
+        let reached = if threshold.distinct == DistinctKey::None {
+            subject.memory().count_with_current(
+                &self.id,
+                subject.ts(),
+                threshold.window_seconds,
+            )
+        } else {
+            subject.memory().distinct_with_current(
+                &self.id,
+                subject.ts(),
+                threshold.window_seconds,
+                key.as_deref(),
+            )
+        };
+        effects.push(MemoryEffect::NoteOccurrence {
+            rule_id: self.id.clone(),
+            key,
+            window_seconds: threshold.window_seconds,
+        });
+        (reached >= threshold.at_least, effects)
     }
 
     /// Makes the record that the verdict carries to the user.
@@ -305,17 +376,40 @@ impl PolicySet {
 impl PolicyEngine for PolicySet {
     fn evaluate(&self, ctx: &EvalContext<'_>) -> Verdict {
         let subject = Subject::new(ctx);
-        let mut matches: Vec<RuleMatch> = Vec::new();
-        for rule in &self.rules {
-            if rule.matches(&subject) {
-                matches.push(rule.to_match());
-            }
-        }
-        Verdict::from_matches(matches)
+        self.judge(&subject).0
+    }
+
+    fn evaluate_with_memory(
+        &self,
+        ctx: &EvalContext<'_>,
+        memory: &SessionMemory,
+    ) -> (Verdict, Vec<MemoryEffect>) {
+        let subject = Subject::with_memory(ctx, memory);
+        self.judge(&subject)
     }
 
     fn rules(&self) -> Vec<RuleInfo> {
         self.rules.iter().map(CompiledRule::to_info).collect()
+    }
+}
+
+impl PolicySet {
+    /// Runs every rule against one action.
+    ///
+    /// The call reads the memory but never writes it. The effects go back to
+    /// the caller in rule order, so two runs of the same trace write the same
+    /// records in the same order.
+    fn judge(&self, subject: &Subject<'_>) -> (Verdict, Vec<MemoryEffect>) {
+        let mut matches: Vec<RuleMatch> = Vec::new();
+        let mut effects: Vec<MemoryEffect> = Vec::new();
+        for rule in &self.rules {
+            let (fires, mut wanted) = rule.evaluate_one(subject);
+            effects.append(&mut wanted);
+            if fires {
+                matches.push(rule.to_match());
+            }
+        }
+        (Verdict::from_matches(matches), effects)
     }
 }
 
@@ -343,7 +437,56 @@ fn compile_rule(rule: &RuleSource, source: &str) -> Result<CompiledRule> {
                 rule.id, test.name
             )));
         }
+        for (index, step) in test.history.iter().enumerate() {
+            let count = usize::from(step.file_open.is_some())
+                + usize::from(step.connect.is_some())
+                + usize::from(step.input.is_some());
+            if count > 1 {
+                return Err(Error::policy(format!(
+                    "{source}: rule `{}`: test `{}`: history step {index} gives more than one action",
+                    rule.id, test.name
+                )));
+            }
+        }
     }
+    let remember = match &rule.remember {
+        None => None,
+        Some(remember) => {
+            if remember.mark.trim().is_empty() {
+                return Err(Error::policy(format!(
+                    "{source}: rule `{}`: `remember.mark` has no name",
+                    rule.id
+                )));
+            }
+            Some(Remember {
+                mark: remember.mark.clone(),
+                scope: remember.scope,
+                ttl_seconds: remember.ttl_seconds,
+            })
+        }
+    };
+    let threshold = match &rule.threshold {
+        None => None,
+        Some(threshold) => {
+            if threshold.window_seconds == 0 {
+                return Err(Error::policy(format!(
+                    "{source}: rule `{}`: `threshold.window_seconds` must be more than 0",
+                    rule.id
+                )));
+            }
+            if threshold.at_least < 2 {
+                return Err(Error::policy(format!(
+                    "{source}: rule `{}`: `threshold.at_least` must be at least 2, because a count of 1 is a rule with no threshold",
+                    rule.id
+                )));
+            }
+            Some(Threshold {
+                window_seconds: threshold.window_seconds,
+                at_least: threshold.at_least,
+                distinct: threshold.distinct,
+            })
+        }
+    };
     Ok(CompiledRule {
         id: rule.id.clone(),
         title: rule.title.clone(),
@@ -356,6 +499,8 @@ fn compile_rule(rule: &RuleSource, source: &str) -> Result<CompiledRule> {
         source: source.to_string(),
         matcher,
         exceptions,
+        remember,
+        threshold,
         tests: rule.tests.clone(),
     })
 }

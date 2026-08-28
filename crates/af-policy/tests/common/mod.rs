@@ -84,6 +84,7 @@ pub fn session(cwd: &str) -> SessionMeta {
             tool_call_id: None,
         },
         schema_version: EVENT_SCHEMA_VERSION,
+        baseline: Default::default(),
     }
 }
 

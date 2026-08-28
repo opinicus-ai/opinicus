@@ -4,9 +4,12 @@
 //! can never match, a rule with no test, or a risk level that does not agree
 //! with the decision.
 
+use std::collections::BTreeSet;
+
 use af_core::{Decision, RiskLevel};
 
 use crate::matcher::Matcher;
+use crate::source::{ActionKind, DistinctKey};
 use crate::{CompiledRule, PackInfo};
 
 /// How serious a diagnostic is.
@@ -72,13 +75,18 @@ pub(crate) fn lint(rules: &[CompiledRule], packs: &[PackInfo]) -> Vec<Diagnostic
             });
         }
     }
+    let remembered: BTreeSet<&str> = rules
+        .iter()
+        .filter_map(|rule| rule.remember.as_ref())
+        .map(|remember| remember.mark.as_str())
+        .collect();
     for rule in rules {
-        check_rule(rule, &mut out);
+        check_rule(rule, &remembered, &mut out);
     }
     out
 }
 
-fn check_rule(rule: &CompiledRule, out: &mut Vec<Diagnostic>) {
+fn check_rule(rule: &CompiledRule, remembered: &BTreeSet<&str>, out: &mut Vec<Diagnostic>) {
     let mut add = |severity: Severity, message: String| {
         out.push(Diagnostic {
             rule_id: rule.id.clone(),
@@ -118,6 +126,42 @@ fn check_rule(rule: &CompiledRule, out: &mut Vec<Diagnostic>) {
                 .push("`ancestor_depth_at_least: 0` is true for every process".to_string());
         }
     });
+    // A rule that asks for a mark which nobody writes can never fire. The
+    // usual cause is a typo in the name, or a pack that was loaded alone.
+    let mut wanted: Vec<String> = Vec::new();
+    rule.matcher.walk(&mut |node: &Matcher| {
+        if let Some(condition) = node.marked() {
+            if !remembered.contains(condition.mark.as_str()) {
+                wanted.push(condition.mark.clone());
+            }
+        }
+    });
+    for mark in wanted {
+        problems.push(format!(
+            "the condition asks for the mark `{mark}`, but no loaded rule remembers it, so the rule can never match"
+        ));
+    }
+
+    // A count over different values needs a value. An `exec` action carries
+    // no path and no host, so such a threshold would always count nothing.
+    if let (Some(threshold), Some(kind)) = (&rule.threshold, selected) {
+        let needs = match threshold.distinct {
+            DistinctKey::Path => Some(ActionKind::FileOpen),
+            DistinctKey::Host => Some(ActionKind::NetworkConnect),
+            DistinctKey::None | DistinctKey::Program | DistinctKey::ArgvJoined => None,
+        };
+        if let Some(needs) = needs {
+            if needs != kind {
+                problems.push(format!(
+                    "`threshold.distinct: {}` needs the action `{}`, but the rule selects `{}`, so it can never count",
+                    threshold.distinct.label(),
+                    needs.label(),
+                    kind.label()
+                ));
+            }
+        }
+    }
+
     for problem in problems {
         add(Severity::Error, problem);
     }

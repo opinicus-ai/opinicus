@@ -612,6 +612,7 @@ fn empty_session(session_id: SessionId) -> SessionMeta {
         cwd: String::new(),
         agent: af_core::AgentMeta::from_program(""),
         schema_version: af_core::EVENT_SCHEMA_VERSION,
+        baseline: Default::default(),
     }
 }
 

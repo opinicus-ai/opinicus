@@ -5,13 +5,15 @@
 //! asks the policy engine about each new program, and holds the process while
 //! the user answers.
 
+use std::collections::BTreeSet;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use af_approval::{ApprovalMode, TerminalApprover};
 use af_core::{
     display, Action, ApprovalOutcome, ApprovalRequest, EvalContext, Event, EventKind, EventSink,
-    MonitorCapability, Pid, PolicyEngine, ProcessInfo, SessionMeta, Verdict,
+    MemoryEffect, MonitorCapability, Pid, PolicyEngine, ProcessInfo, SessionMemory, SessionMeta,
+    TimestampNanos, Verdict,
 };
 use af_monitor::{InputSnapshot, Intercept, Monitor, MonitorConfig, MonitorHandler};
 use af_provenance::ProcessGraph;
@@ -35,7 +37,10 @@ pub fn run(args: RunArgs) -> Result<i32> {
         Some(dir) => dir.clone(),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
-    let session = SessionMeta::new(args.command.clone(), cwd.display().to_string());
+    let mut session = SessionMeta::new(args.command.clone(), cwd.display().to_string());
+    session
+        .baseline
+        .insert("git_remotes".to_string(), git_remotes(&cwd));
 
     let policy = load_policy(&args.policy).context("cannot load the rules")?;
     let mode = approval_mode(&args)?;
@@ -44,6 +49,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
     let sink = build_sink(&args)?;
 
     let mut handler = FirewallHandler {
+        memory: SessionMemory::with_baseline(session.baseline.clone()),
         session: session.clone(),
         graph: ProcessGraph::new(&session),
         policy: Box::new(policy),
@@ -56,6 +62,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         explain_on_stderr: mode != ApprovalMode::Ask,
         interventions: 0,
         blocked: false,
+        last_event_ts: session.started_at,
     };
 
     let capabilities = Monitor::capabilities();
@@ -175,11 +182,20 @@ struct FirewallHandler {
     explain_on_stderr: bool,
     interventions: usize,
     blocked: bool,
+    /// What the session remembers. The handler owns it and applies every
+    /// effect that the engine asks for, in event order.
+    memory: SessionMemory,
+    /// Time of the newest event that the monitor produced.
+    ///
+    /// The memory keys on event time and never on a clock, so the replay of
+    /// the trace of this session gives the same answers.
+    last_event_ts: TimestampNanos,
 }
 
 impl FirewallHandler {
     /// Sends one event to the graph and to storage.
     fn emit(&mut self, event: Event) {
+        self.last_event_ts = event.ts;
         self.graph.apply(&event);
         if let Err(error) = self.sink.record(&event) {
             eprintln!("agent-firewall: cannot record an event: {error}");
@@ -213,16 +229,17 @@ impl FirewallHandler {
         ancestry: &[ProcessInfo],
         input: Option<&InputSnapshot>,
         scan_script: bool,
-    ) -> (Action, Verdict) {
+    ) -> (Action, Verdict, Vec<MemoryEffect>) {
         let exec_action = exec_action(process);
+        let ts = self.last_event_ts;
         let mut candidates: Vec<(Action, Verdict)> = Vec::new();
+        let mut effects: Vec<MemoryEffect> = Vec::new();
 
-        let verdict = self.policy.evaluate(&EvalContext::new(
-            &self.session,
-            &exec_action,
-            process,
-            ancestry,
-        ));
+        let (verdict, mut wanted) = self.policy.evaluate_with_memory(
+            &EvalContext::new(&self.session, &exec_action, process, ancestry).at(ts),
+            &self.memory,
+        );
+        effects.append(&mut wanted);
         candidates.push((exec_action.clone(), verdict));
 
         if let Some(snapshot) = input {
@@ -245,12 +262,11 @@ impl FirewallHandler {
                     source,
                     data: data.clone(),
                 };
-                let verdict = self.policy.evaluate(&EvalContext::new(
-                    &self.session,
-                    &action,
-                    process,
-                    ancestry,
-                ));
+                let (verdict, mut wanted) = self.policy.evaluate_with_memory(
+                    &EvalContext::new(&self.session, &action, process, ancestry).at(ts),
+                    &self.memory,
+                );
+                effects.append(&mut wanted);
                 candidates.push((action, verdict));
             }
         }
@@ -271,7 +287,7 @@ impl FirewallHandler {
             })
             .unwrap_or(exec_action);
 
-        (display_action, combined)
+        (display_action, combined, effects)
     }
 
     /// Asks the user and turns the answer into an order for the monitor.
@@ -356,7 +372,13 @@ impl MonitorHandler for FirewallHandler {
         // the judged facts name the script and not the shell.
         let scan_script = !normalize::is_shell(process.program_name());
         let ancestry = self.ancestry_of(process.pid, ancestry_pids);
-        let (action, verdict) = self.evaluate(&judged, &ancestry, input, scan_script);
+        let (action, verdict, effects) = self.evaluate(&judged, &ancestry, input, scan_script);
+        // The engine only reads the memory. The handler writes it, in event
+        // order, so the replay of this trace reaches the same state.
+        let ts = self.last_event_ts;
+        for effect in effects {
+            self.memory.apply(effect, ts);
+        }
 
         if !verdict.matches.is_empty() || self.verbose {
             self.emit(Event::new(
@@ -393,6 +415,50 @@ impl MonitorHandler for FirewallHandler {
             _ => self.ask(&judged, &ancestry, &action, &verdict),
         }
     }
+}
+
+/// Reads the git remotes of a directory, as names and as addresses.
+///
+/// The launcher records the answer at session start. A rule can then see that
+/// a push goes to a remote that did not exist when the work began, which is
+/// the shape of the Shai-Hulud supply-chain attack.
+///
+/// A directory that is not a repository, and a repository with no remote,
+/// both give an empty set. The command runs one time for each session.
+fn git_remotes(cwd: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["config", "--get-regexp", r"^remote\..*\.url$"])
+        .output();
+    let Ok(output) = output else {
+        return out;
+    };
+    if !output.status.success() {
+        return out;
+    }
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        return out;
+    };
+    for line in text.lines() {
+        let Some((key, url)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let name = key
+            .strip_prefix("remote.")
+            .and_then(|rest| rest.strip_suffix(".url"));
+        if let Some(name) = name {
+            if !name.is_empty() {
+                out.insert(name.to_string());
+            }
+        }
+        let url = url.trim();
+        if !url.is_empty() {
+            out.insert(url.to_string());
+        }
+    }
+    out
 }
 
 /// Makes an exec action from the facts of a process.
