@@ -22,6 +22,7 @@ web research  ->  incident reports (incidents/)  ->  ledger (LEDGER.md)
 | `incidents/` | the incident source of truth: one report per real-world failure, named `<axis>-<slug>.md` |
 | `scenarios/` | the scenario source of truth: one catalog per axis, `<axis>.md`, with numbered sections `### SC <axis>-NN <title>` |
 | `threat-research.workflow.js` | the reusable multi-agent research workflow (script for the pi `workflow` tool, not runnable directly) |
+| `check.py` | consistency check: ledger count tables vs the files on disk, catalog numbering, observable values. Run after every research run, before committing |
 
 ## Research axes
 
@@ -53,8 +54,10 @@ Ask the agent to **"run the threat research workflow"** (or
      - `knownReports`: list of `{f, t}` (filename, title) for every report
        already in `incidents/`, so no incident is researched twice
    - `background: true`
-3. When the run settles: check `git status`, spot-check the new incident
-   reports, and summarize what the ledger gained.
+3. When the run settles: run `python3 research/threats/check.py` (must pass),
+   check `git status`, spot-check 2-3 new incident
+   reports for invented facts (check their source URLs), and summarize what
+   the ledger gained.
 4. Follow up on `coverage: gap` scenarios by writing policy rules and tests.
 
 Every run deduplicates against what is on disk: researchers read their axis

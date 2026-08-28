@@ -20,9 +20,10 @@ Runbook (also in `research/threats/README.md`):
        report already in `incidents/` (so nothing is researched twice)
    - `background: true`
 3. While it runs, tell the user what is happening (10 research agents + ledger merge).
-4. When the run settles: `git status research/threats/`, spot-check 2-3 new
-   incident reports for invented facts (check their source URLs), and summarize:
-   incidents added, scenarios added, coverage gaps.
+4. When the run settles: run `python3 research/threats/check.py` (must pass
+   before committing), `git status research/threats/`, spot-check 2-3 new
+   incident reports for invented facts (check their source URLs), and
+   summarize: incidents added, scenarios added, coverage gaps.
 5. Report follow-up candidates: scenarios with coverage `gap` that deserve a new
    rule in `policies/`, and seed rows still marked report `missing`.
 

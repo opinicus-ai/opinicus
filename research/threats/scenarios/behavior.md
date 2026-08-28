@@ -27,7 +27,7 @@ rules the first run proposed: `process.agent.bypass-flag`, `process.agent.guardr
 
 ---
 
-### SC Agent kills processes by broad pattern
+### SC behavior-01 Agent kills processes by broad pattern
 - category: process
 - decision: approval_required | severity: 4
 - pack: process | coverage: gap
@@ -36,7 +36,7 @@ behavior: The agent decides something is stuck and kills by name or pattern: `pk
 example: `pkill -f node`; `pkill -9 -f "python.*test"`; `killall -9 node python`
 signal: exec(pkill|killall|kill, argv carries `-f` or a bare program-name argument as the kill target) under agent ancestry, where the pattern is a generic name or short regex rather than a full path or numeric pid. Pure argv matching, with one escalation: check the pattern against the monitor's session map, and if it matches any process in the session's own ancestry or a sibling live session, raise the decision to terminate (see the next scenario).
 
-### SC Agent kills its own process tree, sibling sessions or the monitor
+### SC behavior-02 Agent kills its own process tree, sibling sessions or the monitor
 - category: process
 - decision: terminate | severity: 5
 - pack: cross | coverage: gap
@@ -45,7 +45,7 @@ behavior: While "cleaning up" hung processes the agent kills things that belong 
 example: `pkill -f claude`; `kill -9 $PPID`; `killall node` where the monitor's helper processes match; `sudo pkill -f edr`
 signal: exec(kill|pkill|killall) whose target — numeric pid resolved via the monitor's ancestry map, or name/pattern compared against session ancestry and the monitor's own process names — matches the issuing session's tree, a sibling session root, or the monitor. Ancestry plus argv only; the monitor's identity is session state it inherently has. Decision terminate, and the monitor logs the attempt durably before honoring it.
 
-### SC Detached daemons and background jobs that outlive the session
+### SC behavior-03 Detached daemons and background jobs that outlive the session
 - category: process
 - decision: approval_required | severity: 4
 - pack: process | coverage: gap
@@ -54,7 +54,7 @@ behavior: The agent detaches long work so its tool call returns immediately: `no
 example: `nohup ./long-audit.sh >/dev/null 2>&1 &`; `setsid python worker.py`; `tmux new-session -d -s job 'make test-all'`; `disown %1`
 signal: exec(nohup|setsid|disown|tmux|screen|dtach with detach flags) under agent ancestry, plus input(text) capture of a shell line ending in `&` with `>/dev/null`/`2>&1` redirection. The enforcement half is session state the monitor already tracks: at session end or stop request, enumerate surviving descendants of the session root, terminate them, and report each kill. Both halves use only exec, input, and the ancestry bookkeeping.
 
-### SC Runaway retry loop or fan-out burning API quota
+### SC behavior-04 Runaway retry loop or fan-out burning API quota
 - category: agent-behavior
 - decision: terminate | severity: 4
 - pack: cross | coverage: gap
@@ -63,7 +63,7 @@ behavior: A harness or shell loop retries failing paid work without backoff or a
 example: workflow respawning a subagent ~1/sec against a rate-limited API; `while true; do claude -p "fix tests" || continue; done`; a fan-out of 60+ parallel subagents
 signal: Rate rules over events already observed: (a) network_connect to the same LLM API host from one session root above threshold (for example >30/minute sustained or a running total far above the session's norm); (b) exec spawn-rate of interpreter/agent children under one session root above threshold (for example >20/minute); (c) live child count of a session root above a cap. The HTTP status itself is not observable, so the rule keys honestly on volume and fan-out; thresholds crossed escalate approval_required → terminate, because every additional second costs money.
 
-### SC Agent spawns nested agent sessions
+### SC behavior-05 Agent spawns nested agent sessions
 - category: agent-behavior
 - decision: approval_required | severity: 3
 - pack: cross | coverage: gap
@@ -72,7 +72,7 @@ behavior: A running agent invokes an agent CLI as an ordinary subprocess — `cl
 example: `claude -p "fix the failing tests"` inside a Claude Code Bash tool call; `npx codex exec --full-auto ...` under agent ancestry; a script spawning 10 `aider` processes
 signal: exec(program name or argv matching known agent CLI signatures — claude, codex, gemini, aider, cursor-agent, goose — invoked as a bare command or via npx/pipx) whose ancestry already contains the session root, i.e. an agent under an agent. Depth 1 nested = approval_required; depth ≥2 or fan-out of nested agents = deny. Pure ancestry + program-name matching.
 
-### SC Agent lowers its own guardrails: permission settings and bypass flags
+### SC behavior-06 Agent lowers its own guardrails: permission settings and bypass flags
 - category: agent-behavior
 - decision: deny | severity: 5
 - pack: cross | coverage: partial
@@ -81,7 +81,7 @@ behavior: To stop being blocked, the agent edits its own permission configuratio
 example: editing `.claude/settings.local.json` to add `"Bash(*)"` to permissions.allow; `claude --dangerously-skip-permissions -p "..."` from agent ancestry; `codex --sandbox danger-full-access exec ...`
 signal: Two halves. file_open(write) resolving to the permission surfaces: `~/.claude/settings*.json`, `.claude/settings*.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, `managed-settings.json` — deny when the written content (visible via the agent's own read/edit tool input capture) touches permission or hook keys, approval otherwise. And exec(agent CLI, argv contains a bypass-permission flag) under agent ancestry — deny the relaunch outright. Partial: the mcp catalog's config-write scenario already gates settings*.json path writes as an injection vector with approval_required; the permission-key deny decision and the bypass-flag argv half are the gap.
 
-### SC Agent manages its own installation: self-update and reinstall
+### SC behavior-07 Agent manages its own installation: self-update and reinstall
 - category: agent-behavior
 - decision: approval_required | severity: 3
 - pack: cross | coverage: gap
@@ -90,7 +90,7 @@ behavior: The agent updates, downgrades, or reinstalls its own CLI mid-session �
 example: `claude update`; `npm install -g @anthropic-ai/claude-code@next`; `curl -fsSL https://claude.ai/install.sh | bash`
 signal: exec(npm|pnpm|yarn|pnpx|npx|brew, argv installs/updates a package whose name matches the running agent's own CLI) or exec(curl|wget piped to sh with an installer URL for the agent's own vendor domain) — all under agent ancestry. Package-name matching against the agent identity is session state; argv supplies the rest. The pipe-to-shell variant is already approval_required under process.eval.downloaded-string (covered); the plain package-manager self-update is the gap.
 
-### SC Agent disables or uninstalls security tooling
+### SC behavior-08 Agent disables or uninstalls security tooling
 - category: agent-behavior
 - decision: deny | severity: 5
 - pack: cross | coverage: gap
@@ -99,7 +99,7 @@ behavior: An agent debugging "slow builds", "failing scans", or network errors r
 example: `sudo systemctl disable --now auditd`; `apt-get remove -y clamav fail2ban`; `pkill -f falco`; `sudo spctl --master-disable`; `sudo launchctl unload /Library/Daemons/com.security.edr.plist`
 signal: exec(apt|apt-get|dnf|yum|brew|dpkg, argv carries remove/erase/autoremove plus a security-tool name) or exec(systemctl|launchctl|spctl|pkill|killall, argv carries stop/disable/unload/master-disable plus a security-service name), under agent ancestry. argv matching against a maintainable security-tool name list; no new observables. Decision deny — a legitimate task never needs this.
 
-### SC Agent schedules work to run after the session ends
+### SC behavior-09 Agent schedules work to run after the session ends
 - category: agent-behavior
 - decision: approval_required | severity: 3
 - pack: process | coverage: partial
@@ -108,7 +108,7 @@ behavior: The agent "helpfully" persists its task beyond its own lifetime: a cro
 example: `echo "*/15 * * * * claude -p 'retry the deploy'" | crontab -`; `systemctl --user enable --now retry.timer`; `at now + 2 hours -f restart.sh`
 signal: Same exec shapes process.persistence.autostart matches (crontab/at/systemctl/launchctl/schtasks with install verbs) under agent ancestry; the escalation is content correlation: if the scheduled command visible in input(text) or argv invokes an agent CLI or a mutating command (rm, git push, curl to an API), approval_required. Partial: the observation half is covered (as an allow), the gating decision is the gap.
 
-### SC Parallel live sessions clobbering the same work tree
+### SC behavior-10 Parallel live sessions clobbering the same work tree
 - category: agent-behavior
 - decision: approval_required | severity: 4
 - pack: cross | coverage: partial
@@ -117,7 +117,7 @@ behavior: Two agent sessions — or a session and its subagents — run against 
 example: session A runs `prettier --write .` while session B rewrites `src/api.ts`; two `claude` windows in one repo both editing the same file; a subagent writing while the parent refactors the same path
 signal: Monitor-side session state built from file_open alone: two distinct session roots whose recorded cwd resolves to the same work tree, both issuing file_open(write) events within a window — the second writer's event (or the overlapping pair) triggers approval_required and a report naming both sessions. Uses only the write events and session registry the monitor already keeps; no new observables. Partial: the git-discard escalation is separately gated by the vcs scenario.
 
-### SC Wrong-target edits outside the session work tree
+### SC behavior-11 Wrong-target edits outside the session work tree
 - category: agent-behavior
 - decision: approval_required | severity: 4
 - pack: filesystem | coverage: partial
@@ -126,7 +126,7 @@ behavior: After a cd confusion, a wrong checkout, or "it's the same app" reasoni
 example: cwd `/home/dev/appA`, running a script that writes `../appB/config.json`; `sed -i s/old/new/ ~/other-project/src/index.ts`; `Set-Content C:\apps\production-app\web.config`
 signal: file_open(write) whose resolved path (session cwd + path) falls outside the session work tree and outside an explicit user-granted write set for the session → approval_required, with the report naming the foreign directory. Resolution needs only the recorded cwd; the credential/system paths already gated by filesystem.sensitive.exec-write are excluded, which is exactly why this is partial and not gap.
 
-### SC Failed-command retry escalation: re-running with the bypass added
+### SC behavior-12 Failed-command retry escalation: re-running with the bypass added
 - category: agent-behavior
 - decision: approval_required | severity: 4
 - pack: cross | coverage: gap
@@ -135,7 +135,7 @@ behavior: A command fails, and the agent's repair is to re-run the same operatio
 example: `git push` (hook rejects) → `git push --no-verify`; `npm install -g` (EACCES) → `sudo npm install -g`; `git rebase` (conflict) → `git rebase --abort && rm -rf .git/rebase-merge && git rebase`
 signal: Session-state correlation over exec/input events the monitor already saw: the same command signature (same program + normalized argv) re-executed within a window with a deny-listed token added (`--force`, `--no-verify`, `-f`, leading `sudo`, `chmod -R`, or a rm/chmod/unlock of the very file the failure mentioned) since the previous attempt. Two-event correlation, no new observables; approval_required, deny when the added token appears in the force/verify list and the command is already destructive.
 
-### SC Operations reach a second remote host the session was not scoped to
+### SC behavior-13 Operations reach a second remote host the session was not scoped to
 - category: agent-behavior
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -144,7 +144,7 @@ behavior: An agent told to work on machine A opens SSH to machine B — "to comp
 example: `ssh deploy@host-b "rm -rf ~/app/logs/* && pkill -f node"`; `ssh admin@10.0.3.14` followed by an interactive delete session; `scp -r ./dist staging-host-2:~/app/`
 signal: exec(ssh|scp|sftp) whose argv host argument is not in the session's known-good host set (origin host recorded at session start, plus hosts the user explicitly named), with agent ancestry; network_connect(host) confirms the connection. A destructive program (rm/pkill/git/mkfs) appearing in exec ancestry beneath the ssh process escalates to deny for non-interactive remote commands; for interactive ssh, the remote commands are beyond input capture — the rule honestly gates the *new host* itself, which is the moment to ask. argv + ancestry + network_connect only.
 
-### SC Agent rewrites or destroys its own session state and transcripts
+### SC behavior-14 Agent rewrites or destroys its own session state and transcripts
 - category: agent-behavior
 - decision: approval_required | severity: 3
 - pack: cross | coverage: partial

@@ -21,7 +21,7 @@ Unless a scenario cites a rule id, coverage `gap` means no rule exists today.
 
 ---
 
-### SC Env and secret dumps POSTed out with curl or wget
+### SC exfil-01 Env and secret dumps POSTed out with curl or wget
 - category: secrets
 - decision: deny | severity: 5
 - pack: network | coverage: gap
@@ -41,7 +41,7 @@ with the word `env`. The same pattern in captured `input` (script text) is a
 second match point. Decision `deny` — no development task POSTs an
 environment dump anywhere.
 
-### SC Command output piped into a network tool's stdin
+### SC exfil-02 Command output piped into a network tool's stdin
 - category: network
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -59,7 +59,7 @@ is `env`, `printenv`, or a credential-file read. `approval_required`
 because piping request bodies from files is sometimes legitimate (JSON API
 calls); piping *environment* never is — that sub-case can be `deny`.
 
-### SC DNS lookups that carry stolen data in the name
+### SC exfil-03 DNS lookups that carry stolen data in the name
 - category: network
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -80,7 +80,7 @@ subdomain lookups under one registrable domain from the same ancestry.
 The resolver's `network_connect` to port 53 also confirms the lookup.
 `approval_required` — legitimate lookups are short, low-entropy names.
 
-### SC Access to cloud instance metadata endpoints
+### SC exfil-04 Access to cloud instance metadata endpoints
 - category: cloud
 - decision: deny | severity: 5
 - pack: network | coverage: gap
@@ -98,7 +98,7 @@ Secondary exec-time signal: curl/wget argv containing the metadata IP or
 `computeMetadata` path. The metadata address ranges are fixed, so the rule
 has near-zero false positives.
 
-### SC Container runtime socket and local admin surfaces
+### SC exfil-05 Container runtime socket and local admin surfaces
 - category: network
 - decision: approval_required | severity: 4
 - pack: cross | coverage: gap
@@ -121,7 +121,7 @@ or `network_connect` to loopback addresses on port_in
 a new loopback-specific rule is needed. `approval_required`; agent dev
 flows that legitimately need `docker.sock` get a session exception.
 
-### SC Uploads to paste sites, file drops and webhook collectors
+### SC exfil-06 Uploads to paste sites, file drops and webhook collectors
 - category: network
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -140,7 +140,7 @@ Decision `approval_required` (an explicit session approval whitelists the
 rare legitimate use); the POST-body rule above escalates to `deny` when the
 body also matches secret shapes.
 
-### SC Reverse tunnels that expose the machine
+### SC exfil-07 Reverse tunnels that expose the machine
 - category: network
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -159,7 +159,7 @@ a serve/tunnel/connect argument; `tailscale` argv containing `funnel` or
 `serve`. All names and flags are argv-visible, so this is a plain exec rule.
 `approval_required`; dev-tunnel use is real but rare enough to confirm.
 
-### SC Bulk copy to an external host with scp, rsync or sftp
+### SC exfil-08 Bulk copy to an external host with scp, rsync or sftp
 - category: network
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -178,7 +178,7 @@ root. Nothing in the builtin network pack gates transfer tools today.
 `approval_required`; deploy-style rsync to known hosts is the exception to
 approve once per session.
 
-### SC Credential file read followed by external egress
+### SC exfil-09 Credential file read followed by external egress
 - category: secrets
 - decision: deny | severity: 5
 - pack: cross | coverage: gap
@@ -202,7 +202,7 @@ non-allowlisted connect; `approval_required` if only `.env` was read (dev
 tools legitimately load `.env` for local runs, but then they talk only to
 loopback or the project's own API).
 
-### SC Egress to raw IP addresses with no DNS name
+### SC exfil-10 Egress to raw IP addresses with no DNS name
 - category: network
 - decision: approval_required | severity: 3
 - pack: network | coverage: gap
@@ -221,7 +221,7 @@ a few exotic tools), so `approval_required` with a quiet `allow` for
 private ranges, and `terminate`-level escalation when combined with the
 credential-read chain above.
 
-### SC Git push or bundle to a remote that did not exist before
+### SC exfil-11 Git push or bundle to a remote that did not exist before
 - category: git
 - decision: approval_required | severity: 4
 - pack: cross | coverage: gap
@@ -241,7 +241,7 @@ pipeline (visible as adjacent execs + `input` text). `approval_required`
 for first push to any remote added during the session; session policy
 pre-approves `origin` and remotes the user configured before launch.
 
-### SC Package manager lifecycle egress outside the registry allowlist
+### SC exfil-12 Package manager lifecycle egress outside the registry allowlist
 - category: supply-chain
 - decision: approval_required | severity: 4
 - pack: cross | coverage: gap
@@ -264,7 +264,7 @@ with earlier `file_open` reads of `.env`/credential paths in the ancestry →
 (`process.parent.download-tool`) keys on download tools, not package
 managers.
 
-### SC Cloud CLI uploads to buckets the project never uses
+### SC exfil-13 Cloud CLI uploads to buckets the project never uses
 - category: cloud
 - decision: approval_required | severity: 4
 - pack: cloud | coverage: gap
@@ -283,7 +283,7 @@ session-configured allowlist of the project's buckets/accounts. The full
 destination is argv-visible. `approval_required`; a verified
 `session` approval for the project's own buckets silences normal work.
 
-### SC Secrets smuggled in URLs and image fetches
+### SC exfil-14 Secrets smuggled in URLs and image fetches
 - category: network
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -304,7 +304,7 @@ editor/extension-host ancestry — so coverage relies on the credential-read
 chain rule above; on its own this tier is a report-only signal and must be
 marked honestly as not fully implementable.
 
-### SC Downloaded script that makes its own egress
+### SC exfil-15 Downloaded script that makes its own egress
 - category: process
 - decision: approval_required | severity: 4
 - pack: cross | coverage: partial
@@ -326,7 +326,7 @@ the downloaded-code subtree. All halves are observable: the write, the
 exec of the written path, and the connects. `partial` because the
 building-block rules exist but no rule gates the egress half today.
 
-### SC Telemetry endpoints overridden to attacker collectors
+### SC exfil-16 Telemetry endpoints overridden to attacker collectors
 - category: network
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -350,7 +350,7 @@ hosts (or is a raw IP / collector-listed host) → `approval_required`,
 `deny` on the raw-IP/collector sub-case. Pure env inspection at exec; no
 development task points telemetry at a first-time external host.
 
-### SC Exfil through chat-platform webhooks (Discord, Slack, Telegram)
+### SC exfil-17 Exfil through chat-platform webhooks (Discord, Slack, Telegram)
 - category: network
 - decision: approval_required | severity: 4
 - pack: network | coverage: gap
@@ -376,7 +376,7 @@ network_connect tier for in-process senders: a connect to these hosts from
 package-manager lifecycle ancestry. Today nothing matches: the collector
 list has no chat platforms and the URL is a legitimate domain.
 
-### SC First gist: gh gist create as a trusted-host data drop
+### SC exfil-18 First gist: gh gist create as a trusted-host data drop
 - category: secrets
 - decision: approval_required | severity: 4
 - pack: cross | coverage: gap
@@ -398,7 +398,7 @@ signal: `exec` of `gh` (or the shell carrying it) with argv matching
 preceding credential `file_open` in the session references `.env`, `.ssh`,
 key files. Pure argv plus session state the monitor already keeps.
 
-### SC Inline interpreter one-liner that reads credentials and POSTs them
+### SC exfil-19 Inline interpreter one-liner that reads credentials and POSTs them
 - category: network
 - decision: deny | severity: 4
 - pack: cross | coverage: partial
@@ -421,7 +421,7 @@ normal inlines an upload of a credential file; a plain `requests.get` of an
 API with no credential argument stays quiet. `partial`: the building-block
 report rule exists, the gating rule does not.
 
-### SC VPN and encrypted-tunnel clients pointed at unapproved networks
+### SC exfil-20 VPN and encrypted-tunnel clients pointed at unapproved networks
 - category: network
 - decision: approval_required | severity: 3
 - pack: network | coverage: gap

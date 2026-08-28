@@ -18,7 +18,7 @@ text). Coverage is judged against the builtin packs as of this run:
 
 ---
 
-### SC Install lifecycle hooks spawning child processes
+### SC supply-01 Install lifecycle hooks spawning child processes
 - category: supply-chain
 - decision: approval_required | severity: 4
 - pack: cross | coverage: gap
@@ -40,7 +40,7 @@ ancestry + argv, fully implementable. Children spawned by the interpreter
 running the project's own scripts (cwd inside the work tree, not inside
 node_modules) can be session-allowlisted.
 
-### SC AI coding CLI launched by a non-agent parent with permission-bypass flags
+### SC supply-02 AI coding CLI launched by a non-agent parent with permission-bypass flags
 - category: supply-chain
 - decision: terminate | severity: 5
 - pack: cross | coverage: gap
@@ -62,7 +62,7 @@ definition). Weaker companion rule at `allow` + report: any AI CLI exec whose
 parent ancestry is a package-manager install subtree, regardless of flags.
 Both are plain exec + ancestry checks.
 
-### SC Credential-enumeration prompt or script text visible in argv
+### SC supply-03 Credential-enumeration prompt or script text visible in argv
 - category: supply-chain
 - decision: deny | severity: 5
 - pack: cross | coverage: gap
@@ -87,7 +87,7 @@ enumerates credential stores across the filesystem; the false-positive
 surface is near zero because the pattern requires the *vocabulary cluster*,
 not one word.
 
-### SC Shell startup files modified by the session
+### SC supply-04 Shell startup files modified by the session
 - category: agent-behavior
 - decision: approval_required | severity: 4
 - pack: filesystem | coverage: gap
@@ -106,7 +106,7 @@ signal: `file_open` with write where path matches
 dotfiles is a user task, not an agent task; a session approval covers the
 rare legitimate case (a user asked the agent to set an env var "permanently").
 
-### SC Ad-hoc package installs outside the project's dependency graph
+### SC supply-05 Ad-hoc package installs outside the project's dependency graph
 - category: supply-chain
 - decision: approval_required | severity: 4
 - pack: process | coverage: gap
@@ -127,7 +127,7 @@ and is not in a session-approved list → `approval_required`. `-y`/`--yes`
 flags and `-g` strengthen the match. Fully argv-observable; the manifest
 half is bookkeeping over file_open events.
 
-### SC Install sources overridden to git URLs, tarballs or custom registries
+### SC supply-06 Install sources overridden to git URLs, tarballs or custom registries
 - category: supply-chain
 - decision: approval_required | severity: 4
 - pack: process | coverage: gap
@@ -150,7 +150,7 @@ but the write to those paths from a session is already anomalous). The
 default registries are a fixed allowlist; enterprise mirrors are a session
 exception.
 
-### SC Known-malicious package versions at the install gate
+### SC supply-07 Known-malicious package versions at the install gate
 - category: supply-chain
 - decision: deny | severity: 4
 - pack: process | coverage: gap
@@ -172,7 +172,7 @@ rule degrades to the session's record of installed versions (below) and the
 post-install ancestry gate. Feed content is external to the monitor and must
 ship with policy updates.
 
-### SC CI workflow files written during a dev session
+### SC supply-08 CI workflow files written during a dev session
 - category: supply-chain
 - decision: approval_required | severity: 4
 - pack: git | coverage: gap
@@ -194,7 +194,7 @@ appears in captured `input` (shell heredoc writes are visible there:
 `cat > .github/workflows/x.yml <<EOF ...`). Low false-positive rate:
 agents rarely have a reason to touch CI config unasked.
 
-### SC First execution of binaries freshly written by a package install
+### SC supply-09 First execution of binaries freshly written by a package install
 - category: supply-chain
 - decision: allow | severity: 3
 - pack: cross | coverage: gap
@@ -215,7 +215,7 @@ when the exec follows the write within seconds *and* the ancestry root is a
 package-manager install (self-executing hook chain — the eslint-prettier
 `install.js` → DLL shape). All halves are observable events.
 
-### SC Publishing operations from an interactive session
+### SC supply-10 Publishing operations from an interactive session
 - category: supply-chain
 - decision: approval_required | severity: 4
 - pack: process | coverage: gap
@@ -236,7 +236,7 @@ publish — that is the worm signature). Plain argv matching; the exfil
 catalog's publish rule adds credential-read correlation on top, this one is
 the unconditional gate.
 
-### SC Drop-then-execute from an install hook (file write, then run)
+### SC supply-11 Drop-then-execute from an install hook (file write, then run)
 - category: supply-chain
 - decision: approval_required | severity: 4
 - pack: cross | coverage: partial
@@ -260,7 +260,7 @@ temp dirs; extend exe-path matching to any session-written path).
 happens in temp. The memfd/fileless variant is not observable at the
 exec layer and stays a `gap` (see evade catalog).
 
-### SC Installer execution following freshly fetched instructions
+### SC supply-12 Installer execution following freshly fetched instructions
 - category: prompt-injection
 - decision: approval_required | severity: 3
 - pack: cross | coverage: gap
@@ -282,7 +282,7 @@ All three halves (connect, file read, install exec) are observables; the
 *because-the-README-said-so* link is not — this rule is an honest timing
 heuristic, not intent detection, and should be tuned as report-grade first.
 
-### SC Build tools executing non-toolchain children
+### SC supply-13 Build tools executing non-toolchain children
 - category: supply-chain
 - decision: allow | severity: 2
 - pack: process | coverage: partial
