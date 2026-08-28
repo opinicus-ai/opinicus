@@ -88,12 +88,18 @@ pub const DEFAULT_MAX_INPUT_BYTES: usize = 64 * 1024;
 /// | --- | --- | --- |
 /// | [`SyscallFilter::WriteOnly`] | an open that can change a file, and every connection | 1.16× to 1.33× |
 /// | [`SyscallFilter::AllOpens`] | every open and every connection | 1.33× to 1.92× |
-/// | [`SyscallFilter::Off`] | nothing beyond a new program | no cost |
+/// | [`SyscallFilter::Off`] | nothing beyond a new program | no cost above the `ptrace` monitor |
 ///
 /// The difference is not the mechanism, it is the number of times the
 /// supervisor has to wake up. A read-only open is 99.7% of the open traffic
 /// of a normal build, and the kernel drops all of it in `WriteOnly` because
 /// it can test the `flags` argument itself.
+///
+/// Every number above is measured **against the `ptrace` monitor**, and not
+/// against a session with no firewall. The monitor itself is the larger part
+/// of the price: a file-heavy workload under `ptrace` alone was about ten
+/// times slower than the same workload with no firewall. `Off` adds nothing
+/// to that; it does not make the session free.
 ///
 /// A rule that needs the path of a **read** — a credential file that a
 /// program only reads — therefore stays silent under `WriteOnly`, and
@@ -259,6 +265,17 @@ pub trait MonitorHandler {
     /// The sequence number of the event is zero. The event sink of the
     /// recorder gives the events their order.
     fn on_event(&mut self, event: af_core::Event);
+
+    /// Names the root process of the session, before any event.
+    ///
+    /// The monitor creates the root process itself, so no caller can know the
+    /// identifier before the launch. The call happens directly after the
+    /// launch and before the first event, which lets the caller put the
+    /// identifier into [`af_core::SessionMeta::root_pid`] and record a session
+    /// start that carries it.
+    fn on_session_root(&mut self, root: af_core::Pid) {
+        let _ = root;
+    }
 
     /// Answers what must happen with a process that waits at its exec stop.
     ///

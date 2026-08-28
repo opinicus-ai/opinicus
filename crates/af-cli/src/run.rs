@@ -74,22 +74,23 @@ pub fn run(args: RunArgs) -> Result<i32> {
         // leaves no record for the user.
         explain_on_stderr: mode != ApprovalMode::Ask,
         interventions: 0,
+        asked: 0,
         blocked: false,
         last_event_ts: session.started_at,
+        exec_ts: None,
         answered: HashMap::new(),
         threshold_rules,
+        pending_start: None,
     };
 
     let capabilities = Monitor::capabilities(syscall_filter);
     warn_about_missing_capabilities(&capabilities);
-    handler.emit(Event::new(
-        session.session_id.clone(),
-        0,
-        EventKind::SessionStart {
-            meta: Box::new(session.clone()),
-            capabilities,
-        },
-    ));
+    // The `SessionStart` event waits for the identifier of the root process,
+    // which only the monitor knows, because it launches that process itself.
+    // The recorded metadata must carry the identifier: a rule with the scope
+    // `subtree` reads it, and a replay of the trace has no other source for
+    // it.
+    handler.pending_start = Some(capabilities);
 
     let config = MonitorConfig {
         command: args.command.clone(),
@@ -100,7 +101,11 @@ pub fn run(args: RunArgs) -> Result<i32> {
         ..MonitorConfig::default()
     };
 
-    let outcome = Monitor::run(&config, &session, &mut handler).context("the monitor failed")?;
+    let outcome = Monitor::run(&config, &session, &mut handler);
+    // A session that never started still gets its start event, so a trace
+    // always opens with the metadata of the session.
+    handler.start_session();
+    let outcome = outcome.context("the monitor failed")?;
 
     handler.emit(Event::new(
         session.session_id.clone(),
@@ -206,7 +211,17 @@ struct FirewallHandler {
     sink: Box<dyn EventSink>,
     verbose: bool,
     explain_on_stderr: bool,
+    /// How many actions of the session needed a decision.
+    ///
+    /// The count holds every verdict that the firewall had to intervene on,
+    /// also the ones that a remembered answer resolved without a question.
+    /// The line at the end of the session counts decisions, not prompts.
     interventions: usize,
+    /// How many times the session really asked somebody.
+    ///
+    /// A remembered answer does not raise this count. The two numbers differ
+    /// exactly where the session repeated an earlier answer.
+    asked: usize,
     blocked: bool,
     /// What the session remembers. The handler owns it and applies every
     /// effect that the engine asks for, in event order.
@@ -216,6 +231,15 @@ struct FirewallHandler {
     /// The memory keys on event time and never on a clock, so the replay of
     /// the trace of this session gives the same answers.
     last_event_ts: TimestampNanos,
+    /// Time of the `ProcessExec` event of the process that waits at its stop.
+    ///
+    /// The firewall must judge an exec at the time of the exec itself. The
+    /// monitor can emit another event between the exec event and the question
+    /// to the handler — the content of standard input is one — and the replay
+    /// of the trace judges the exec at the time of its own event. Without this
+    /// field the live session would use the time of the later event and the
+    /// two could differ.
+    exec_ts: Option<(Pid, TimestampNanos)>,
     /// The answer that this session already gave for one held action.
     ///
     /// A refused call comes back. A program that gets `EPERM` from an open
@@ -239,16 +263,43 @@ struct FirewallHandler {
     ///
     /// Built once, from `policy.rules()`, when the handler is made.
     threshold_rules: BTreeSet<String>,
+    /// What the monitor can observe, until the session start event goes out.
+    ///
+    /// The event waits for the identifier of the root process. The value is
+    /// `None` after the event went out, so the event goes out one time only.
+    pending_start: Option<Vec<MonitorCapability>>,
 }
 
 impl FirewallHandler {
     /// Sends one event to the graph and to storage.
     fn emit(&mut self, event: Event) {
         self.last_event_ts = event.ts;
+        if let EventKind::ProcessExec { process } = &event.kind {
+            self.exec_ts = Some((process.pid, event.ts));
+        }
         self.graph.apply(&event);
         if let Err(error) = self.sink.record(&event) {
             eprintln!("agent-firewall: cannot record an event: {error}");
         }
+    }
+
+    /// Writes the start of the session down, one time.
+    ///
+    /// The event carries the metadata with the identifier of the root
+    /// process, so a replay of the trace reads the same session root as the
+    /// live session did.
+    fn start_session(&mut self) {
+        let Some(capabilities) = self.pending_start.take() else {
+            return;
+        };
+        self.emit(Event::new(
+            self.session.session_id.clone(),
+            self.session.root_pid,
+            EventKind::SessionStart {
+                meta: Box::new(self.session.clone()),
+                capabilities,
+            },
+        ));
     }
 
     /// Builds the ancestry of a process, with a fallback for a gap in the graph.
@@ -277,9 +328,10 @@ impl FirewallHandler {
         action: &Action,
         process: &ProcessInfo,
         ancestry: &[ProcessInfo],
+        ts: TimestampNanos,
     ) -> (Verdict, Vec<MemoryEffect>) {
         self.policy.evaluate_with_memory(
-            &EvalContext::new(&self.session, action, process, ancestry).at(self.last_event_ts),
+            &EvalContext::new(&self.session, action, process, ancestry).at(ts),
             &self.memory,
         )
     }
@@ -289,18 +341,24 @@ impl FirewallHandler {
     /// The new program is one action. Its standard input and its script are
     /// two more actions, because a dangerous statement often stays out of the
     /// command line.
+    ///
+    /// Every one of them is judged at `ts`, the time of the `ProcessExec`
+    /// event, and the answers become one verdict. The replay of the trace
+    /// folds the recorded standard input into the same exec in the same way,
+    /// so both sides judge the same actions at the same time.
     fn evaluate(
         &self,
         process: &ProcessInfo,
         ancestry: &[ProcessInfo],
         input: Option<&InputSnapshot>,
         scan_script: bool,
+        ts: TimestampNanos,
     ) -> (Action, Verdict, Vec<MemoryEffect>) {
         let exec_action = exec_action(process);
         let mut candidates: Vec<(Action, Verdict)> = Vec::new();
         let mut effects: Vec<MemoryEffect> = Vec::new();
 
-        let (verdict, mut wanted) = self.evaluate_one(&exec_action, process, ancestry);
+        let (verdict, mut wanted) = self.evaluate_one(&exec_action, process, ancestry, ts);
         effects.append(&mut wanted);
         candidates.push((exec_action.clone(), verdict));
 
@@ -324,7 +382,7 @@ impl FirewallHandler {
                     source,
                     data: data.clone(),
                 };
-                let (verdict, mut wanted) = self.evaluate_one(&action, process, ancestry);
+                let (verdict, mut wanted) = self.evaluate_one(&action, process, ancestry, ts);
                 effects.append(&mut wanted);
                 candidates.push((action, verdict));
             }
@@ -408,31 +466,58 @@ impl FirewallHandler {
     }
 
     /// Returns the key under which the session remembers one answer, and
-    /// whether that key names a threshold rule alone.
+    /// whether that key holds a threshold rule.
     ///
     /// A rule with a `threshold` fires again on every action that crosses
     /// the line, for as long as the window holds enough hits, and the
     /// action underneath is almost never the same twice — a 500-file delete
     /// loop makes 500 different paths. Asking once per path would still be
-    /// hundreds of prompts, so such a rule keys on its identifier alone: the
-    /// session asks about it one time and repeats that answer for every
+    /// hundreds of prompts, so such a rule contributes its identifier alone:
+    /// the session asks about it one time and repeats that answer for every
     /// later hit, whatever the action looks like.
     ///
-    /// Every other rule keeps the narrower key: the same rule and the same
-    /// kind of action can still return with different arguments, and each of
-    /// those stays a new question.
+    /// Every other rule contributes the narrower part: the same rule and the
+    /// same kind of action can still return with different arguments, and
+    /// each of those stays a new question.
+    ///
+    /// # Why every rule of the verdict is in the key
+    ///
+    /// The key must cover the **whole** reason that the firewall holds this
+    /// action, and not only the strongest rule of it. A verdict that names a
+    /// threshold rule and a second, different rule is a different question
+    /// from the threshold rule alone. A key built from the top match alone
+    /// would answer the second question with the answer that the user gave
+    /// for the first one, and the user would never see the second rule. So
+    /// every match that needs an intervention adds its own part, and the
+    /// parts are sorted, because the order of the matches must not change the
+    /// key.
     fn answer_key(&self, action: &Action, verdict: &Verdict) -> (String, bool) {
-        match verdict.top_match() {
-            Some(top) if self.threshold_rules.contains(&top.rule_id) => (top.rule_id.clone(), true),
-            Some(top) => (
-                format!("{}|{}|{}", top.rule_id, action.kind(), action.summary()),
-                false,
-            ),
-            None => (
+        let mut parts: Vec<String> = Vec::new();
+        let mut has_threshold = false;
+        for matched in &verdict.matches {
+            if !matched.decision.needs_intervention() {
+                continue;
+            }
+            if self.threshold_rules.contains(&matched.rule_id) {
+                has_threshold = true;
+                parts.push(matched.rule_id.clone());
+            } else {
+                parts.push(format!(
+                    "{}|{}|{}",
+                    matched.rule_id,
+                    action.kind(),
+                    action.summary()
+                ));
+            }
+        }
+        if parts.is_empty() {
+            return (
                 format!("no-rule|{}|{}", action.kind(), action.summary()),
                 false,
-            ),
+            );
         }
+        parts.sort();
+        (parts.join(" + "), has_threshold)
     }
 
     /// Resolves a verdict that needs a decision, and remembers the answer.
@@ -461,13 +546,18 @@ impl FirewallHandler {
     ) -> Intercept {
         let (key, is_threshold) = self.answer_key(action, verdict);
         let cached = always_cache || is_threshold;
+        // Every held action is a decision of this session, whether the session
+        // asked about it or repeated an earlier answer. The two counts are
+        // separate, because "how many actions needed a decision" and "how many
+        // times did the firewall ask" are two different numbers.
+        self.interventions += 1;
         if cached {
             if let Some(answer) = self.answered.get(&key) {
                 return *answer;
             }
         }
 
-        self.interventions += 1;
+        self.asked += 1;
         if self.explain_on_stderr || verdict.decision != af_core::Decision::ApprovalRequired {
             eprintln!(
                 "\n{}\n",
@@ -500,6 +590,14 @@ impl MonitorHandler for FirewallHandler {
         self.emit(event);
     }
 
+    fn on_session_root(&mut self, root: Pid) {
+        // The root of the session is the process that the monitor launched.
+        // Every subtree of the session hangs directly under it, so a rule with
+        // the scope `subtree` needs this identifier, and so does the graph.
+        self.session.root_pid = root;
+        self.start_session();
+    }
+
     fn on_exec(
         &mut self,
         process: &ProcessInfo,
@@ -518,10 +616,17 @@ impl MonitorHandler for FirewallHandler {
         // the judged facts name the script and not the shell.
         let scan_script = !normalize::is_shell(process.program_name());
         let ancestry = self.ancestry_of(process.pid, ancestry_pids);
-        let (action, verdict, effects) = self.evaluate(&judged, &ancestry, input, scan_script);
+        // The exec is judged at the time of its own event, and never at the
+        // time of the newest event. The monitor emits the content of standard
+        // input after the exec event, and a replay judges the exec at the time
+        // that the exec event carries.
+        let ts = match self.exec_ts.take() {
+            Some((pid, ts)) if pid == process.pid => ts,
+            _ => self.last_event_ts,
+        };
+        let (action, verdict, effects) = self.evaluate(&judged, &ancestry, input, scan_script, ts);
         // The engine only reads the memory. The handler writes it, in event
         // order, so the replay of this trace reaches the same state.
-        let ts = self.last_event_ts;
         for effect in effects {
             self.memory.apply(effect, ts);
         }
@@ -559,8 +664,10 @@ impl MonitorHandler for FirewallHandler {
             .unwrap_or_else(|| ProcessInfo::from_pid(pid));
         let ancestry = self.ancestry_of(pid, ancestry_pids);
 
-        let (verdict, effects) = self.evaluate_one(action, &process, &ancestry);
+        // The event of the held call is the newest event, because the monitor
+        // emits it directly before it asks the handler.
         let ts = self.last_event_ts;
+        let (verdict, effects) = self.evaluate_one(action, &process, &ancestry, ts);
         for effect in effects {
             self.memory.apply(effect, ts);
         }
@@ -690,6 +797,41 @@ rules:
       at_least: 2
 ";
 
+    /// A threshold rule and a second, sharper rule that can match with it.
+    ///
+    /// The identifier of the threshold rule sorts first, so it also wins the
+    /// tie between two rules of the same level and becomes the top match.
+    /// That is exactly the shape in which a second rule can hide behind a
+    /// remembered answer.
+    const TWO_RULE_POLICY: &str = "
+version: 1
+name: test.two
+description: A threshold rule and a second rule that can match the same action.
+rules:
+  - id: test.a-delete-burst
+    title: Test delete burst
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: A burst of deletes ran.
+    match:
+      action: exec
+      program: [rm]
+    threshold:
+      window_seconds: 60
+      at_least: 2
+  - id: test.b-state-wipe
+    title: Test delete of the state of the agent
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: The command removes the state of the agent itself.
+    match:
+      action: exec
+      program: [rm]
+      argv_matches: '\\.agent-state'
+";
+
     /// A rule with no `threshold` block, for comparison.
     const PLAIN_POLICY: &str = "
 version: 1
@@ -704,6 +846,31 @@ rules:
     reason: A file was opened.
     match:
       action: file_open
+";
+
+    /// Two rules with no threshold that match the same file open.
+    const PAIR_POLICY: &str = "
+version: 1
+name: test.pair
+description: Two rules that hold the same action, for the one-question test.
+rules:
+  - id: test.pair.file-open
+    title: Test file open
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: A file was opened.
+    match:
+      action: file_open
+  - id: test.pair.credential-open
+    title: Test credential open
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: A credential store was opened.
+    match:
+      action: file_open
+      path_matches: 'credentials'
 ";
 
     /// Builds a handler the same way `run` does, with a scripted approver.
@@ -735,9 +902,12 @@ rules:
             verbose: false,
             explain_on_stderr: false,
             interventions: 0,
+            asked: 0,
             blocked: false,
+            exec_ts: None,
             answered: HashMap::new(),
             threshold_rules,
+            pending_start: None,
         };
         (handler, events)
     }
@@ -768,6 +938,7 @@ rules:
         let first = handler.on_exec(&rm_process(400, "a"), &[], None);
         assert_eq!(first, Intercept::Continue);
         assert_eq!(handler.interventions, 0);
+        assert_eq!(handler.asked, 0);
 
         // The rule fires on the next three deletes, each with a different
         // path, exactly like a runaway loop. The session must ask about it
@@ -782,8 +953,12 @@ rules:
         }
 
         assert_eq!(
-            handler.interventions, 1,
+            handler.asked, 1,
             "a threshold rule must ask about the session one time, however many times it fires"
+        );
+        assert_eq!(
+            handler.interventions, 3,
+            "every fire is still an action that needed a decision, also the ones that repeated the answer"
         );
     }
 
@@ -801,7 +976,11 @@ rules:
             third, Intercept::Deny,
             "a refusal must stick for the rest of the session, not just an allow"
         );
-        assert_eq!(handler.interventions, 1);
+        assert_eq!(handler.asked, 1, "the session asks one time");
+        assert_eq!(
+            handler.interventions, 2,
+            "both fires needed a decision, whether or not the session asked again"
+        );
     }
 
     #[test]
@@ -843,6 +1022,105 @@ rules:
         );
     }
 
+    /// A remembered answer must never answer a question that nobody asked.
+    ///
+    /// The session answers the burst one time. When a later delete matches
+    /// the burst **and** a second rule, the question is a different one: the
+    /// user has said nothing about that second rule. The firewall must ask
+    /// again, and the answer of the burst must not be given for it.
+    #[test]
+    fn a_second_rule_in_the_verdict_asks_again() {
+        let (mut handler, events) = handler_for(
+            TWO_RULE_POLICY,
+            vec![ApprovalOutcome::Allow, ApprovalOutcome::Deny],
+        );
+
+        // Two ordinary deletes. The second crosses the threshold and the
+        // session answers it one time.
+        handler.on_exec(&rm_process(400, "a"), &[], None);
+        handler.on_exec(&rm_process(401, "b"), &[], None);
+        assert_eq!(handler.asked, 1, "the burst is one question");
+
+        // The third delete removes the state of the agent, so the sharper
+        // rule matches with the burst rule. The user has never seen that
+        // rule.
+        let mut wipe = rm_process(402, "c");
+        wipe.argv = vec![
+            "rm".to_string(),
+            "-rf".to_string(),
+            "/home/dev/.agent-state".to_string(),
+        ];
+        let answer = handler.on_exec(&wipe, &[], None);
+
+        assert_eq!(
+            handler.asked, 2,
+            "a rule that the user has not answered must bring its own question"
+        );
+        assert_eq!(
+            answer,
+            Intercept::Deny,
+            "the second question gets its own answer, and here that answer is no"
+        );
+
+        // The question that went out must name the rule that is new.
+        let events = events.lock().unwrap();
+        let named = events.iter().any(|event| match &event.kind {
+            EventKind::PolicyDecision { verdict, .. } => verdict
+                .matches
+                .iter()
+                .any(|m| m.rule_id == "test.b-state-wipe"),
+            _ => false,
+        });
+        assert!(named, "the decision must record the new rule:\n{events:#?}");
+        let explanation = display::explain(
+            &[],
+            &wipe,
+            &exec_action(&wipe),
+            &Verdict::from_matches(vec![
+                af_core::RuleMatch {
+                    rule_id: "test.a-delete-burst".to_string(),
+                    title: "Test delete burst".to_string(),
+                    category: "test".to_string(),
+                    risk: af_core::RiskLevel::ApprovalRequired,
+                    decision: af_core::Decision::ApprovalRequired,
+                    reason: "A burst of deletes ran.".to_string(),
+                },
+                af_core::RuleMatch {
+                    rule_id: "test.b-state-wipe".to_string(),
+                    title: "Test delete of the state of the agent".to_string(),
+                    category: "test".to_string(),
+                    risk: af_core::RiskLevel::ApprovalRequired,
+                    decision: af_core::Decision::ApprovalRequired,
+                    reason: "The command removes the state of the agent itself.".to_string(),
+                },
+            ]),
+        );
+        assert!(
+            explanation.contains("test.b-state-wipe"),
+            "the text that the user reads must name every rule that holds the action:\n{explanation}"
+        );
+    }
+
+    /// The same pair of rules twice is still one question.
+    #[test]
+    fn the_same_pair_of_rules_repeats_its_answer() {
+        let (mut handler, _events) = handler_for(
+            PAIR_POLICY,
+            vec![ApprovalOutcome::Allow, ApprovalOutcome::Allow],
+        );
+
+        let open = Action::FileOpen {
+            path: "/home/dev/.aws/credentials".to_string(),
+            write: false,
+        };
+        handler.on_syscall(500, &open, &[]);
+        handler.on_syscall(500, &open, &[]);
+        assert_eq!(
+            handler.asked, 1,
+            "the same rules and the same action stay one question"
+        );
+    }
+
     #[test]
     fn a_non_threshold_rule_still_re_asks_for_a_different_summary() {
         let (mut handler, _events) = handler_for(
@@ -870,9 +1148,10 @@ rules:
         assert_eq!(first, Intercept::Continue);
         assert_eq!(second, Intercept::Continue);
         assert_eq!(
-            handler.interventions, 2,
+            handler.asked, 2,
             "a rule with no threshold must still ask about a different path"
         );
+        assert_eq!(handler.interventions, 2);
     }
 
     #[test]
@@ -894,6 +1173,10 @@ rules:
             second, first,
             "the same rule and the same summary must repeat the first answer, exactly as before this change"
         );
-        assert_eq!(handler.interventions, 1);
+        assert_eq!(handler.asked, 1, "the session asks one time");
+        assert_eq!(
+            handler.interventions, 2,
+            "both opens needed a decision, and the count of decisions says so"
+        );
     }
 }

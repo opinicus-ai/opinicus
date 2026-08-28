@@ -130,7 +130,7 @@ fn probe_syscall_filter(filter: SyscallFilter) -> Vec<MonitorCapability> {
     }
 
     let file_detail = if filter.observes_read_opens() {
-        "every open reaches the firewall, a read included; a rule about the path of a read can fire"
+        "every open of a 64-bit program reaches the firewall, a read included; a rule about the path of a read can fire"
     } else {
         "only an open that asks to change the file reaches the firewall; a rule that needs the path of a read stays silent, use `--syscall-filter all-opens` for it"
     };
@@ -138,14 +138,14 @@ fn probe_syscall_filter(filter: SyscallFilter) -> Vec<MonitorCapability> {
         available_with(
             "syscall_filter",
             &format!(
-                "a seccomp filter in mode {} holds the calls that a rule can judge",
+                "a seccomp filter in mode {} holds the calls that a rule can judge; it reads the call table of a 64-bit program, and it lets a 32-bit program through with a warning",
                 filter.label()
             ),
         ),
         available_with("file_open_events", file_detail),
         available_with(
             "network_events",
-            "every outgoing connection to an IPv4 or an IPv6 address reaches the firewall; a local socket is passed by",
+            "every outgoing connection of a 64-bit program to an IPv4 or an IPv6 address reaches the firewall; a local socket is passed by",
         ),
     ]
 }

@@ -118,6 +118,32 @@ pub fn read_exe(pid: Pid) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+/// Returns true when this file is a 32-bit ELF program.
+///
+/// The answer comes from the fifth byte of the file, which the ELF format
+/// calls `EI_CLASS`: 1 is a 32-bit program and 2 is a 64-bit one. A file that
+/// is not an ELF program, and a file that the monitor cannot read, both give
+/// `false`, because the monitor never guesses.
+///
+/// The kernel filter of this monitor holds a table of system-call numbers of
+/// one architecture. A 32-bit program on a 64-bit machine uses another table,
+/// so the filter lets every call of such a program through. The monitor says
+/// so at the exec stop instead of watching in silence. See
+/// [`crate::SyscallFilter`].
+pub fn is_elf32(path: &std::path::Path) -> bool {
+    use std::io::Read;
+
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 5];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    // The first four bytes of every ELF file are 0x7f and "ELF".
+    header[..4] == [0x7f, b'E', b'L', b'F'] && header[4] == 1
+}
+
 /// Reads the working directory of a process.
 pub fn read_cwd(pid: Pid) -> Option<String> {
     fs::read_link(proc_path(pid, "cwd"))

@@ -80,6 +80,8 @@ struct Tracer<'a> {
     forked: HashSet<Pid>,
     /// Processes for which an exit event is already out.
     exited: HashSet<Pid>,
+    /// Processes that already got the warning about a foreign call table.
+    warned_abi: HashSet<Pid>,
     terminated: bool,
     root_code: Option<i32>,
     root_signal: Option<i32>,
@@ -150,6 +152,9 @@ pub fn run(
         Error::monitor(format!("cannot start {shown}: {error}"))
     })?;
     let root = child.id() as Pid;
+    // The caller learns the root process before the first event, so the
+    // session metadata that it records can carry the identifier.
+    handler.on_session_root(root);
 
     let mut tracer = Tracer {
         config,
@@ -163,6 +168,7 @@ pub fn run(
         // The root has no fork event, because the monitor created it itself.
         forked: HashSet::from([root]),
         exited: HashSet::new(),
+        warned_abi: HashSet::new(),
         terminated: false,
         root_code: None,
         root_signal: None,
@@ -375,6 +381,7 @@ impl Tracer<'_> {
             },
         );
         self.warn_about_privilege(pid, &info);
+        self.warn_about_foreign_abi(pid, &info);
         if let Some(data) = snapshot.as_ref().and_then(|snap| snap.stdin.clone()) {
             self.emit(
                 pid,
@@ -420,6 +427,45 @@ impl Tracer<'_> {
                      setuid bit away from every program that a traced session starts, so \
                      {program} fails with an error of its own that does not name the firewall. \
                      Run the command outside the firewall when you really need it."
+                ),
+            },
+        );
+    }
+
+    /// Tells the user that the kernel filter does not watch this program.
+    ///
+    /// The filter holds a table of the system-call numbers of one
+    /// architecture, and it lets a call of another architecture through
+    /// rather than judging it with the wrong table. A 32-bit program on this
+    /// 64-bit machine is exactly that case: the exec boundary still holds it,
+    /// but no file open and no connection of that program reaches the
+    /// firewall.
+    ///
+    /// The monitor says it one time for each process, and only when the
+    /// session really got a filter. A session with the filter switched off
+    /// already knows that it observes nothing of this kind.
+    fn warn_about_foreign_abi(&mut self, pid: Pid, info: &ProcessInfo) {
+        if self.filter == SyscallFilter::Off {
+            return;
+        }
+        let Some(exe) = info.exe.as_deref() else {
+            return;
+        };
+        if !procfs::is_elf32(std::path::Path::new(exe)) {
+            return;
+        }
+        if !self.warned_abi.insert(pid) {
+            return;
+        }
+        let program = info.program_name().to_string();
+        self.emit(
+            pid,
+            EventKind::MonitorWarning {
+                message: format!(
+                    "{program} is a 32-bit program, and the system-call filter of this \
+                     session is built for 64-bit programs. The firewall still holds every \
+                     new program of this process, but it observes no file open and no \
+                     connection inside it."
                 ),
             },
         );

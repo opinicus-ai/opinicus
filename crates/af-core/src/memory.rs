@@ -159,6 +159,25 @@ impl SessionMemory {
                 let expires_at = ttl_seconds.map(|seconds| ts.saturating_add(nanos(seconds)));
                 let list = self.marks.entry(name).or_default();
                 list.retain(|mark| mark.expires_at.is_none_or(|end| end >= ts));
+                // One entry for one name in one subtree. A rule that matches a
+                // thousand times says the same thing a thousand times, and a
+                // store that kept every one of them would grow through the
+                // whole session while it answers exactly the same question.
+                //
+                // The newer entry wins on the time, because the mark is now as
+                // fresh as this action. It wins on nothing else: the longer
+                // lifetime holds, `None` being the longest of all, and the
+                // wider scope holds, because a narrower one would take away
+                // what an earlier action already wrote down.
+                if let Some(mark) = list.iter_mut().find(|mark| mark.root == root) {
+                    mark.ts = mark.ts.max(ts);
+                    mark.scope = mark.scope.min(scope);
+                    mark.expires_at = match (mark.expires_at, expires_at) {
+                        (Some(old), Some(new)) => Some(old.max(new)),
+                        _ => None,
+                    };
+                    return;
+                }
                 list.push(Mark {
                     ts,
                     root,
@@ -399,6 +418,43 @@ mod tests {
         let memory = SessionMemory::with_baseline(sets);
         assert_eq!(memory.baseline_has("git_remotes", "origin"), Some(true));
         assert_eq!(memory.baseline_has("git_remotes", "backup"), Some(false));
+    }
+
+    #[test]
+    fn one_mark_of_one_subtree_keeps_one_record() {
+        let mut memory = SessionMemory::new();
+        for step in 0..10_000 {
+            memory.apply(mark("read", MarkScope::Session, 7, Some(600)), seconds(step));
+        }
+        let kept = memory.marks.get("read").map(Vec::len).unwrap_or(0);
+        assert_eq!(
+            kept, 1,
+            "the same mark of the same subtree is one record, however often a rule writes it"
+        );
+        // The mark is as fresh as the newest write, so the lifetime counts
+        // from there.
+        assert!(memory.has_mark("read", seconds(10_500), None, MarkScope::Session, 7));
+    }
+
+    #[test]
+    fn two_subtrees_keep_their_own_mark() {
+        let mut memory = SessionMemory::new();
+        memory.apply(mark("read", MarkScope::Subtree, 7, None), seconds(1));
+        memory.apply(mark("read", MarkScope::Subtree, 8, None), seconds(2));
+        assert_eq!(memory.marks.get("read").map(Vec::len), Some(2));
+        assert!(memory.has_mark("read", seconds(3), None, MarkScope::Subtree, 7));
+        assert!(memory.has_mark("read", seconds(3), None, MarkScope::Subtree, 8));
+    }
+
+    #[test]
+    fn a_mark_that_is_written_again_keeps_the_longer_lifetime() {
+        let mut memory = SessionMemory::new();
+        memory.apply(mark("read", MarkScope::Session, 7, None), seconds(1));
+        memory.apply(mark("read", MarkScope::Session, 7, Some(10)), seconds(2));
+        assert!(
+            memory.has_mark("read", seconds(1000), None, MarkScope::Session, 7),
+            "a mark of the whole session must not lose its lifetime to a shorter one"
+        );
     }
 
     #[test]

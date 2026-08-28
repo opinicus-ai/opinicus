@@ -6,13 +6,19 @@
 //! without ever running a second program, and the exec boundary sees none of
 //! it.
 //!
-//! This module closes that gap with a small `seccomp` BPF filter. The filter
+//! This module narrows that gap with a small `seccomp` BPF filter. The filter
 //! runs in the kernel, for every process of the session, and answers
 //! `SECCOMP_RET_TRACE` for the few calls that a rule can judge. The kernel
 //! then makes a `PTRACE_EVENT_SECCOMP` stop and the monitor decides. Every
 //! other call runs with no supervisor in the loop, which is the whole reason
 //! the layer is cheap: `research/spikes/seccomp-ptrace/FINDINGS.md` measured
 //! 1.16× for the write-only filter against 6.42× for a stop at every call.
+//!
+//! **What this module covers is the open with write intent and the outgoing
+//! connection, and nothing else.** The filter holds no `unlink`, no `rmdir`
+//! and no `rename`, so a program that deletes a tree from inside itself is
+//! still judged only at the command that started it. The event schema has no
+//! shape for a delete either. That gap stays open.
 //!
 //! # What the filter holds
 //!

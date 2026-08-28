@@ -160,7 +160,7 @@ pub(crate) fn build_case(test: &TestSource) -> TestCase {
         test.input.as_ref(),
         &process,
     );
-    let session = test_session(&process, &test.baseline);
+    let session = test_session(&process, &ancestry, &test.baseline);
     let ts = seconds(test.at_seconds.unwrap_or_else(|| history_length(test)));
     TestCase {
         session,
@@ -223,7 +223,7 @@ fn build_step(step: &TestStep, at_seconds: u64) -> TestCase {
         step.input.as_ref(),
         &process,
     );
-    let session = test_session(&process, &BTreeMap::new());
+    let session = test_session(&process, &ancestry, &BTreeMap::new());
     TestCase {
         session,
         action,
@@ -242,7 +242,18 @@ fn seconds(value: u64) -> TimestampNanos {
 ///
 /// The value holds no clock and no random number, so a test run is
 /// repeatable.
-fn test_session(process: &ProcessInfo, baseline: &BTreeMap<String, Vec<String>>) -> SessionMeta {
+///
+/// The **last** entry of the ancestry is the root of the session, exactly as
+/// a live session builds it: the ancestry runs from the nearest parent to the
+/// process that the firewall launched. The metadata therefore names that
+/// process as `root_pid`, so a rule with the scope `subtree` is judged
+/// against the same shape that a real session has. A test with no ancestry
+/// runs its process as the root itself.
+fn test_session(
+    process: &ProcessInfo,
+    ancestry: &[ProcessInfo],
+    baseline: &BTreeMap<String, Vec<String>>,
+) -> SessionMeta {
     let mut sets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, values) in baseline {
         sets.insert(name.clone(), values.iter().cloned().collect());
@@ -250,7 +261,7 @@ fn test_session(process: &ProcessInfo, baseline: &BTreeMap<String, Vec<String>>)
     SessionMeta {
         session_id: SessionId::from("afw-policy-test"),
         started_at: 0,
-        root_pid: 0,
+        root_pid: ancestry.last().map(|p| p.pid).unwrap_or(process.pid),
         command: vec!["policy-test".to_string()],
         cwd: process.cwd.clone().unwrap_or_else(|| "/".to_string()),
         agent: AgentMeta {

@@ -83,12 +83,44 @@ impl<'a> EvalContext<'a> {
 
     /// Returns the root of the process subtree that performs the action.
     ///
-    /// The value is the process under the root of the session, so every
-    /// process of one agent task gets the same answer. A mark with the scope
-    /// `subtree` uses it, so a credential read in one task cannot arm a rule
-    /// in another task.
+    /// The value is the ancestor that is a **direct child of the session
+    /// root**. An agent usually runs one tool call as one `sh -c` child of
+    /// itself, so every process of one tool call gets the same answer, and a
+    /// mark with the scope `subtree` reaches exactly that far.
+    ///
+    /// The three cases:
+    ///
+    /// * The session root itself is its own subtree root.
+    /// * A process whose parent is the session root is its own subtree root.
+    /// * Any deeper process gets the ancestor directly below the root.
+    ///
+    /// # When the answer is only a fallback
+    ///
+    /// Two cases have no honest answer and both fall back to the **session
+    /// root**, which makes `subtree` as wide as `session`:
+    ///
+    /// * `session.root_pid` is zero. No live session leaves it zero any more,
+    ///   but a trace that an older version recorded does, and such a trace
+    ///   must replay exactly as it did before.
+    /// * The root is not in the ancestry, which means a gap in the provenance
+    ///   graph. The firewall then reports too much rather than too little.
     pub fn subtree_root(&self) -> Pid {
         let root = self.session.root_pid;
+        if root != 0 {
+            if self.process.pid == root {
+                return root;
+            }
+            if let Some(index) = self.ancestry.iter().position(|p| p.pid == root) {
+                return match index {
+                    // The parent of this process is the session root, so the
+                    // process opens its own subtree.
+                    0 => self.process.pid,
+                    _ => self.ancestry[index - 1].pid,
+                };
+            }
+        }
+        // The fallback: the outermost ancestor that is not the root, which is
+        // the session root of the recorded ancestry itself.
         for parent in self.ancestry.iter().rev() {
             if parent.pid != root {
                 return parent.pid;
@@ -208,4 +240,99 @@ pub trait Approver: Send {
     /// this call runs, so an implementation that cannot ask must return a safe
     /// default instead of waiting forever.
     fn request(&mut self, req: &ApprovalRequest<'_>) -> ApprovalOutcome;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Makes a process record with an identifier and a parent.
+    fn proc_info(pid: Pid) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            comm: format!("p{pid}"),
+            ..ProcessInfo::default()
+        }
+    }
+
+    /// Makes a session whose root process has this identifier.
+    fn session(root_pid: Pid) -> SessionMeta {
+        let mut meta = SessionMeta::new(vec!["claude".to_string()], "/home/dev/app".to_string());
+        meta.root_pid = root_pid;
+        meta
+    }
+
+    /// Makes the exec action of a process, which the tests never read.
+    fn action() -> Action {
+        Action::Exec {
+            exe: None,
+            program: "sh".to_string(),
+            argv: vec!["sh".to_string()],
+            cwd: None,
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_subtree_root_is_the_child_of_the_session_root() {
+        // claude(100) -> sh(200) -> cat(300)
+        let session = session(100);
+        let action = action();
+        let process = proc_info(300);
+        let ancestry = vec![proc_info(200), proc_info(100)];
+        let ctx = EvalContext::new(&session, &action, &process, &ancestry);
+        assert_eq!(ctx.subtree_root(), 200);
+    }
+
+    #[test]
+    fn two_tool_calls_of_one_session_are_two_subtrees() {
+        let session = session(100);
+        let action = action();
+        let first = proc_info(300);
+        let first_ancestry = vec![proc_info(200), proc_info(100)];
+        let second = proc_info(301);
+        let second_ancestry = vec![proc_info(201), proc_info(100)];
+        let left = EvalContext::new(&session, &action, &first, &first_ancestry).subtree_root();
+        let right = EvalContext::new(&session, &action, &second, &second_ancestry).subtree_root();
+        assert_eq!(left, 200);
+        assert_eq!(right, 201);
+        assert_ne!(left, right, "two tool calls must not share one subtree");
+    }
+
+    #[test]
+    fn a_direct_child_of_the_root_opens_its_own_subtree() {
+        let session = session(100);
+        let action = action();
+        let process = proc_info(200);
+        let ancestry = vec![proc_info(100)];
+        let ctx = EvalContext::new(&session, &action, &process, &ancestry);
+        assert_eq!(ctx.subtree_root(), 200);
+    }
+
+    #[test]
+    fn the_session_root_is_its_own_subtree_root() {
+        let session = session(100);
+        let action = action();
+        let process = proc_info(100);
+        let ancestry: Vec<ProcessInfo> = Vec::new();
+        let ctx = EvalContext::new(&session, &action, &process, &ancestry);
+        assert_eq!(ctx.subtree_root(), 100);
+    }
+
+    #[test]
+    fn a_session_with_no_root_keeps_the_older_session_wide_answer() {
+        // A trace of an older version carries `root_pid: 0`. Such a trace must
+        // replay exactly as it did before, so every process of the session
+        // reports the same subtree.
+        let session = session(0);
+        let action = action();
+        let first = proc_info(300);
+        let first_ancestry = vec![proc_info(200), proc_info(100)];
+        let second = proc_info(301);
+        let second_ancestry = vec![proc_info(201), proc_info(100)];
+        let left = EvalContext::new(&session, &action, &first, &first_ancestry).subtree_root();
+        let right = EvalContext::new(&session, &action, &second, &second_ancestry).subtree_root();
+        assert_eq!(left, 100);
+        assert_eq!(right, 100);
+    }
 }

@@ -1,8 +1,8 @@
 //! The `replay`, `tree` and `doctor` sub-commands.
 
 use af_core::{
-    display, Action, EvalContext, Event, EventKind, PolicyEngine, ProcessInfo, SessionMemory,
-    SessionMeta,
+    display, Action, EvalContext, Event, EventKind, InputStream, PolicyEngine, ProcessInfo,
+    SessionMemory, SessionMeta, Verdict,
 };
 use af_provenance::ProcessGraph;
 use af_recorder::read_trace;
@@ -51,7 +51,10 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
     let mut hits: Vec<ReplayHit> = Vec::new();
     let mut counted = Counts::default();
 
-    for event in &events {
+    let mut index = 0;
+    while index < events.len() {
+        let event = &events[index];
+        index += 1;
         // A replay must judge every action that a live session judges, and in
         // the same order. An exec, a file open and a connection all reach the
         // same engine with the same memory.
@@ -59,17 +62,52 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
             continue;
         };
         counted.add(&action);
+        // The live session judges the content of standard input together with
+        // the exec, in one verdict, at the time of the exec event. The monitor
+        // emits that content directly after the exec event, so the replay
+        // takes the same events into the same verdict. Both sides therefore
+        // judge the same actions at the same time.
+        let mut actions = vec![action];
+        actions.extend(input_after(&events, &mut index, event));
+
         let ancestry = graph.ancestry(judged.pid);
         // The memory carries a fact from an earlier action to this one. The
         // effects are applied in event order, exactly as the live handler
         // does it, so a replay repeats the verdicts of the live session.
-        let (verdict, effects) = policy.evaluate_with_memory(
-            &EvalContext::new(&session, &action, &judged, &ancestry).at(event.ts),
-            &memory,
-        );
-        for effect in effects {
+        // Every action of this event is judged against the same memory, and
+        // the writes follow afterwards. The live handler does exactly that, so
+        // an exec cannot change the answer of its own input here either.
+        let mut answers: Vec<(Action, Verdict)> = Vec::new();
+        let mut wanted = Vec::new();
+        for one in actions {
+            let (verdict, mut effects) = policy.evaluate_with_memory(
+                &EvalContext::new(&session, &one, &judged, &ancestry).at(event.ts),
+                &memory,
+            );
+            wanted.append(&mut effects);
+            answers.push((one, verdict));
+        }
+        for effect in wanted {
             memory.apply(effect, event.ts);
         }
+        let verdict = Verdict::from_matches(
+            answers
+                .iter()
+                .flat_map(|(_, verdict)| verdict.matches.iter().cloned())
+                .collect(),
+        );
+        // The reported action is the one that the strongest rule matched, as
+        // in a live session, so an input rule names the input and not the
+        // command line.
+        let action = verdict
+            .top_match()
+            .and_then(|top| {
+                answers
+                    .iter()
+                    .find(|(_, verdict)| verdict.matches.iter().any(|m| m.rule_id == top.rule_id))
+                    .map(|(action, _)| action.clone())
+            })
+            .unwrap_or_else(|| answers[0].0.clone());
 
         if verdict.matches.is_empty() {
             if args.verbose && !args.json {
@@ -127,6 +165,47 @@ impl Counts {
             _ => self.exec += 1,
         }
     }
+}
+
+/// Returns the input actions that belong to one exec, and steps over them.
+///
+/// The monitor emits the content of standard input directly after the exec
+/// event of the same process, and the live session judges that content
+/// together with the exec, in one verdict, at the time of the exec. The replay
+/// therefore takes those events out of the stream here instead of judging them
+/// on their own.
+///
+/// `index` stands after `event` and moves over every event that this call
+/// takes.
+///
+/// # What a trace cannot carry
+///
+/// A live session also reads the **script** of the process, and no event
+/// carries that text, so a replay cannot judge it. `--retention balanced`, the
+/// default, drops the content of standard input as well. A replay of such a
+/// trace judges the exec alone. See `docs/ARCHITECTURE.md`, section 6.
+fn input_after(events: &[Event], index: &mut usize, event: &Event) -> Vec<Action> {
+    if !matches!(event.kind, EventKind::ProcessExec { .. }) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    while let Some(next) = events.get(*index) {
+        let EventKind::StdinWrite { stream, data } = &next.kind else {
+            break;
+        };
+        if next.pid != event.pid || *stream != InputStream::Stdin {
+            break;
+        }
+        *index += 1;
+        if data.trim().is_empty() {
+            continue;
+        }
+        out.push(Action::Input {
+            source: af_core::InputSource::Stdin,
+            data: data.clone(),
+        });
+    }
+    out
 }
 
 /// Makes the action of one recorded event, and names the process that acts.

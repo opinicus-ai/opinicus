@@ -1163,3 +1163,51 @@ fn the_capability_report_follows_the_filter_mode() {
         .1
         .contains("all-opens"));
 }
+
+/// Writes a file that begins with the sixteen bytes of an ELF header.
+fn write_elf_header(path: &Path, class: u8) {
+    let mut header = [0u8; 16];
+    header[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+    header[4] = class;
+    // Little endian, current version, System V.
+    header[5] = 1;
+    header[6] = 1;
+    std::fs::write(path, header).expect("write the header");
+}
+
+/// The monitor must know a 32-bit program from a 64-bit one.
+///
+/// The kernel filter holds the call numbers of one architecture. A 32-bit
+/// program on a 64-bit machine uses another table, so the filter lets it
+/// through and the monitor has to say so. The fifth byte of the file is the
+/// whole answer: 1 is 32-bit and 2 is 64-bit.
+#[test]
+fn the_monitor_reads_the_class_of_a_program() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+
+    let elf32 = dir.path().join("thirty-two");
+    write_elf_header(&elf32, 1);
+    assert!(procfs::is_elf32(&elf32), "a class of 1 is a 32-bit program");
+
+    let elf64 = dir.path().join("sixty-four");
+    write_elf_header(&elf64, 2);
+    assert!(
+        !procfs::is_elf32(&elf64),
+        "a class of 2 is a 64-bit program"
+    );
+
+    // A file that is no ELF program at all, and a file that is not there,
+    // both give `false`. The monitor never guesses.
+    let script = dir.path().join("script.sh");
+    std::fs::write(&script, "#!/bin/sh\ntrue\n").expect("write the script");
+    assert!(!procfs::is_elf32(&script));
+    let short = dir.path().join("short");
+    std::fs::write(&short, [0x7f, b'E']).expect("write the short file");
+    assert!(!procfs::is_elf32(&short));
+    assert!(!procfs::is_elf32(&dir.path().join("nothing-here")));
+
+    // The program of this test is a 64-bit program on this machine, and the
+    // real path must give the same answer as the crafted header.
+    let own = std::env::current_exe().expect("the path of this test");
+    assert_eq!(procfs::is_elf32(&own), cfg!(target_pointer_width = "32"));
+}

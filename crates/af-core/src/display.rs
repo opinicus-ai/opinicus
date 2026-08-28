@@ -118,6 +118,21 @@ pub fn explain(ancestry: &[ProcessInfo], process: &ProcessInfo, action: &Action,
         }
         None => out.push_str("\nPolicy:\n  (no rule matched)"),
     }
+    // The user must see every rule that holds this action, and not only the
+    // strongest one. A second rule can be the whole reason that the firewall
+    // asks again about something that looks like an earlier question.
+    let others: Vec<&crate::decision::RuleMatch> = verdict.matches.iter().skip(1).collect();
+    if !others.is_empty() {
+        out.push_str("\nAlso matched:");
+        for rule in others {
+            out.push_str("\n  ");
+            out.push_str(&rule.rule_id);
+            if !rule.title.is_empty() {
+                out.push_str(" — ");
+                out.push_str(&rule.title);
+            }
+        }
+    }
     out.push_str("\nRisk:\n  ");
     out.push_str(verdict.risk.label());
     out.push_str("\nDecision:\n  ");
