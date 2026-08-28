@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 /// | `ProcessFork` | keep | keep | drop |
 /// | `ProcessExec` | keep | keep | only when a kept decision names the process |
 /// | `ProcessExit` | keep | keep | drop |
-/// | `FileOpen` | keep | drop | drop |
-/// | `NetworkConnect` | keep | drop | drop |
+/// | `FileOpen` | keep | only when a rule matched it | drop |
+/// | `NetworkConnect` | keep | only when a rule matched it | drop |
 /// | `StdinWrite` | keep | drop | drop |
 /// | `PolicyDecision` with `allow` | keep | drop | drop |
 /// | `PolicyDecision` with another decision | keep | keep | keep |
@@ -27,8 +27,18 @@ use serde::{Deserialize, Serialize};
 /// | `ApprovalResolved` | keep | keep | keep |
 /// | `MonitorWarning` | keep | keep | drop |
 ///
-/// A `FileOpen` and a `NetworkConnect` that a rule matched still stay in
-/// storage, because the policy engine writes a `PolicyDecision` for them.
+/// # A file open that a rule matched
+///
+/// [`Retention::Balanced`] keeps a `FileOpen` and a `NetworkConnect` when at
+/// least **one rule matched it**, and it drops the rest. The firewall emits
+/// the action event and the `PolicyDecision` of that action directly after
+/// it, so [`crate::TraceWriter`] holds such an event back for exactly one
+/// event and writes it when the decision that follows names a rule. A match
+/// of the level `info` counts: the mark of a credential read is such a match,
+/// and the session memory of the replay needs it.
+///
+/// An event that no rule matched stays dropped. Its verdict came from zero
+/// rules, so a replay of the trace cannot lose a verdict by not seeing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Retention {
@@ -44,9 +54,11 @@ pub enum Retention {
 impl Retention {
     /// Returns true when this event alone belongs in storage.
     ///
-    /// The answer uses one event only. [`crate::TraceWriter`] adds the exec
-    /// events that a kept decision names, because one event cannot tell
-    /// whether a later rule needs it.
+    /// The answer uses one event only. [`crate::TraceWriter`] adds the events
+    /// that a kept decision needs, because one event cannot tell whether a
+    /// later rule needs it: the exec events that a kept decision names under
+    /// [`Retention::EvidenceOnly`], and the held action of a decision with a
+    /// match under [`Retention::Balanced`].
     pub fn should_keep(&self, event: &Event) -> bool {
         match self {
             Retention::All => true,
@@ -135,6 +147,52 @@ pub(crate) fn named_processes(event: &Event) -> Vec<af_core::Pid> {
         _ => return Vec::new(),
     }
     pids
+}
+
+/// Returns true when this event is the action that [`Retention::Balanced`]
+/// holds back until it knows whether a rule matched it.
+pub(crate) fn is_held_action(event: &Event) -> bool {
+    matches!(
+        event.kind,
+        EventKind::FileOpen { .. } | EventKind::NetworkConnect { .. }
+    )
+}
+
+/// Returns true when `decision` is the verdict of the held action `held`, and
+/// at least one rule matched.
+///
+/// The firewall emits the action first and the decision of that action
+/// directly after it, both for the same process. A decision with no match
+/// leaves the action out of storage, because such a verdict comes from zero
+/// rules and a replay cannot lose it.
+pub(crate) fn decides_about(held: &Event, decision: &Event) -> bool {
+    let EventKind::PolicyDecision {
+        action, verdict, ..
+    } = &decision.kind
+    else {
+        return false;
+    };
+    if decision.pid != held.pid || verdict.matches.is_empty() {
+        return false;
+    }
+    match (&held.kind, &**action) {
+        (
+            EventKind::FileOpen { path, write },
+            af_core::Action::FileOpen {
+                path: other_path,
+                write: other_write,
+            },
+        ) => path == other_path && write == other_write,
+        (
+            EventKind::NetworkConnect { addr, port, .. },
+            af_core::Action::NetworkConnect {
+                addr: other_addr,
+                port: other_port,
+                ..
+            },
+        ) => addr == other_addr && port == other_port,
+        _ => false,
+    }
 }
 
 #[cfg(test)]

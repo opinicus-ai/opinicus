@@ -7,7 +7,7 @@ use std::path::Path;
 
 use af_core::{Event, EventSink, Pid, Result};
 
-use crate::retention::{named_processes, Retention};
+use crate::retention::{decides_about, is_held_action, named_processes, Retention};
 
 /// How many exec events wait at most for a decision that names them.
 ///
@@ -35,8 +35,11 @@ pub struct WriterStats {
 ///
 /// [`Retention`] decides which events go to the file.
 /// [`Retention::EvidenceOnly`] holds an exec event back until a decision
-/// names the process. Such an event counts as dropped while it waits, so
-/// `kept + dropped` always equals the number of events that the writer saw.
+/// names the process. [`Retention::Balanced`] holds a file open and a
+/// connection back for exactly one event, and writes it when the decision of
+/// that action names at least one rule. Such an event counts as dropped while
+/// it waits, so `kept + dropped` always equals the number of events that the
+/// writer saw.
 ///
 /// The writer flushes after every event that is evidence, and it flushes when
 /// it goes away. A session that ends badly therefore still leaves usable
@@ -54,6 +57,13 @@ pub struct TraceWriter {
     pending: BTreeMap<Pid, (u64, Event)>,
     /// Arrival counter of the waiting events.
     arrivals: u64,
+    /// The file open or the connection that waits for its own decision.
+    ///
+    /// [`Retention::Balanced`] uses it. Only one event ever waits: the
+    /// firewall emits the decision of an action directly after the action, so
+    /// the next event answers the question, and any other next event ends the
+    /// wait with a drop.
+    held: Option<Event>,
 }
 
 impl TraceWriter {
@@ -80,6 +90,7 @@ impl TraceWriter {
             stats: WriterStats::default(),
             pending: BTreeMap::new(),
             arrivals: 0,
+            held: None,
         }
     }
 
@@ -147,8 +158,43 @@ impl TraceWriter {
     }
 }
 
+impl TraceWriter {
+    /// Holds a file open or a connection until its own decision arrives.
+    ///
+    /// The event counts as dropped while it waits, exactly like a deferred
+    /// exec event, so the two counters always add up to what the writer saw.
+    fn hold(&mut self, event: &Event) -> Result<()> {
+        self.release_held(None)?;
+        self.stats.dropped += 1;
+        self.held = Some(event.clone());
+        Ok(())
+    }
+
+    /// Ends the wait of the held action.
+    ///
+    /// The event goes to storage when `decision` is its own decision and names
+    /// at least one rule. In every other case it stays dropped: an action that
+    /// no rule matched cannot change a verdict of a replay.
+    fn release_held(&mut self, decision: Option<&Event>) -> Result<()> {
+        let Some(held) = self.held.take() else {
+            return Ok(());
+        };
+        if decision.is_some_and(|decision| decides_about(&held, decision)) {
+            self.stats.dropped -= 1;
+            self.write(&held)?;
+        }
+        Ok(())
+    }
+}
+
 impl EventSink for TraceWriter {
     fn record(&mut self, event: &Event) -> Result<()> {
+        if self.retention == Retention::Balanced {
+            if is_held_action(event) {
+                return self.hold(event);
+            }
+            self.release_held(Some(event))?;
+        }
         if self.retention.should_keep(event) {
             if self.retention == Retention::EvidenceOnly {
                 self.release(event)?;
@@ -166,6 +212,9 @@ impl EventSink for TraceWriter {
     }
 
     fn flush(&mut self) -> Result<()> {
+        // A held action that never got its decision stays dropped. It is an
+        // action that no rule matched.
+        self.release_held(None)?;
         self.out.flush()?;
         Ok(())
     }
@@ -178,6 +227,7 @@ impl Drop for TraceWriter {
     /// the file.
     fn drop(&mut self) {
         self.pending.clear();
+        self.held = None;
         let _ = self.out.flush();
     }
 }

