@@ -176,8 +176,21 @@ session writes the mark down.
 | `scope` | `session` or `subtree` | How far the mark reaches. The default is `session`. |
 | `ttl_seconds` | number | How long the mark counts. Without a value it counts for the whole session. |
 
-`scope: subtree` ties the mark to the process under the root of the session,
-so a fact of one agent task cannot arm a rule in another task.
+`scope: subtree` ties the mark to the ancestor that is a **direct child of the
+session root**. An agent runs one tool call as its own `sh -c` child, so one
+subtree is one tool call, and a fact of one tool call cannot arm a rule in the
+next one.
+
+Choose the scope by the shape of the threat, not by taste. A chain that an
+attacker can split over two tool calls — read a key now, send it away in the
+next command — must use `scope: session` with a lifetime, because `subtree`
+would lose exactly the case that matters. Use `subtree` when the fact really
+belongs to the one command that produced it, and a fact of another command
+would be a false alarm.
+
+A session that does not name its root process — a trace of an older version —
+makes `subtree` as wide as `session`. Such a trace then replays as it did when
+it was recorded.
 
 A rule may exist only to remember. Give it `risk: info` and
 `decision: allow`, and it stays quiet.
@@ -187,7 +200,7 @@ A rule may exist only to remember. Give it `risk: info` and
     risk: info
     decision: allow
     match: { action: exec, program: [cat], argv_matches: '\.aws/credentials' }
-    remember: { mark: credential-read, scope: subtree, ttl_seconds: 600 }
+    remember: { mark: credential-read, scope: session, ttl_seconds: 600 }
 ```
 
 #### `marked` — ask about the fact
@@ -206,7 +219,7 @@ subtree, whatever the reader asks for.
 ```yaml
     match:
       action: exec
-      marked: { mark: credential-read, within_seconds: 600, scope: subtree }
+      marked: { mark: credential-read, within_seconds: 600, scope: session }
       argv_matches: '(?:^|\s)curl(?:\s|$)'
 ```
 
@@ -281,6 +294,25 @@ is not a repository gives an empty set, and then every remote is new.
             set: git_remotes
             capture: '(?:^|\s)push(?:\s+-{1,2}\S+)*\s+([^\s-]\S*)'
 ```
+
+##### The baseline alone is not enough for a remote
+
+A name in the baseline says nothing about the address behind it.
+`git remote set-url origin <other machine>` keeps the name `origin`, which
+the baseline knows, and the next `git push origin` then goes to a machine that
+the user never chose. `memory.git.push-unknown-remote` cannot see that,
+because the name it captures is a known one.
+
+Two rules cover it: `memory.git.remote-config-mark` writes
+`remote-config-changed` down when a command changes a remote, and
+`memory.git.push-after-remote-change` asks about the next push of that
+session.
+
+The cost is one question in an honest case: a session that adds a remote and
+then pushes to it asks one time, whether or not the new remote is the one it
+pushes to. A session that changes no remote never sees the rule. The same
+holds for a work tree with no remote at session start, where the baseline is
+empty: the first `remote add` plus `push` asks once.
 
 ### Regular expressions
 

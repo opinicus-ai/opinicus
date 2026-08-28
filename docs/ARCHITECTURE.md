@@ -300,6 +300,14 @@ It is strong at the system-call boundary for a different reason:
 * **A machine that is not `x86_64`.** A call number is not the same on two
   architectures, so the filter table is not portable. The firewall reports it
   and keeps the exec boundary alone, rather than installing a wrong table.
+* **A 32-bit program on an `x86_64` machine.** The same reason, one level
+  down: an `i386` process uses another call table, and the filter allows
+  every call whose `arch` field is not `AUDIT_ARCH_X86_64` rather than
+  reading it with the wrong table. The exec boundary still holds such a
+  program, but no file open and no connection **inside** it reaches the
+  firewall. The monitor writes a `MonitorWarning` at the exec, once for each
+  such process, so the gap is visible in the session and in the trace. It
+  reads the class byte of the program file to see it.
 * **A process that started before the session.** The firewall watches the
   tree of the command that it started. It attaches to nothing else.
 * **Another window.** A user or an agent with a second terminal outside the
@@ -338,9 +346,15 @@ rule of a live session also matches in a recorded session.
 
 `replay` judges an exec, a file open and a network connection, in the order
 of the trace and through the same memory-aware engine as a live session. Its
-summary line counts each kind. Note that `--retention balanced`, the default,
-drops a file or a network event that no rule matched, so a trace that is to
-be replayed for such an event needs `--retention all`.
+summary line counts each kind.
+
+`--retention balanced`, the default, keeps a file open and a connection **that
+at least one rule matched**, and drops the rest. A match of the level `info`
+counts, so the mark of a credential read and the hits of a sweep both survive,
+and a chain that the live session found is found again in the replay of the
+default trace. An event that no rule matched cannot change a verdict, because
+its verdict came from zero rules. Use `--retention all` to replay a rule that
+did not yet exist when the trace was written.
 
 A trace can hold command lines and paths of the user. Handle a trace like a
 log file with private data. `.gitignore` therefore ignores `*.jsonl`.
@@ -387,6 +401,26 @@ Two rules keep a replay equal to the live session:
 2. **The caller applies the effects.** `evaluate` and `evaluate_with_memory`
    have no side effect. The order of the writes is therefore the order of the
    events, and not the order in which rules happen to run.
+3. **The same actions, at the same time.** A live session judges an exec at
+   the `ts` of the `ProcessExec` event, and it folds the content of standard
+   input into that one verdict. The replay does the same: it takes the
+   `StdinWrite` event that follows the exec of the same process into the same
+   verdict, at the same `ts`. Neither side judges an action that the other
+   one does not judge — with the two exceptions below.
+4. **The root of the session is in the trace.** The launcher writes
+   `root_pid` into the `SessionMeta` of the `SessionStart` event, and the
+   replay reads it from there. A rule with the scope `subtree` needs it to
+   tell one tool call from another. A trace with no `root_pid` — every trace
+   that an older version wrote — makes `subtree` as wide as `session`, which
+   is what such a trace already did when it was recorded.
+
+Two things a trace cannot carry, so a replay judges less than the live session
+did:
+
+* **The text of a script.** The live session also reads the script that an
+  interpreter runs. No event carries that text.
+* **Standard input under `--retention balanced`.** The default level drops a
+  `StdinWrite` event, so only a trace of `--retention all` replays the input.
 
 The baseline follows the same rule. The launcher reads the git remotes of the
 work tree one time, at session start, and puts them in the `SessionStart`

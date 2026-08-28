@@ -67,12 +67,16 @@ Two axes are almost entirely blocked without them:
 | `exfil` | 15 | 12 |
 | `secrets` | 15 | 12 |
 
-That is why the firewall today is strong against a destructive command and
-weak against data leaving the machine. `policies/` already holds 7 rules
-written against these observables. They have never fired.
-That was the state when this document was derived. The monitor now produces
-both observables, and the rules are active.
-`agent-firewall policy list` marks them `(inactive)`.
+That is why the firewall was strong against a destructive command and weak
+against data leaving the machine. When this document was derived, `policies/`
+already held 7 rules written against these observables and not one of them had
+ever fired, because the monitor produced neither event. The monitor now
+produces both, with the kernel filter of `af-monitor::seccomp`, so those rules
+are live. `agent-firewall policy list` still marks a rule `(inactive)`, but
+only when the chosen filter mode cannot deliver the event that the rule needs:
+the default mode `write-only` lets the kernel drop an open that only reads, so
+a rule about the path of a read stays silent until the session runs with
+`--syscall-filter all-opens`.
 
 ### A.1 Detail the observables must carry
 

@@ -141,7 +141,13 @@ so the mode is a choice.
 | --- | --- | --- |
 | `write-only` (default) | a file open that can change the file, and every outgoing connection | 1.16× to 1.33× |
 | `all-opens` | the same, and an open that only reads | 1.33× to 1.92× |
-| `off` | nothing beyond a new program | no cost |
+| `off` | nothing beyond a new program | no cost above the monitor itself |
+
+Every number is measured against the `ptrace` monitor and not against a
+session with no firewall. The monitor itself is the larger part of the price:
+a file-heavy workload under `ptrace` alone was about ten times slower than the
+same workload with no firewall. `off` adds nothing to that; it does not make
+the session free.
 
 The default is cheap because the kernel itself drops a read-only open, and a
 read is 99.7% of the file traffic of a normal build. The price is that a rule
@@ -201,13 +207,21 @@ Works today:
   reports it, asks about it, and can let the call fail with a permission
   error while the program keeps running;
 * the recorder writes a trace, and `replay` evaluates the trace again,
-  including the file and the network actions.
+  including the file and the network actions. The default trace keeps every
+  file and network action that a rule matched, so a chain that the live
+  session found is found again in the replay; an action that no rule matched
+  is dropped, and it could not change a verdict.
 
 Does not work yet:
 
 * Linux only. macOS and Windows need another collector.
 * The kernel filter is `x86_64` only. On another architecture the firewall
-  says so and keeps the exec boundary alone.
+  says so and keeps the exec boundary alone. A **32-bit program on an
+  `x86_64` machine** is the same gap one level down: it uses another table of
+  system-call numbers, so the filter lets its calls through rather than
+  reading them wrongly. The firewall still holds every new program of such a
+  process, and it writes a warning at the start of it, so the gap is visible
+  in the session and in the trace.
 * No content of an open connection. The firewall sees that a program
   connects, and not the statement that the program sends over a connection
   that is already open. Watching that costs 8.8× and is not worth it.
