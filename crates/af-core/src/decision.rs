@@ -205,6 +205,14 @@ pub struct RuleInfo {
     /// this flag together with [`RuleInfo::actions`] to report it.
     #[serde(default)]
     pub needs_read_open: bool,
+    /// True when the rule carries a `threshold` block.
+    ///
+    /// Such a rule fires again on every action that crosses the line, for as
+    /// long as the window holds enough hits. The firewall uses this flag to
+    /// ask about the rule one time and repeat that answer, instead of asking
+    /// again for every later hit.
+    #[serde(default)]
+    pub has_threshold: bool,
 }
 
 #[cfg(test)]

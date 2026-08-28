@@ -201,6 +201,7 @@ impl CompiledRule {
             // open that reads. A rule with both, or with no `write` field at
             // all, is carried by a monitor that observes writes alone.
             needs_read_open: intents.len() == 1 && intents.contains(&false),
+            has_threshold: self.threshold.is_some(),
         }
     }
 }
