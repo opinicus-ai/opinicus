@@ -17,3 +17,9 @@
 .idea/
 .vscode/
 .DS_Store
+
+# Research spike build output.
+research/spikes/**/build/
+research/spikes/**/target/
+research/spikes/**/*.o
+research/spikes/**/*.so
