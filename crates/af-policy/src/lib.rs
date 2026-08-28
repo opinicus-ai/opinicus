@@ -186,6 +186,8 @@ impl CompiledRule {
     fn to_info(&self) -> RuleInfo {
         let mut kinds = std::collections::BTreeSet::new();
         self.matcher.collect_action_kinds(&mut kinds);
+        let mut intents = std::collections::BTreeSet::new();
+        self.matcher.collect_write_intents(&mut intents);
         RuleInfo {
             rule_id: self.id.clone(),
             title: self.title.clone(),
@@ -195,6 +197,10 @@ impl CompiledRule {
             source: self.source.clone(),
             disabled: !self.enabled,
             actions: kinds.iter().map(|k| k.label().to_string()).collect(),
+            // Only a rule that asks for a read and never for a write needs an
+            // open that reads. A rule with both, or with no `write` field at
+            // all, is carried by a monitor that observes writes alone.
+            needs_read_open: intents.len() == 1 && intents.contains(&false),
         }
     }
 }

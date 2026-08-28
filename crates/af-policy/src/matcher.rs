@@ -138,6 +138,22 @@ impl Matcher {
         // says nothing about what the rule can match.
     }
 
+    /// Collects every write intent that this condition asks a file open for.
+    ///
+    /// `Some(false)` in the answer means that some branch of the rule only
+    /// matches an open that reads. A monitor that never observes a read can
+    /// then not carry that branch, and the user interface has to say so.
+    ///
+    /// A `not` block is left out for the same reason as above.
+    pub(crate) fn collect_write_intents(&self, out: &mut BTreeSet<bool>) {
+        if let Some(write) = self.write {
+            out.insert(write);
+        }
+        for nested in self.all_of.iter().chain(self.any_of.iter()) {
+            nested.collect_write_intents(out);
+        }
+    }
+
     /// Returns true when every condition of the block matches the action.
     pub(crate) fn matches(&self, subject: &Subject<'_>) -> bool {
         if let Some(kind) = self.action {

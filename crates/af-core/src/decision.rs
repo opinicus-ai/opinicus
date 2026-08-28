@@ -198,6 +198,13 @@ pub struct RuleInfo {
     /// user interface uses this list to report a rule that cannot fire.
     #[serde(default)]
     pub actions: Vec<String>,
+    /// True when every file open that the rule matches is an open that reads.
+    ///
+    /// A monitor can be cheap by letting the kernel drop every open that only
+    /// reads, and then such a rule can never fire. The user interface uses
+    /// this flag together with [`RuleInfo::actions`] to report it.
+    #[serde(default)]
+    pub needs_read_open: bool,
 }
 
 #[cfg(test)]
