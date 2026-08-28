@@ -18,7 +18,7 @@ The system has seven layers and one shared contract.
 | OS event collector | `af-monitor` | Reads process events from the kernel with `ptrace` and reads facts from `/proc`. |
 | Event normalization | `af-core`, `af-monitor` | Converts every platform event into one `Event` value. |
 | Provenance engine | `af-provenance` | Builds the causal graph of the processes and answers ancestry questions. |
-| Policy engine | `af-policy` | Matches deterministic rules against an action and returns a verdict. |
+| Policy engine | `af-policy` | Matches deterministic rules against an action and returns a verdict, and what the session must remember. |
 | Approval layer | `af-approval` | Asks the user, and remembers an answer for the session. |
 | Recorder | `af-recorder` | Writes the events as JSON Lines and reads a trace again. |
 
@@ -33,6 +33,8 @@ The most important types are:
 * `ProcessInfo` — the facts of one process.
 * `Action` — the thing that a rule evaluates.
 * `Verdict`, `Decision` and `RiskLevel` — the answer of the policy engine.
+* `SessionMemory` and `MemoryEffect` — what the session remembers, and what
+  a rule asks it to write down. See section 6.
 * `EventSink`, `PolicyEngine`, `ProvenanceView` and `Approver` — the traits
   that connect the layers.
 
@@ -212,7 +214,59 @@ rule of a live session also matches in a recorded session.
 A trace can hold command lines and paths of the user. Handle a trace like a
 log file with private data. `.gitignore` therefore ignores `*.jsonl`.
 
-## 6. Why this design
+## 6. Session memory
+
+A rule about one action cannot say "a credential file was read, and now data
+leaves the machine". `af-core::memory` holds the small store that carries such
+a fact from one action to the next. It keeps three things:
+
+| Part | What it holds | Which rule block reads it |
+| --- | --- | --- |
+| Marks | A name, the time, the subtree that set it, and a lifetime. | `marked` |
+| Occurrences | The hits of one rule, with the value that makes a hit different. | `threshold` |
+| Baseline | Named sets of text that the launcher read at session start. | `baseline_missing` |
+
+### The flow of one effect
+
+```text
+   monitor                launcher (af-cli)             policy (af-policy)
+   -------                -----------------             ------------------
+   exec stop  ---------->  evaluate_with_memory  ---->   reads the memory
+                           (&ctx, &memory)               matches every rule
+                                  ^                             |
+                                  |                             v
+                           applies the effects  <-----  (verdict, effects)
+                           memory.apply(e, ts)
+```
+
+**The engine never writes.** It returns a list of `MemoryEffect` values, and
+the caller applies them, in event order, with `SessionMemory::apply`. Two
+callers do this: `FirewallHandler` in a live session, and the `replay`
+command for a recorded trace. Both run the same code path.
+
+### The determinism rule
+
+Two rules keep a replay equal to the live session:
+
+1. **Event time, never the clock.** Every window and every lifetime is
+   measured against the `ts` of the event that the monitor produced. The
+   policy engine reads no clock, no network and no random number. The
+   recorded event carries the same `ts`, so the replay computes the same
+   windows.
+2. **The caller applies the effects.** `evaluate` and `evaluate_with_memory`
+   have no side effect. The order of the writes is therefore the order of the
+   events, and not the order in which rules happen to run.
+
+The baseline follows the same rule. The launcher reads the git remotes of the
+work tree one time, at session start, and puts them in the `SessionStart`
+event inside `SessionMeta`. **A replay takes the baseline out of the trace and
+never reads the machine again**, so a trace from another computer gives the
+same verdicts here.
+
+`agent-firewall replay <trace> --json`, run two times on one trace, gives two
+equal outputs. A test in `crates/af-cli/tests/cli.rs` proves it.
+
+## 7. Why this design
 
 * **Deterministic first.** The decision path holds no model and no network
   call. The same trace always gives the same verdict.
