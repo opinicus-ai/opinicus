@@ -23,3 +23,6 @@ research/spikes/**/build/
 research/spikes/**/target/
 research/spikes/**/*.o
 research/spikes/**/*.so
+research/spikes/**/bin/
+research/spikes/**/results/
+research/spikes/**/scratch/

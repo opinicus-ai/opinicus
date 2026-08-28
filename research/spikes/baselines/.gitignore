@@ -1,0 +1,5 @@
+# Build output of the spike. The Makefile rebuilds it in one command.
+bin/
+
+# Working files of the tests. Every test makes its own again.
+scratch/

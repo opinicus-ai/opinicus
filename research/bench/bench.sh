@@ -6,9 +6,15 @@
 # the median wall-clock time of each one.
 #
 # Usage:
-#   bench.sh                          # measures the workloads with no monitor
-#   bench.sh -- ./my-monitor          # measures them under a monitor
+#   bench.sh                            # measures the workloads with no monitor
+#   bench.sh -- ./my-monitor            # measures them under a monitor
 #   bench.sh --runs 9 -- strace -f -o /dev/null
+#   bench.sh --timeout 20 -- ./my-monitor
+#
+# Every run has a time limit, which is 60 seconds by default. A wrapper that
+# reaches the limit gives no number and the harness stops with code 1. A
+# wrapper under research can stop answering, and a measurement must never wait
+# for it without an end.
 #
 # The wrapper receives the workload command and its arguments. It must run
 # that command and wait for it to end.
@@ -20,12 +26,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 RUNS=7
+# A wrapper under research is not trusted to return. A supervisor can wait for
+# a notification that never arrives, and a sandbox can stop a workload that
+# cannot continue. Without a limit one such wrapper stops the whole
+# measurement for ever. Every run therefore has a time limit.
+RUN_TIMEOUT=60
 WRAPPER=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --runs)
             RUNS="$2"
+            shift 2
+            ;;
+        --timeout)
+            RUN_TIMEOUT="$2"
             shift 2
             ;;
         --)
@@ -35,6 +50,7 @@ while [ $# -gt 0 ]; do
             ;;
         *)
             printf 'bench.sh: unknown option %s\n' "$1" >&2
+            printf 'usage: bench.sh [--runs N] [--timeout SECONDS] [-- WRAPPER...]\n' >&2
             exit 2
             ;;
     esac
@@ -104,35 +120,59 @@ median() {
         }'
 }
 
+# Runs one workload one time, under the wrapper and under a time limit.
+#
+# The function returns 124 when the time limit stopped the run, which is what
+# `timeout` returns. It kills a process group, because a supervisor that stops
+# answering usually holds a stopped child.
+run_once() {
+    local script="$1"
+    if [ "${#WRAPPER[@]}" -gt 0 ]; then
+        timeout --kill-after=5 --signal=TERM "$RUN_TIMEOUT" \
+            "${WRAPPER[@]}" /bin/sh "$script" >/dev/null 2>&1
+    else
+        timeout --kill-after=5 --signal=TERM "$RUN_TIMEOUT" \
+            /bin/sh "$script" >/dev/null 2>&1
+    fi
+}
+
 # Runs one workload the requested number of times and prints the median in
-# milliseconds. A failed run stops the harness, because a monitor that breaks
-# the workload must not report a good number.
+# milliseconds. A run that reaches the time limit stops the harness, because a
+# wrapper that cannot finish must give no number at all.
 measure() {
     local label="$1"
     local script="$2"
     local run
     local start
     local end
+    local status
+    local values=()
 
     # One warm run fills the page cache, so the first measured run is not
     # slower than the others for a reason that has nothing to do with the
-    # monitor.
-    if [ "${#WRAPPER[@]}" -gt 0 ]; then
-        "${WRAPPER[@]}" /bin/sh "$script" >/dev/null 2>&1 || true
-    else
-        /bin/sh "$script" >/dev/null 2>&1 || true
-    fi
+    # wrapper. A failure here is not fatal, but a timeout is.
+    run_once "$script" || {
+        status=$?
+        if [ "$status" -ge 124 ]; then
+            printf '%-14s TIMEOUT after %ss on the warm run\n' "$label" "$RUN_TIMEOUT"
+            return 1
+        fi
+    }
 
     for run in $(seq 1 "$RUNS"); do
         start="$(date +%s%N)"
-        if [ "${#WRAPPER[@]}" -gt 0 ]; then
-            "${WRAPPER[@]}" /bin/sh "$script" >/dev/null 2>&1
-        else
-            /bin/sh "$script" >/dev/null 2>&1
-        fi
+        status=0
+        run_once "$script" || status=$?
         end="$(date +%s%N)"
-        printf '%s\n' "$(( (end - start) / 1000000 ))"
-    done | median | {
+        if [ "$status" -ge 124 ]; then
+            printf '%-14s TIMEOUT after %ss on run %s of %s\n' \
+                "$label" "$RUN_TIMEOUT" "$run" "$RUNS"
+            return 1
+        fi
+        values+=( "$(( (end - start) / 1000000 ))" )
+    done
+
+    printf '%s\n' "${values[@]}" | median | {
         read -r value
         printf '%-14s median_ms=%-8s runs=%s\n' "$label" "$value" "$RUNS"
     }

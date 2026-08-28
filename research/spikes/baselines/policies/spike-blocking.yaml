@@ -1,0 +1,36 @@
+version: 1
+name: spike.baselines.blocking
+description: >
+  A rule for the blocking test of this spike. It matches only a program of
+  this spike, so the test can prove that the exec boundary stops a program
+  with no risk to the machine. The program writes a marker file and does
+  nothing else.
+
+rules:
+  - id: spike.baselines.marker-writer
+    title: The marker writer of the baselines spike
+    category: process
+    risk: blocked
+    decision: deny
+    reason: This rule exists only to test that the exec boundary can stop a program.
+    match:
+      action: exec
+      all_of:
+        - argv_matches: 'marker_libc'
+        - argv_matches: 'blocked-marker'
+    tests:
+      - name: the marker writer of the spike is stopped
+        expect: deny
+        expect_match: true
+        process:
+          pid: 4242
+          comm: marker_libc
+          exe: /home/dev/spike/bin/marker_libc
+          argv: [marker_libc, /home/dev/spike/scratch/blocked-marker.txt]
+      - name: another program is not stopped
+        expect: allow
+        process:
+          pid: 4243
+          comm: 'true'
+          exe: /usr/bin/true
+          argv: ['true']
