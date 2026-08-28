@@ -15,7 +15,7 @@ The system has seven layers and one shared contract.
 | Layer | Crate | Function |
 | --- | --- | --- |
 | Session launcher | `af-cli`, `af-monitor` | Makes the session, starts the command and keeps the root of the process tree. |
-| OS event collector | `af-monitor` | Reads process events from the kernel with `ptrace` and reads facts from `/proc`. |
+| OS event collector | `af-monitor` | Reads process events from the kernel with `ptrace`, holds a chosen system call with a `seccomp` filter, and reads facts from `/proc`. |
 | Event normalization | `af-core`, `af-monitor` | Converts every platform event into one `Event` value. |
 | Provenance engine | `af-provenance` | Builds the causal graph of the processes and answers ancestry questions. |
 | Policy engine | `af-policy` | Matches deterministic rules against an action and returns a verdict, and what the session must remember. |
@@ -51,11 +51,13 @@ The most important types are:
 +--------------------+       +---------------------------+
 |  monitored tree    |       |  launcher (af-monitor)    |
 |                    |       |  fork, PTRACE_TRACEME,    |
-|  claude            |<------+  exec of the command      |
-|   -> bash          | trace +-------------+-------------+
-|    -> migrate.sh   |                     |
-|     -> psql        |   kernel stops      |  raw stops: fork, clone,
-+--------------------+   the process       |  exec, exit, signal
+|  claude            |<------+  exec of the command,     |
+|   -> bash          | trace |  seccomp filter install   |
+|    -> migrate.sh   |       +-------------+-------------+
+|     -> psql        |                     |
+|                    |   kernel stops      |  raw stops: fork, clone,
++--------------------+   the process       |  exec, exit, signal, and
+                                           |  a held open or connect
                                            v
                             +---------------------------+
                             |  collector (af-monitor)   |
@@ -83,8 +85,10 @@ The most important types are:
                     +-------------+-------------+
                                   |
                                   v
-                    allow  -> the kernel continues the exec
+                    allow  -> the kernel continues the exec or the call
                     deny   -> the exec fails, the process continues
+                    refuse -> the call fails with EPERM, the process
+                              continues
                     kill   -> the firewall ends the process tree
 ```
 
@@ -154,12 +158,98 @@ and the first instruction of `psql`.
     with the exit code and the number of processes. The command returns the
     exit code of the child, or 3 when the firewall stopped an action.
 
+## 3a. The path of one system call
+
+The exec stop of section 3 cannot see what a program does **after** it
+started. A single Python process can read a key, delete a tree and open a
+connection without ever starting a second program.
+
+A `seccomp` filter closes that. The steps below happen between the call of a
+running program and the moment the kernel makes that call.
+
+1. **The child installs the filter, one time.** In the same `pre_exec`
+   closure where the child asks to be traced, and before its own `execve`, it
+   promises `no_new_privs` and installs a small BPF program. A `seccomp`
+   filter is inherited by every child and survives `execve`, so this one
+   install covers the whole session tree. No descendant can escape it, and no
+   descendant needs an install of its own.
+
+2. **The kernel decides whether to hold the call.** The BPF program answers
+   `SECCOMP_RET_TRACE` for `connect`, for `creat`, for `openat2`, and for
+   `open` and `openat` when the `flags` argument carries a bit of
+   `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND`. Everything else runs with no
+   supervisor in the loop. **That decision is made in the kernel on the call
+   number and on a scalar, so nothing can race it.** `--syscall-filter
+   all-opens` adds a second rule that holds every open.
+
+   The filter never holds `execve`. The exec stop of section 3 already
+   reports one, and a filter that held `execve` would break its own first
+   `execve`: the trace action returns `ENOSYS` until the monitor has set
+   `PTRACE_O_TRACESECCOMP`, which it can only do at a stop that the first
+   `execve` must reach first.
+
+3. **The monitor meets the stop.** `TRACE_OPTIONS` holds
+   `PTRACE_O_TRACESECCOMP`, so the wait loop gets a `PTRACE_EVENT_SECCOMP`.
+   The call has **not** happened: no byte is written and no packet has left.
+
+4. **The collector reads the call.** It reads the registers with
+   `PTRACE_GETREGSET`, takes the call number from `orig_rax` and the
+   arguments from `rdi`, `rsi`, `rdx`, `r10`, `r8` and `r9`. It then reads
+   the path or the socket address out of `/proc/<pid>/mem`. A relative path
+   is joined with `/proc/<pid>/cwd`, or with `/proc/<pid>/fd/<dirfd>` when
+   the call named a directory descriptor. `openat2` keeps its flags in a
+   structure behind a pointer, so the collector reads them there.
+
+5. **The action reaches the same engine as an exec.** The collector makes an
+   `EventKind::FileOpen` or an `EventKind::NetworkConnect`, and an
+   `Action::FileOpen` or `Action::NetworkConnect`. From here the path is the
+   path of section 3: provenance, policy, session memory, recorder, approval.
+   The policy engine needed no change for this; those actions were in the
+   schema before anything produced them.
+
+6. **The monitor performs the answer.**
+
+   * *Allow*: the monitor continues the process, and the kernel makes the
+     call.
+   * *Refuse*: the monitor writes `-1` into `orig_rax` and `-EPERM` into
+     `rax`, and continues. The kernel skips the call, and the program gets an
+     ordinary permission error that it can handle and report in its own
+     words. The value `-1` is load-bearing: any other number makes the kernel
+     run the filter a second time.
+   * *Terminate*: the monitor kills the process tree of the session.
+
+   A refused call often comes back at once, because a program retries or
+   walks a list of files. The launcher therefore answers one question for one
+   rule and one action, and reuses that answer for the rest of the session.
+
+### A path is sound to refuse with, and never to allow with
+
+`docs/DETECTION-RESEARCH.md` section 2 measured this and it is binding.
+
+The monitor reads the path at step 4, and the kernel reads the same memory
+again when the call really runs. A second thread of the same program can
+change it in between: measured, **the two differed 47.6% of the time**.
+
+* A **refusal** holds, because the call never runs at all. Measured: 2000 of
+  2000.
+* A **report** and a **question to the user** are honest, because the worst
+  case is a wrong name in a message.
+* An **allow** that rests on the path is **not sound**. The firewall never
+  makes one: a path that matches no rule is allowed because nothing matched,
+  and not because the firewall trusted the path.
+
+The consequence for a rule author: **a path-keyed exception on a `file_open`
+rule is advisory.** It makes a normal program quiet. It does not hold against
+a program that wants to defeat it. An exception that must hold has to name
+something that cannot be rewritten — the call itself, a scalar argument, or a
+fact of the process from the exec boundary.
+
 ## 4. The enforcement boundary
 
-**The enforcement boundary is the entry of the `execve` system call of a
-monitored process.**
+**The firewall has two enforcement boundaries: the entry of the `execve`
+system call, and the `seccomp` stop of a held system call.**
 
-The firewall is strong at this boundary:
+The firewall is strong at the exec boundary:
 
 * the new program did not run, so a denied action has no effect at all;
 * the decision uses the real arguments of the real system call, and not a
@@ -170,27 +260,62 @@ The firewall is strong at this boundary:
   line to a marker file at its first statement, and after a denied session
   the marker file holds no line for the dangerous statement.
 
-### What the boundary cannot stop
+It is strong at the system-call boundary for a different reason:
 
-* **An action inside a program that already runs.** The firewall reads the
-  command line of `psql` at its start. A long database session that reads
-  statements from a pipe after the start stays invisible.
-* **A file write or a network connection.** The collector observes process
-  events only. It does not observe `open` or `connect` yet. A rule for
-  `~/.ssh` or for a production host is therefore not possible today.
+* the call did not happen, so a refused open writes no byte and a refused
+  connect sends no packet;
+* the choice of which calls stop is made in the kernel, on the call number
+  and on a scalar argument, and no thread can change either;
+* the filter is inherited by every child and survives `execve`, so one
+  install at the session root covers the whole tree;
+* `PTRACE_O_EXITKILL` still holds: a process that waits at a system-call stop
+  dies with the rest of the tree when the firewall dies.
+
+### What the boundaries cannot stop
+
+* **Content that leaves through a connection that is already open.** The
+  firewall sees the `connect`. The statement goes out later through `write`
+  or `sendto` on the open socket. Holding those calls was measured at 8.8× on
+  a chatty program, which is the same order as the full system-call tracing
+  that this design rejected. Seeing that content needs a proxy for the
+  protocol, not a system-call filter.
+* **A delete and a rename.** The kernel filter could hold them, and the
+  normalized schema has no event for them yet. A delete is still judged at
+  the command that does it.
+* **An open that only reads, in the default mode.** The kernel drops it, on
+  purpose, because a read is 99.7% of the file traffic of a normal build.
+  `--syscall-filter all-opens` holds it and costs more.
 * **Content in a file.** A script can put a dangerous statement in a
   temporary file and give the file name to the program. The firewall sees
   the file name, not the content.
+* **A restart of the firewall.** `SECCOMP_RET_TRACE` with no tracer does not
+  mean allow; it means the call is skipped and returns `ENOSYS`. A program
+  that runs while no firewall is there therefore **breaks** rather than going
+  unobserved. `PTRACE_O_EXITKILL` covers the dangerous case by killing the
+  tree, and restarting under a live session needs design work.
+* **A program that knows it is watched.** The `TracerPid` and the `Seccomp`
+  fields of `/proc/self/status` show both layers.
+* **Anything with no system call.** Pure computation and memory writes stay
+  invisible, as they do for every tool of this kind.
+* **A machine that is not `x86_64`.** A call number is not the same on two
+  architectures, so the filter table is not portable. The firewall reports it
+  and keeps the exec boundary alone, rather than installing a wrong table.
 * **A process that started before the session.** The firewall watches the
   tree of the command that it started. It attaches to nothing else.
 * **Another window.** A user or an agent with a second terminal outside the
   session is outside the firewall.
 * **A setuid program.** The kernel ignores the setuid bit of a program that
   a traced process starts. Such a program then behaves differently or fails.
+  `no_new_privs`, which the kernel filter needs, takes the same thing away a
+  second time; `--syscall-filter off` gives that half back and `ptrace` still
+  takes the rest. The monitor writes a warning of its own when a session runs
+  `sudo`, `su`, `passwd` or `pkexec`, so the user does not blame the program.
 * **A time-of-check race.** A second thread of the same process can change
   the argument memory after the check and before the kernel copies it. This
-  needs a hostile program, not a careless agent. A stronger boundary needs
-  `seccomp_unotify` or a kernel component.
+  needs a hostile program, not a careless agent. It is why a path never
+  carries an allow: see "A path is sound to refuse with, and never to allow
+  with" in section 3a. A stronger boundary needs a mechanism that hands the
+  firewall an object instead of a pointer, such as `fanotify`.
 * **Performance under many processes.** Every stop costs time. The monitor
   therefore stops only for the events that it needs.
 
@@ -210,6 +335,12 @@ $ agent-firewall replay session.jsonl --policy policies/
 rules. A rule author can therefore test a new rule against a real session.
 The end-to-end test uses `replay` for the same reason: it proves that the
 rule of a live session also matches in a recorded session.
+
+`replay` judges an exec, a file open and a network connection, in the order
+of the trace and through the same memory-aware engine as a live session. Its
+summary line counts each kind. Note that `--retention balanced`, the default,
+drops a file or a network event that no rule matched, so a trace that is to
+be replayed for such an event needs `--retention all`.
 
 A trace can hold command lines and paths of the user. Handle a trace like a
 log file with private data. `.gitignore` therefore ignores `*.jsonl`.

@@ -125,9 +125,34 @@ Options of `run`:
 | `--trace <PATH>` | Writes the normalized events as JSON Lines. |
 | `--approve <MODE>` | `ask`, `allow` or `deny`. The default is `ask` on a terminal and `deny` without one. |
 | `--approval-timeout <S>` | Denies when nobody answers in this many seconds. |
+| `--syscall-filter <MODE>` | `write-only` (the default), `all-opens` or `off`. See below. |
 | `--print-tree` | Prints the process tree when the session ends. |
 | `--json` | Prints every event as JSON on standard output. |
 | `-v`, `--verbose` | Prints every normalized event as text. |
+
+### What the firewall sees inside a running program
+
+A kernel filter holds the few system calls that a rule can judge, so the
+firewall also sees what a program does **after** it started. The filter costs
+a little time at every call it holds, and nothing at all at the other calls,
+so the mode is a choice.
+
+| `--syscall-filter` | What the firewall sees | Measured cost |
+| --- | --- | --- |
+| `write-only` (default) | a file open that can change the file, and every outgoing connection | 1.16× to 1.33× |
+| `all-opens` | the same, and an open that only reads | 1.33× to 1.92× |
+| `off` | nothing beyond a new program | no cost |
+
+The default is cheap because the kernel itself drops a read-only open, and a
+read is 99.7% of the file traffic of a normal build. The price is that a rule
+about the path of a **read** — a credential file that a program only reads —
+cannot fire. Run `policy list` to see which rules that is, and
+`--syscall-filter all-opens` to wake them.
+
+`off` also gives the session back its right to raise privilege: the firewall
+only asks the kernel for `no_new_privs` when it really installs a filter.
+`ptrace` takes the setuid bit away in every mode, though, so `sudo` does not
+work under the firewall whatever the mode is.
 
 Exit codes:
 
@@ -155,7 +180,7 @@ no database can change. Both scripts make a throwaway git repository in
 This repository holds a proof of concept. It answers one question: can a
 program in user space stop a dangerous action inside a deep process chain,
 without a kernel module and without root? The answer on Linux is yes, at the
-exec boundary.
+exec boundary and at a small set of system calls.
 
 ### What works and what does not
 
@@ -171,23 +196,37 @@ Works today:
   the arguments and the ancestry;
 * the firewall holds the process before the new program starts, and it asks
   the user;
-* the recorder writes a trace, and `replay` evaluates the trace again.
+* a kernel filter holds a file open that can change the file, and every
+  outgoing connection, **inside a program that already runs**; the firewall
+  reports it, asks about it, and can let the call fail with a permission
+  error while the program keeps running;
+* the recorder writes a trace, and `replay` evaluates the trace again,
+  including the file and the network actions.
 
 Does not work yet:
 
 * Linux only. macOS and Windows need another collector.
-* No file events. A rule cannot yet see that a program writes to `~/.ssh`.
-* No network events. A rule cannot yet see a connection to a production
-  host.
+* The kernel filter is `x86_64` only. On another architecture the firewall
+  says so and keeps the exec boundary alone.
+* No content of an open connection. The firewall sees that a program
+  connects, and not the statement that the program sends over a connection
+  that is already open. Watching that costs 8.8× and is not worth it.
+* No delete and no rename event. The schema has no shape for them yet, so a
+  delete is still judged at the command that does it.
+* A path that a rule reads is **not proof**. The firewall reads it out of
+  the memory of the program that it judges, and a second thread of that
+  program can change it in the meantime. It is good enough to report, to
+  refuse and to ask, and it is never the reason to allow something.
 * No inspection of standard input. A statement that a program reads from a
   pipe after its start stays invisible. The demonstration therefore puts the
   dangerous statement in the command line.
 * No agent log adapters. The firewall knows the process tree, but it does
   not know the tool call of the agent.
-* Interception happens at the exec boundary only. The firewall stops a new
-  program. It does not stop an action inside a program that already runs.
+* The firewall cannot be restarted under a live session. A traced call
+  returns "Function not implemented" while no firewall is there, so the
+  program breaks rather than going unobserved.
 * The monitor uses `ptrace`. A traced process runs slower, and the kernel
-  ignores the setuid bit of a new program.
+  ignores the setuid bit of a new program, so `sudo` cannot raise privilege.
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 
@@ -196,7 +235,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 | Path | Function |
 | --- | --- |
 | `crates/af-core` | The shared contract: normalized events, process facts, decisions and the traits between the layers. |
-| `crates/af-monitor` | The Linux collector. It starts a command under `ptrace`, follows every descendant, and holds a process at the exec boundary. |
+| `crates/af-monitor` | The Linux collector. It starts a command under `ptrace`, follows every descendant, holds a process at the exec boundary, and holds a chosen system call with a `seccomp` filter. |
 | `crates/af-provenance` | The provenance graph. It answers which process started which process. |
 | `crates/af-policy` | The deterministic policy engine, the rule format and the rule pack inside the binary. |
 | `crates/af-approval` | The approval layer. It asks the user on the terminal and remembers a session decision. |
