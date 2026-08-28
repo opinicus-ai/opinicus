@@ -18,9 +18,9 @@ web research  ->  incident reports (incidents/)  ->  ledger (LEDGER.md)
 
 | path | what it is |
 | --- | --- |
-| `LEDGER.md` | the single source of truth: every incident (INC-###) and every scenario (SC-###) with ids, status, and coverage |
-| `incidents/` | one report per real-world failure of a coding agent or its toolchain, named `<axis>-<slug>.md` |
-| `scenarios/` | one catalog per axis, named `<axis>.md`; full scenario detail (behavior, example, detection signal) that feeds rule writing |
+| `LEDGER.md` | the analysis document: headline numbers, observable summary, coverage summary, the interruption budget, per-axis tables, run log. Updated in place by each run; the prose is preserved |
+| `incidents/` | the incident source of truth: one report per real-world failure, named `<axis>-<slug>.md` |
+| `scenarios/` | the scenario source of truth: one catalog per axis, `<axis>.md`, with numbered sections `### SC <axis>-NN <title>` |
 | `threat-research.workflow.js` | the reusable multi-agent research workflow (script for the pi `workflow` tool, not runnable directly) |
 
 ## Research axes
@@ -52,26 +52,26 @@ Ask the agent to **"run the threat research workflow"** (or
      - `ledger`: full content of `LEDGER.md`
      - `knownReports`: list of `{f, t}` (filename, title) for every report
        already in `incidents/`, so no incident is researched twice
-     - `seedTodo`: list of `{id, axis, slug, title, source}` for ledger rows
-       whose report is still `missing`
    - `background: true`
 3. When the run settles: check `git status`, spot-check the new incident
    reports, and summarize what the ledger gained.
 4. Follow up on `coverage: gap` scenarios by writing policy rules and tests.
 
-Every run deduplicates against the ledger passed in `args`, so it is safe to
-run as often as wanted. The merge step is the only writer of `LEDGER.md`.
+Every run deduplicates against what is on disk: researchers read their axis
+catalog first and append only new numbered sections, and incidents dedupe
+against `knownReports`. The merge step edits only the ledger's count tables
+and appends a run log row; analysis prose is never rewritten.
 
 A few incidents were reported twice by different axes (run 1 wrote two reports
-from two angles). One ledger row points at the primary report; the alternate
-report stays in `incidents/` as a second angle on the same incident.
+from two angles). The per-axis count in the ledger counts both files; they are
+alternate views of the same incident.
 
-## Scenario lifecycle
+## How findings become rules
 
-| status | meaning |
-| --- | --- |
-| `proposed` | found by research, no rule yet |
-| `rule-written` | a rule id in `policies/` claims the scenario (put the id in the sources column) |
-| `tested` | the rule has tests in its yaml that prove the scenario |
-
-Goal of the program: no `gap` scenarios left, every scenario `tested`.
+Scenarios carry a `coverage` value judged against the rule ids in
+`policies/*.yaml` (the researchers grep them at run time) and an
+`observable` value: `exec-input` (the monitor sees it today) or
+`file-open` / `network-connect` (blocked until the monitor emits that
+event kind). The ledger's interruption budget governs which scenarios
+become stopping rules; `docs/DETECTION-REQUIREMENTS.md` is the spec that
+the catalogue adds up to.
