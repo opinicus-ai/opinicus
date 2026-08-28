@@ -209,6 +209,8 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 ## Documents
 
 * [PROJECT.md](PROJECT.md) — the idea, the principles and the plan.
+* [docs/PRODUCT.md](docs/PRODUCT.md) — the problem, why the constraints are
+  not optional, and what kills the product.
 * [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the layers, the path of one
   exec and the enforcement boundary.
 * [docs/POLICY.md](docs/POLICY.md) — the rule format and the rule pack.
