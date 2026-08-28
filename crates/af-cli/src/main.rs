@@ -17,7 +17,7 @@ fn main() {
         Command::Replay(args) => inspect_cmds::replay(args),
         Command::Tree(args) => inspect_cmds::tree(args),
         Command::Policy(command) => policy_cmds::run(command),
-        Command::Doctor => inspect_cmds::doctor(),
+        Command::Doctor(args) => inspect_cmds::doctor(args),
     };
 
     match result {

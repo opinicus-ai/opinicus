@@ -29,7 +29,15 @@ pub enum Command {
     #[command(subcommand)]
     Policy(PolicyCommand),
     /// Reports what the monitor can observe on this machine.
-    Doctor,
+    Doctor(DoctorArgs),
+}
+
+/// Arguments of the `doctor` sub-command.
+#[derive(Debug, clap::Args)]
+pub struct DoctorArgs {
+    /// Reports for this filter mode: write-only, all-opens or off.
+    #[arg(long, value_name = "MODE", default_value = "write-only")]
+    pub syscall_filter: String,
 }
 
 /// Options that select the rules.
@@ -86,6 +94,17 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_input_capture: bool,
 
+    /// Selects what the firewall sees inside a running program:
+    /// write-only, all-opens or off.
+    ///
+    /// `write-only` holds a file open that can change the file, and every
+    /// outgoing connection. `all-opens` also holds an open that only reads,
+    /// which wakes the rules about reading a credential file and costs more
+    /// on a file-heavy job. `off` installs no kernel filter, so the firewall
+    /// stops at a new program only.
+    #[arg(long, value_name = "MODE", default_value = "write-only")]
+    pub syscall_filter: String,
+
     /// The program to run, after `--`.
     #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
     pub command: Vec<String>,
@@ -125,6 +144,9 @@ pub enum PolicyCommand {
     List {
         #[command(flatten)]
         policy: PolicyOptions,
+        /// Marks the rules for this filter mode: write-only, all-opens or off.
+        #[arg(long, value_name = "MODE", default_value = "write-only")]
+        syscall_filter: String,
         /// Prints the list as JSON.
         #[arg(long)]
         json: bool,

@@ -1,14 +1,15 @@
 //! The `replay`, `tree` and `doctor` sub-commands.
 
 use af_core::{
-    display, Action, EvalContext, Event, EventKind, PolicyEngine, SessionMemory, SessionMeta,
+    display, Action, EvalContext, Event, EventKind, PolicyEngine, ProcessInfo, SessionMemory,
+    SessionMeta,
 };
 use af_provenance::ProcessGraph;
 use af_recorder::read_trace;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::cli::{ReplayArgs, TreeArgs};
+use crate::cli::{DoctorArgs, ReplayArgs, TreeArgs};
 use crate::normalize;
 use crate::policy_cmds::load_policy;
 
@@ -48,23 +49,17 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
     let mut memory = SessionMemory::with_baseline(session.baseline.clone());
 
     let mut hits: Vec<ReplayHit> = Vec::new();
-    let mut evaluated = 0usize;
+    let mut counted = Counts::default();
 
     for event in &events {
-        let EventKind::ProcessExec { process } = &event.kind else {
+        // A replay must judge every action that a live session judges, and in
+        // the same order. An exec, a file open and a connection all reach the
+        // same engine with the same memory.
+        let Some((judged, action)) = action_of(event, &graph) else {
             continue;
         };
-        evaluated += 1;
-        // A replay must judge a process in the same way as a live session.
-        let judged = normalize::for_policy(process);
+        counted.add(&action);
         let ancestry = graph.ancestry(judged.pid);
-        let action = Action::Exec {
-            exe: judged.exe.clone(),
-            program: judged.program_name().to_string(),
-            argv: judged.argv.clone(),
-            cwd: judged.cwd.clone(),
-            env: judged.env.clone(),
-        };
         // The memory carries a fact from an earlier action to this one. The
         // effects are applied in event order, exactly as the live handler
         // does it, so a replay repeats the verdicts of the live session.
@@ -78,13 +73,16 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
 
         if verdict.matches.is_empty() {
             if args.verbose && !args.json {
-                println!("allow      {:>6}  {}", judged.pid, judged.command_line());
+                println!("allow      {:>6}  {}", judged.pid, action.summary());
             }
             continue;
         }
 
         if !args.json {
-            println!("\n{}", display::explain(&ancestry, &judged, &action, &verdict));
+            println!(
+                "\n{}",
+                display::explain(&ancestry, &judged, &action, &verdict)
+            );
         }
         for matched in &verdict.matches {
             hits.push(ReplayHit {
@@ -102,17 +100,94 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&hits)?);
     } else {
         println!(
-            "\n{evaluated} exec event(s) evaluated, {} rule match(es)",
+            "\n{} exec, {} file and {} network event(s) evaluated, {} rule match(es)",
+            counted.exec,
+            counted.file,
+            counted.network,
             hits.len()
         );
     }
     Ok(0)
 }
 
+/// How many events of each kind the replay judged.
+#[derive(Debug, Default)]
+struct Counts {
+    exec: usize,
+    file: usize,
+    network: usize,
+}
+
+impl Counts {
+    /// Counts one action.
+    fn add(&mut self, action: &Action) {
+        match action {
+            Action::FileOpen { .. } => self.file += 1,
+            Action::NetworkConnect { .. } => self.network += 1,
+            _ => self.exec += 1,
+        }
+    }
+}
+
+/// Makes the action of one recorded event, and names the process that acts.
+///
+/// Returns `None` for an event that carries no action of its own, such as the
+/// start of the session or a decision that an earlier run already made.
+fn action_of(event: &Event, graph: &ProcessGraph) -> Option<(ProcessInfo, Action)> {
+    match &event.kind {
+        EventKind::ProcessExec { process } => {
+            // A replay must judge a process in the same way as a live session.
+            let judged = normalize::for_policy(process);
+            let action = Action::Exec {
+                exe: judged.exe.clone(),
+                program: judged.program_name().to_string(),
+                argv: judged.argv.clone(),
+                cwd: judged.cwd.clone(),
+                env: judged.env.clone(),
+            };
+            Some((judged, action))
+        }
+        EventKind::FileOpen { path, write } => {
+            let process = actor(event.pid, graph);
+            Some((
+                process,
+                Action::FileOpen {
+                    path: path.clone(),
+                    write: *write,
+                },
+            ))
+        }
+        EventKind::NetworkConnect { addr, port, host } => {
+            let process = actor(event.pid, graph);
+            Some((
+                process,
+                Action::NetworkConnect {
+                    host: host.clone(),
+                    addr: addr.clone(),
+                    port: *port,
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Reads the facts of the process that acted, out of the trace itself.
+///
+/// A replay reads no state of this machine, so a process that the trace does
+/// not name keeps its identifier and nothing else.
+fn actor(pid: af_core::Pid, graph: &ProcessGraph) -> ProcessInfo {
+    graph
+        .process(pid)
+        .unwrap_or_else(|| ProcessInfo::from_pid(pid))
+}
+
 /// Reports what the monitor can observe on this machine.
-pub fn doctor() -> Result<i32> {
+pub fn doctor(args: DoctorArgs) -> Result<i32> {
+    let filter = crate::run::parse_syscall_filter(&args.syscall_filter)?;
     println!("agent-firewall doctor\n");
-    let capabilities = af_monitor::Monitor::capabilities();
+    println!("  system-call filter: {}\n", filter.label());
+    let capabilities = af_monitor::Monitor::capabilities(filter);
     let width = capabilities.iter().map(|c| c.name.len()).max().unwrap_or(20);
     let mut missing_critical = false;
     for capability in &capabilities {
@@ -132,13 +207,15 @@ pub fn doctor() -> Result<i32> {
             let rules = set.rules();
             let inactive = rules
                 .iter()
-                .filter(|r| !crate::policy_cmds::is_reachable(r))
+                .filter(|r| !crate::policy_cmds::is_reachable(r, filter))
                 .count();
             println!("\n  built-in rules: {}", rules.len());
             if inactive > 0 {
                 println!(
-                    "  inactive rules: {inactive} (they need an action kind that this\n\
-                                       monitor does not observe; run `policy list` for the list)"
+                    "  inactive rules: {inactive} (they need something that this filter mode\n\
+                                       does not observe; run `policy list --syscall-filter {}`\n\
+                                       for the list)",
+                    filter.label()
                 );
             }
         }

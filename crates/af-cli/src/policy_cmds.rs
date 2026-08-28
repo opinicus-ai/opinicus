@@ -1,6 +1,7 @@
 //! The `policy` sub-commands.
 
 use af_core::PolicyEngine;
+use af_monitor::SyscallFilter;
 use af_policy::{PolicySet, Severity};
 use anyhow::{Context, Result};
 
@@ -15,37 +16,76 @@ pub fn load_policy(options: &PolicyOptions) -> Result<PolicySet> {
     Ok(set)
 }
 
-/// The action kinds that the monitor of this version really makes.
+/// The action kinds that the monitor makes whatever the filter mode is.
 ///
-/// The firewall judges a new program and the content that it reads. It does
-/// not observe a file open or a network connection yet, because that needs a
-/// system-call source that the monitor does not have. A rule that matches only
-/// an action kind outside this list can never fire, and the user must know
-/// that instead of trusting a rule that is silent.
-pub const SUPPORTED_ACTIONS: &[&str] = &["exec", "input"];
+/// The exec boundary needs no kernel filter, so these two are always there.
+pub const ALWAYS_SUPPORTED_ACTIONS: &[&str] = &["exec", "input"];
+
+/// Names every action kind that a session with this filter mode can make.
+///
+/// The kernel filter decides what a running program shows the firewall, so
+/// the list depends on the mode. The command line prints it, and a rule that
+/// needs a kind outside the list is marked inactive.
+pub fn supported_actions(filter: SyscallFilter) -> Vec<&'static str> {
+    let mut kinds = ALWAYS_SUPPORTED_ACTIONS.to_vec();
+    if filter.observes_opens() {
+        kinds.push("file_open");
+        kinds.push("network_connect");
+    }
+    kinds
+}
 
 /// Returns true when the monitor can ever make an action that the rule matches.
 ///
 /// A rule that names no action kind matches any action, so it is reachable.
-pub fn is_reachable(rule: &af_core::RuleInfo) -> bool {
-    rule.actions.is_empty()
-        || rule
-            .actions
-            .iter()
-            .any(|kind| SUPPORTED_ACTIONS.contains(&kind.as_str()))
+///
+/// A rule whose only file open is an open that **reads** is a case of its
+/// own. The write-only filter lets the kernel drop such an open, so the rule
+/// stays silent even though the firewall does observe file opens. The user
+/// must see that, or a credential file looks watched when it is not.
+pub fn is_reachable(rule: &af_core::RuleInfo, filter: SyscallFilter) -> bool {
+    if rule.actions.is_empty() {
+        return true;
+    }
+    let supported = supported_actions(filter);
+    rule.actions.iter().any(|kind| {
+        if !supported.contains(&kind.as_str()) {
+            return false;
+        }
+        if kind == "file_open" && rule.needs_read_open && !filter.observes_read_opens() {
+            return false;
+        }
+        true
+    })
+}
+
+/// Says in one line why a rule cannot fire under this filter mode.
+fn why_inactive(rule: &af_core::RuleInfo, filter: SyscallFilter) -> String {
+    if rule.needs_read_open && filter.observes_opens() {
+        return "needs the path of an open that reads; run with `--syscall-filter all-opens`"
+            .to_string();
+    }
+    format!("needs {}", rule.actions.join(", "))
 }
 
 /// Runs a `policy` sub-command and returns the exit code.
 pub fn run(command: PolicyCommand) -> Result<i32> {
     match command {
-        PolicyCommand::List { policy, json } => list(policy, json),
+        PolicyCommand::List {
+            policy,
+            syscall_filter,
+            json,
+        } => {
+            let filter = crate::run::parse_syscall_filter(&syscall_filter)?;
+            list(policy, filter, json)
+        }
         PolicyCommand::Check { paths } => check(paths),
         PolicyCommand::Test { policy } => test(policy),
     }
 }
 
 /// Lists every loaded rule.
-fn list(options: PolicyOptions, json: bool) -> Result<i32> {
+fn list(options: PolicyOptions, filter: SyscallFilter, json: bool) -> Result<i32> {
     let set = load_policy(&options)?;
     let mut rules = set.rules();
     rules.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
@@ -58,7 +98,11 @@ fn list(options: PolicyOptions, json: bool) -> Result<i32> {
     let width = rules.iter().map(|r| r.rule_id.len()).max().unwrap_or(10);
     println!("{:<width$}  {:<18}  {:<18}  TITLE", "RULE", "RISK", "DECISION");
     for rule in &rules {
-        let mark = if is_reachable(rule) { "" } else { "  (inactive)" };
+        let mark = if is_reachable(rule, filter) {
+            ""
+        } else {
+            "  (inactive)"
+        };
         println!(
             "{:<width$}  {:<18}  {:<18}  {}{mark}",
             rule.rule_id,
@@ -68,19 +112,27 @@ fn list(options: PolicyOptions, json: bool) -> Result<i32> {
         );
     }
 
-    let unreachable: Vec<&af_core::RuleInfo> =
-        rules.iter().filter(|r| !is_reachable(r)).collect();
-    println!("\n{} rule(s), {} active", rules.len(), rules.len() - unreachable.len());
+    let unreachable: Vec<&af_core::RuleInfo> = rules
+        .iter()
+        .filter(|r| !is_reachable(r, filter))
+        .collect();
+    println!(
+        "\n{} rule(s), {} active with `--syscall-filter {}`",
+        rules.len(),
+        rules.len() - unreachable.len(),
+        filter.label()
+    );
     if !unreachable.is_empty() {
         eprintln!(
-            "\nagent-firewall: {} rule(s) cannot fire on this version, because the\n\
-             monitor does not observe the action kind that they need. The monitor\n\
-             makes these action kinds: {}.",
+            "\nagent-firewall: {} rule(s) cannot fire with `--syscall-filter {}`,\n\
+             because the monitor does not observe what they need. The monitor makes\n\
+             these action kinds: {}.",
             unreachable.len(),
-            SUPPORTED_ACTIONS.join(", ")
+            filter.label(),
+            supported_actions(filter).join(", ")
         );
         for rule in &unreachable {
-            eprintln!("  {} (needs {})", rule.rule_id, rule.actions.join(", "));
+            eprintln!("  {} ({})", rule.rule_id, why_inactive(rule, filter));
         }
     }
     Ok(0)

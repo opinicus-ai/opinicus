@@ -96,18 +96,68 @@ fn policy_test_passes_for_the_builtin_rules() {
 fn policy_list_reports_rules_that_cannot_fire() {
     let (code, out, err) = firewall(&["policy", "list"]);
     assert_eq!(code, 0);
-    assert!(out.contains("active"), "the count must name the active rules:\n{out}");
-    // The monitor of this version makes only exec and input actions. A rule
-    // that needs a file or network action can never fire, and the user must be
-    // told instead of trusting a rule that stays silent.
+    assert!(
+        out.contains("active"),
+        "the count must name the active rules:\n{out}"
+    );
+    // The default filter lets the kernel drop an open that only reads, so a
+    // rule about the path of a read stays silent. The user must be told,
+    // instead of trusting a rule that never speaks.
     assert!(
         err.contains("cannot fire"),
         "the firewall must report the rules that cannot fire:\n{err}"
     );
     assert!(
-        err.contains("network.connect.production-host"),
-        "a network rule needs an action kind that the monitor does not make:\n{err}"
+        err.contains("filesystem.credentials.read"),
+        "a rule about the path of a read needs the all-opens mode:\n{err}"
     );
+    assert!(
+        err.contains("all-opens"),
+        "the report must name the mode that wakes the rule:\n{err}"
+    );
+    // The kernel filter observes a write and a connection, so those rules are
+    // no longer dead.
+    assert!(
+        !err.contains("network.connect.production-host"),
+        "a network rule fires on this monitor now:\n{err}"
+    );
+    assert!(
+        !err.contains("filesystem.credentials.write"),
+        "a rule about a write fires on this monitor now:\n{err}"
+    );
+}
+
+#[test]
+fn the_all_opens_mode_wakes_the_rules_about_a_read() {
+    let (code, _out, err) = firewall(&["policy", "list", "--syscall-filter", "all-opens"]);
+    assert_eq!(code, 0);
+    assert!(
+        !err.contains("cannot fire"),
+        "every built-in rule fires in this mode:\n{err}"
+    );
+}
+
+#[test]
+fn the_off_mode_marks_every_file_and_network_rule() {
+    let (code, _out, err) = firewall(&["policy", "list", "--syscall-filter", "off"]);
+    assert_eq!(code, 0);
+    for rule in [
+        "filesystem.credentials.write",
+        "filesystem.credentials.read",
+        "network.connect.production-host",
+    ] {
+        assert!(
+            err.contains(rule),
+            "a session with no kernel filter cannot carry {rule}:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_filter_mode_is_refused() {
+    let (code, _out, err) = firewall(&["policy", "list", "--syscall-filter", "everything"]);
+    assert_ne!(code, 0, "the firewall must not guess what the user meant");
+    assert!(err.contains("write-only"), "the error names the modes:\n{err}");
 }
 
 #[test]
@@ -117,6 +167,24 @@ fn doctor_reports_the_inactive_rule_count() {
     assert!(
         out.contains("inactive rules"),
         "doctor must name the rules that cannot fire:\n{out}"
+    );
+}
+
+#[test]
+fn doctor_reports_the_system_call_filter() {
+    let (code, out, _) = firewall(&["doctor"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("system-call filter: write-only"),
+        "doctor must name the filter mode of the report:\n{out}"
+    );
+    assert!(
+        out.contains("syscall_filter"),
+        "doctor must report the probe of the kernel filter:\n{out}"
+    );
+    assert!(
+        out.contains("file_open_events"),
+        "doctor must report what the filter observes:\n{out}"
     );
 }
 
@@ -360,4 +428,247 @@ fn two_replays_of_one_trace_give_the_same_answer() {
     assert_eq!(first_code, 0);
     assert_eq!(second_code, 0);
     assert_eq!(first, second, "a replay must repeat itself exactly");
+}
+
+// ---------------------------------------------------------------------------
+// What a running program does
+// ---------------------------------------------------------------------------
+
+/// Returns a `file_open` line of a made trace.
+fn file_open_line(seq: u64, at_seconds: u64, pid: i32, path: &str, write: bool) -> String {
+    let ts = START + at_seconds * SECOND;
+    format!(
+        r#"{{"seq":{seq},"ts":{ts},"session_id":"afw-test-memory","pid":{pid},"type":"file_open","path":"{path}","write":{write}}}"#
+    )
+}
+
+/// Returns a `network_connect` line of a made trace.
+fn connect_line(seq: u64, at_seconds: u64, pid: i32, host: &str, addr: &str, port: u16) -> String {
+    let ts = START + at_seconds * SECOND;
+    format!(
+        r#"{{"seq":{seq},"ts":{ts},"session_id":"afw-test-memory","pid":{pid},"type":"network_connect","addr":"{addr}","port":{port},"host":"{host}"}}"#
+    )
+}
+
+/// Writes a trace of what one running program did, with no new program.
+///
+/// Every action here happens inside one process. Before the kernel filter the
+/// firewall saw none of it, and the rules that judge it were dead.
+fn write_inproc_trace(path: &Path) {
+    let mut lines = vec![
+        session_start_line(),
+        exec_line(2, 0, 100, 1, "python3", &["python3", "agent.py"]),
+        // The write to a credential file: `filesystem.credentials.write`.
+        file_open_line(3, 1, 100, "/home/dev/.ssh/id_ed25519", true),
+        // The write to /etc: `filesystem.etc.write`.
+        file_open_line(4, 2, 100, "/etc/hosts", true),
+        // A read of a credential store: `filesystem.credentials.read` and
+        // `memory.credentials.read-mark`.
+        file_open_line(5, 3, 100, "/home/dev/.aws/credentials", false),
+        // The connection to a production host:
+        // `network.connect.production-host` and `network.connect.remote-database`.
+        connect_line(6, 4, 100, "db.prod.example.com", "203.0.113.30", 5432),
+        // A source file and a local port are ordinary work and stay quiet.
+        file_open_line(7, 5, 100, "/home/dev/app/src/main.rs", true),
+        connect_line(8, 6, 100, "localhost", "127.0.0.1", 5432),
+    ];
+    let mut text = lines.join("\n");
+    lines.clear();
+    text.push('\n');
+    std::fs::write(path, text).expect("write the trace");
+}
+
+#[test]
+fn a_replay_judges_a_file_open_and_a_connection() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let trace = dir.path().join("inproc.jsonl");
+    write_inproc_trace(&trace);
+
+    let (code, out, err) = firewall(&["replay", trace.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "{err}");
+
+    // These rules were written for this monitor and could never fire before.
+    for wanted in [
+        "filesystem.credentials.write",
+        "filesystem.etc.write",
+        "filesystem.credentials.read",
+        "network.connect.production-host",
+        "network.connect.remote-database",
+        "memory.credentials.read-mark",
+    ] {
+        assert!(out.contains(wanted), "the replay must find {wanted}:\n{out}");
+    }
+
+    // A source file and a local database are ordinary work.
+    assert!(
+        !out.contains("main.rs"),
+        "a write to a source file must stay quiet:\n{out}"
+    );
+    assert_eq!(
+        out.matches("network.connect.remote-database").count(),
+        1,
+        "only the remote database matches, not the local one:\n{out}"
+    );
+}
+
+#[test]
+fn the_replay_summary_counts_every_kind_of_event() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let trace = dir.path().join("inproc.jsonl");
+    write_inproc_trace(&trace);
+
+    let (code, out, err) = firewall(&["replay", trace.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("1 exec, 4 file and 2 network event(s) evaluated"),
+        "the summary must count what it judged:\n{out}"
+    );
+}
+
+#[test]
+fn two_replays_of_a_file_and_network_trace_give_the_same_answer() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let trace = dir.path().join("inproc.jsonl");
+    write_inproc_trace(&trace);
+
+    let (first_code, first, _) = firewall(&["replay", trace.to_str().unwrap(), "--json"]);
+    let (second_code, second, _) = firewall(&["replay", trace.to_str().unwrap(), "--json"]);
+    assert_eq!(first_code, 0);
+    assert_eq!(second_code, 0);
+    assert_eq!(first, second, "a replay must repeat itself exactly");
+}
+
+/// Returns the interpreter of the gap workload, when the machine has one.
+fn python3() -> Option<&'static str> {
+    ["/usr/bin/python3", "/bin/python3"]
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+}
+
+/// Writes a policy that refuses a connection to one port.
+///
+/// No built-in rule stops a connection today; they all report. The test needs
+/// a rule that really says no, so it brings its own.
+fn write_connect_policy(path: &Path, port: u16) {
+    let text = format!(
+        "version: 1\n\
+         name: test.connect\n\
+         description: Refuses the connection of the test.\n\
+         rules:\n\
+         \x20 - id: test.connect.refused\n\
+         \x20   title: The test refuses this port\n\
+         \x20   category: network\n\
+         \x20   risk: blocked\n\
+         \x20   decision: deny\n\
+         \x20   reason: The test asks the firewall to refuse this connection.\n\
+         \x20   match:\n\
+         \x20     action: network_connect\n\
+         \x20     port: {port}\n"
+    );
+    std::fs::write(path, text).expect("write the policy");
+}
+
+/// The gap of `docs/DETECTION-RESEARCH.md` section 3, closed.
+///
+/// One process, no new program. Before the kernel filter the trace held no
+/// file event, no network event and no decision, and `--approve deny` denied
+/// nothing because it saw nothing.
+#[test]
+fn one_process_that_writes_and_connects_is_now_held() {
+    let Some(python) = python3() else {
+        eprintln!("no python3 on this machine, so the gap test cannot run");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let home = dir.path();
+    // The directory is made before the session, so every action of the
+    // session itself happens inside the one interpreter process and starts no
+    // program of its own. That is what makes this the in-process gap.
+    std::fs::create_dir(home.join(".ssh")).expect("make the key directory");
+    let key = home.join(".ssh").join("id_ed25519");
+    let after = home.join("after.txt");
+    let trace = home.join("trace.jsonl");
+    let policy = home.join("connect.yaml");
+    let workload = home.join("agent.py");
+
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("a free port on the loopback address");
+    let port = listener.local_addr().expect("the port").port();
+    write_connect_policy(&policy, port);
+
+    // The workload handles both errors itself, so the run proves that the
+    // process is still alive after each refusal.
+    let source = format!(
+        "import socket\n\
+         try:\n\
+         \x20   open({key:?}, 'w').write('key')\n\
+         except OSError as error:\n\
+         \x20   print('write refused:', error)\n\
+         sock = socket.socket()\n\
+         try:\n\
+         \x20   sock.connect(('127.0.0.1', {port}))\n\
+         except OSError as error:\n\
+         \x20   print('connect refused:', error)\n\
+         open({after:?}, 'w').write('done')\n",
+        key = key.to_string_lossy(),
+        after = after.to_string_lossy(),
+    );
+    std::fs::write(&workload, source).expect("write the workload");
+
+    let (code, out, err) = firewall(&[
+        "run",
+        "--approve",
+        "deny",
+        "--retention",
+        "all",
+        "--policy",
+        policy.to_str().unwrap(),
+        "--trace",
+        trace.to_str().unwrap(),
+        "--",
+        python,
+        workload.to_str().unwrap(),
+    ]);
+
+    // The firewall stopped something, so it reports the blocked exit code.
+    assert_eq!(
+        code, 3,
+        "the firewall must report that it stopped an action:\n{out}\n{err}"
+    );
+
+    // The two refused actions never happened, and the process ran on.
+    assert!(
+        !key.exists(),
+        "the refused write must not make the key file {}",
+        key.display()
+    );
+    assert!(
+        after.exists(),
+        "the process keeps running after a refusal, so its last command works"
+    );
+    // The program saw an ordinary permission error and could report it. A
+    // `SIGKILL` would have taken that chance away.
+    assert!(
+        out.contains("write refused") && out.contains("connect refused"),
+        "the program handles the refusal itself:\n{out}"
+    );
+
+    // The trace now holds what the exec boundary could never see.
+    let recorded = std::fs::read_to_string(&trace).expect("the trace file");
+    assert!(
+        recorded.contains("\"type\":\"file_open\""),
+        "the trace must hold the file action of the one process:\n{recorded}"
+    );
+    assert!(
+        recorded.contains("\"type\":\"network_connect\""),
+        "the trace must hold the connection of the one process:\n{recorded}"
+    );
+    assert!(
+        recorded.contains("filesystem.credentials.write"),
+        "the rule about a credential write must fire:\n{recorded}"
+    );
+    assert!(
+        recorded.contains("test.connect.refused"),
+        "the rule about the connection must fire:\n{recorded}"
+    );
 }
