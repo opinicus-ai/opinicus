@@ -380,3 +380,379 @@ rules:
       - name: a release list stays quiet
         expect: allow
         process: { pid: 731, comm: helm, exe: /usr/bin/helm, argv: [helm, list] }
+
+  - id: cloud.paas.destroy-data
+    title: Deletion of an application, a volume or a database on a hosting platform
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes a volume, an application or a database on the hosting platform. Such a platform often keeps the backup on the same volume, so the data and the copy of the data go together. Nothing on this machine brings them back.
+    references: ["https://incidentdatabase.ai/cite/1469/"]
+    match:
+      action: exec
+      program: [railway, heroku, flyctl, fly, netlify, ntl, vercel, render, supabase, dokku, scalingo, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:railway|heroku|flyctl|fly|netlify|ntl|vercel|render|supabase|dokku|scalingo)(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)volumes?\s+(?:delete|destroy|rm|remove)(?:\s|$)'
+            - argv_matches: '(?:^|\s)apps?\s*:\s*destroy(?:\s|$)'
+            - argv_matches: '(?:^|\s)apps?\s+(?:destroy|delete)(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:sites?|projects?|services?|databases?|postgres)\s*(?::|\s)\s*(?:delete|destroy|rm|remove)(?:\s|$)'
+    tests:
+      - name: a volume delete needs approval
+        expect: approval_required
+        process:
+          pid: 740
+          comm: railway
+          exe: /usr/local/bin/railway
+          argv: [railway, volume, delete, --environment, production, vol_9f2c]
+          cwd: /home/dev/app
+        ancestry: [{ comm: bash }, { comm: cursor-agent }]
+      - name: the destruction of an application needs approval
+        expect: approval_required
+        process: { pid: 741, comm: heroku, exe: /usr/local/bin/heroku, argv: [heroku, "apps:destroy", pocketos-prod, --confirm, pocketos-prod] }
+      - name: a reset of the platform database belongs to the database pack and stays quiet here
+        expect: allow
+        process: { pid: 742, comm: heroku, exe: /usr/local/bin/heroku, argv: [heroku, "pg:reset", --confirm, pocketos-prod] }
+      - name: a volume delete on another platform needs approval
+        expect: approval_required
+        process: { pid: 743, comm: flyctl, exe: /usr/local/bin/flyctl, argv: [flyctl, volumes, delete, vol_1a2b, --yes] }
+      - name: a project delete needs approval
+        expect: approval_required
+        process: { pid: 745, comm: vercel, exe: /usr/local/bin/vercel, argv: [vercel, project, rm, app-prod, --yes] }
+      - name: a reset of the linked database belongs to the database pack and stays quiet here
+        expect: allow
+        process: { pid: 744, comm: supabase, exe: /usr/local/bin/supabase, argv: [supabase, db, reset, --linked] }
+      - name: a reset of the local database stays quiet
+        expect: allow
+        process: { pid: 746, comm: supabase, exe: /usr/local/bin/supabase, argv: [supabase, db, reset] }
+      - name: reading the logs stays quiet
+        expect: allow
+        process: { pid: 747, comm: railway, exe: /usr/local/bin/railway, argv: [railway, logs, --tail] }
+      - name: a local development server stays quiet
+        expect: allow
+        process: { pid: 748, comm: vercel, exe: /usr/local/bin/vercel, argv: [vercel, dev] }
+      - name: a deploy stays quiet
+        expect: allow
+        process: { pid: 749, comm: netlify, exe: /usr/local/bin/netlify, argv: [netlify, deploy] }
+
+  - id: cloud.controlplane.destructive-http
+    title: Deletion sent to a cloud control plane with a web client
+    category: cloud
+    risk: approval_required
+    decision: approval_required
+    reason: The command sends a delete order to the interface of a cloud platform. It goes around the tool of the platform, so no other rule sees it. One request of this shape can remove a volume, a project or a database in a few seconds.
+    references: ["https://zenity.io/blog/ai-agent-database-deletion-pocketos"]
+    match:
+      action: exec
+      program: [curl, wget, http, https, httpie, xh, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:\S*/)?(?:curl|wget|http|httpie|xh)(?:\s|$)'
+        - argv_matches: '(?i)(?:railway\.app|api\.vercel\.com|api\.netlify\.com|api\.render\.com|api\.heroku\.com|api\.fly\.io|api\.machines\.dev|\.supabase\.(?:co|com)|api\.cloudflare\.com|api\.digitalocean\.com|\.amazonaws\.com|\.googleapis\.com|management\.azure\.com)'
+        - any_of:
+            - argv_matches: '(?i)(?:^|\s)(?:-X|--request)[= ]?\s*DELETE(?:\s|$)'
+            - argv_matches: '(?i)mutation\s*\{?\s*\w*(?:delete|destroy|remove|drop)'
+            - argv_matches: '(?i)(?:volume|project|database|service|app|environment|cluster|bucket)delete|delete(?:volume|project|database|service|app|environment|cluster|bucket)'
+    tests:
+      - name: a delete order to a platform interface needs approval
+        expect: approval_required
+        process:
+          pid: 760
+          comm: curl
+          exe: /usr/bin/curl
+          argv: [curl, -s, -X, DELETE, "https://api.vercel.com/v9/projects/app-prod"]
+          cwd: /home/dev/app
+        ancestry: [{ comm: bash }, { comm: cursor-agent }]
+      - name: a delete of a volume in a query needs approval
+        expect: approval_required
+        process:
+          pid: 761
+          comm: curl
+          exe: /usr/bin/curl
+          argv: [curl, -s, -X, POST, "https://backboard.railway.app/graphql/v2", -H, "Authorization: Bearer TOKEN", -d, '{"query":"mutation{volumeDelete(id:\"vol_9f2c\")}"}']
+      - name: a delete against the local application stays quiet
+        expect: allow
+        process: { pid: 762, comm: curl, exe: /usr/bin/curl, argv: [curl, -X, DELETE, "http://localhost:3000/api/users/1"] }
+      - name: a read of the project list stays quiet
+        expect: allow
+        process: { pid: 763, comm: curl, exe: /usr/bin/curl, argv: [curl, -s, "https://api.vercel.com/v9/projects"] }
+      - name: a download of a file stays quiet
+        expect: allow
+        process: { pid: 764, comm: curl, exe: /usr/bin/curl, argv: [curl, -fsSLO, "https://my-bucket.s3.amazonaws.com/build.tar.gz"] }
+
+  - id: cloud.paas.deploy-production
+    title: Deployment to the environment of the users
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command puts new code in front of real users. A deployment of the wrong branch or of the wrong project is visible at once, and a new deployment of the old version takes it back.
+    match:
+      action: exec
+      program: [vercel, netlify, ntl, serverless, sls, wrangler, firebase, supabase, doctl, aws, gcloud, sudo, sh, bash, zsh]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:vercel|netlify|ntl)(?:\s|$)'
+            - argv_matches: '(?:^|\s)--prod(?:uction)?(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:serverless|sls)(?:\s|$)'
+            - argv_matches: '(?:^|\s)deploy(?:\s|$)'
+            - argv_matches: '(?i)(?:^|\s)(?:--stage|-s)[= ]\s*(?:prod|production|live)(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:wrangler|firebase)(?:\s|$)'
+            - argv_matches: '(?:^|\s)deploy(?:\s|$)'
+        - argv_matches: '(?:^|\s)lambda\s+update-function-code(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:gcloud|supabase)(?:\s|$)'
+            - argv_matches: '(?:^|\s)functions\s+deploy(?:\s|$)'
+    tests:
+      - name: a deployment to production is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 770, comm: vercel, exe: /usr/local/bin/vercel, argv: [vercel, deploy, --prod] }
+      - name: new code for a running function is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 771, comm: aws, exe: /usr/bin/aws, argv: [aws, lambda, update-function-code, --function-name, api-prod, --zip-file, "fileb://build.zip"] }
+      - name: a deployment to a stage with the name prod is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 772, comm: serverless, exe: /usr/local/bin/serverless, argv: [serverless, deploy, --stage, prod] }
+      - name: a preview deployment stays quiet
+        expect: allow
+        process: { pid: 773, comm: vercel, exe: /usr/local/bin/vercel, argv: [vercel, deploy] }
+      - name: a deployment to a test stage stays quiet
+        expect: allow
+        process: { pid: 774, comm: serverless, exe: /usr/local/bin/serverless, argv: [serverless, deploy, --stage, dev] }
+
+  - id: cloud.terraform.state-change
+    title: Change of infrastructure through the state file
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command marks a resource for a new build or takes a resource out of the state file. Terraform then destroys and builds that resource at the next apply, or it forgets a resource that still runs. The plan of the next apply shows the effect before it happens.
+    references: ["https://developer.hashicorp.com/terraform/cli/commands/state"]
+    match:
+      action: exec
+      program: [terraform, tofu, opentofu, terragrunt, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:terraform|tofu|opentofu|terragrunt)(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)-{1,2}replace=\S+'
+            - argv_matches: '(?:^|\s)(?:taint|untaint)(?:\s|$)'
+            - argv_matches: '(?:^|\s)state\s+(?:rm|push|replace-provider)(?:\s|$)'
+    tests:
+      - name: a forced new build of a resource is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 780, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, apply, "-replace=aws_db_instance.main"] }
+      - name: a resource that leaves the state file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 781, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, state, rm, aws_s3_bucket.backups] }
+      - name: a new state file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 782, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, state, push, broken.tfstate] }
+      - name: a plan stays quiet
+        expect: allow
+        process: { pid: 783, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, plan] }
+      - name: a list of the state stays quiet
+        expect: allow
+        process: { pid: 784, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, state, list] }
+      - name: an apply in the development workspace stays quiet
+        expect: allow
+        process: { pid: 785, comm: terraform, exe: /usr/bin/terraform, argv: [terraform, apply, tfplan] }
+
+  - id: cloud.kubectl.production-access
+    title: Direct access to a production workload
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command opens a way into a production container or a tunnel into the production network. What happens inside the container is not visible to the firewall any more.
+    match:
+      action: exec
+      program: [kubectl, oc, k3s, microk8s, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:kubectl|oc)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:exec|cp|port-forward|attach|debug)(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?i)(?:^|\s)--context[= ]\S*(?:prod|production|live)'
+            - argv_matches: '(?i)(?:^|\s)(?:-n|--namespace)[= ]\S*(?:prod|production|live)'
+            - env:
+                KUBECONFIG: '(?i)(?:prod|production|live)'
+    exceptions:
+      - argv_matches: '(?i)(?:^|\s)--context[= ]\S*(?:minikube|kind-|k3d-|docker-desktop|rancher-desktop|localhost)'
+    tests:
+      - name: a shell in a production container is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 790, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, exec, -n, production, api-7f9, --, sh] }
+      - name: a copy out of a production container is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 791, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, cp, "prod-api-7f9:/var/run/secrets", ./secrets, --context, prod-eu] }
+      - name: a tunnel into the production network is reported
+        expect: allow
+        expect_match: true
+        process:
+          pid: 792
+          comm: kubectl
+          exe: /usr/bin/kubectl
+          argv: [kubectl, port-forward, svc/postgres, "5432:5432"]
+          env: { KUBECONFIG: /home/dev/.kube/prod.yaml }
+      - name: a shell in a development container stays quiet
+        expect: allow
+        process: { pid: 793, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, exec, -n, dev, api-7f9, --, sh] }
+      - name: a list of pods stays quiet
+        expect: allow
+        process: { pid: 794, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, get, pods] }
+
+  - id: cloud.credentials.mint
+    title: New or wider cloud credentials
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command makes new live credentials, or credentials with more rights than the shell had. This is a normal setup step and it is also the first step before a change in production.
+    match:
+      action: exec
+      program: [aws, gcloud, az, vault, sudo, sh, bash, zsh]
+      any_of:
+        - argv_matches: '(?:^|\s)sts\s+(?:assume-role|assume-role-with-web-identity|assume-role-with-saml|get-session-token|get-federation-token)(?:\s|$)'
+        - argv_matches: '(?:^|\s)eks\s+update-kubeconfig(?:\s|$)'
+        - argv_matches: '(?:^|\s)auth\s+print-(?:access|identity)-token(?:\s|$)'
+        - argv_matches: '(?:^|\s)container\s+clusters\s+get-credentials(?:\s|$)'
+        - argv_matches: '(?:^|\s)account\s+get-access-token(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)vault(?:\s|$)'
+            - argv_matches: '(?:^|\s)token\s+create(?:\s|$)'
+    tests:
+      - name: a step into another role is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 800, comm: aws, exe: /usr/bin/aws, argv: [aws, sts, assume-role, --role-arn, "arn:aws:iam::123456789:role/admin", --role-session-name, fix] }
+      - name: a printed access token is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 801, comm: gcloud, exe: /usr/bin/gcloud, argv: [gcloud, auth, print-access-token] }
+      - name: new cluster credentials are reported
+        expect: allow
+        expect_match: true
+        process: { pid: 802, comm: aws, exe: /usr/bin/aws, argv: [aws, eks, update-kubeconfig, --name, company-core] }
+      - name: a question about the own identity stays quiet
+        expect: allow
+        process: { pid: 803, comm: aws, exe: /usr/bin/aws, argv: [aws, sts, get-caller-identity] }
+      - name: a list of buckets stays quiet
+        expect: allow
+        process: { pid: 804, comm: aws, exe: /usr/bin/aws, argv: [aws, s3, ls] }
+
+  - id: cloud.dns.record-change
+    title: Change of a name record of the domain
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command changes where a name of the company points. Mail, single sign-on and the interface of the product can go to another machine, and the users see no error. A record that is written down can be set again.
+    match:
+      action: exec
+      program: [aws, gcloud, az, vercel, netlify, ntl, flarectl, doctl, nsupdate, sudo, sh, bash, zsh]
+      any_of:
+        - argv_matches: '(?:^|\s)route53\s+(?:change-resource-record-sets|delete-hosted-zone)(?:\s|$)'
+        - argv_matches: '(?:^|\s)dns\s+record-sets\s+(?:create|update|delete|transaction)(?:\s|$)'
+        - argv_matches: '(?:^|\s)network\s+dns\s+record-set\s+\S+\s+(?:delete|update)(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:vercel|netlify|ntl|doctl)(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:dns|domain)\s*(?::|\s)\s*(?:rm|remove|delete)(?:\s|$)'
+    tests:
+      - name: a change of the name records is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 810, comm: aws, exe: /usr/bin/aws, argv: [aws, route53, change-resource-record-sets, --hosted-zone-id, Z123, --change-batch, "file://changes.json"] }
+      - name: a deleted name record is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 811, comm: gcloud, exe: /usr/bin/gcloud, argv: [gcloud, dns, record-sets, delete, "api.example.com.", --type, A, --zone, prod] }
+      - name: a deleted name on a platform is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 812, comm: vercel, exe: /usr/local/bin/vercel, argv: [vercel, dns, rm, app.example.com, A] }
+      - name: a list of the zones stays quiet
+        expect: allow
+        process: { pid: 813, comm: aws, exe: /usr/bin/aws, argv: [aws, route53, list-hosted-zones] }
+
+  - id: cloud.capacity.amplify
+    title: A very large number of machines or of copies
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command asks for far more machines or copies than a development task needs. Nothing is destroyed, but the bill grows every minute until somebody sees it.
+    match:
+      action: exec
+      program: [kubectl, oc, aws, gcloud, az, helm, sudo, sh, bash, zsh]
+      any_of:
+        - argv_matches: '(?:^|\s)--replicas[= ]\s*[1-9]\d{2,}(?:\s|$)'
+        - argv_matches: '(?:^|\s)--(?:desired-capacity|max-size|min-size)[= ]\s*[1-9]\d{2,}(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:run-instances|instances\s+create)(?:\s|$)'
+            - argv_matches: '(?:^|\s)--count[= ]\s*(?:[2-9]\d|\d{3,})(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:run-instances|instances\s+create)(?:\s|$)'
+            - argv_matches: '(?i)(?:^|\s)--(?:instance-type|machine-type)[= ]\s*(?:p[2-5]|g[3-6]|x2|trn1|inf2|a2-ultragpu)\S*(?:\s|$)'
+    tests:
+      - name: three hundred copies of a service are reported
+        expect: allow
+        expect_match: true
+        process: { pid: 820, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, scale, deploy/api, "--replicas=300"] }
+      - name: a large group of machines is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 821, comm: aws, exe: /usr/bin/aws, argv: [aws, autoscaling, set-desired-capacity, --auto-scaling-group-name, prod-asg, "--desired-capacity", "400"] }
+      - name: fifty new machines are reported
+        expect: allow
+        expect_match: true
+        process: { pid: 822, comm: aws, exe: /usr/bin/aws, argv: [aws, ec2, run-instances, --image-id, ami-123, --count, "50", --instance-type, p5.48xlarge] }
+      - name: three copies of a service stay quiet
+        expect: allow
+        process: { pid: 823, comm: kubectl, exe: /usr/bin/kubectl, argv: [kubectl, scale, deploy/api, "--replicas=3"] }
+      - name: one new machine stays quiet
+        expect: allow
+        process: { pid: 824, comm: aws, exe: /usr/bin/aws, argv: [aws, ec2, run-instances, --image-id, ami-123, --count, "1", --instance-type, t3.small] }
+
+  - id: cloud.gh.ci-control
+    title: Change of the secrets or of the runs of the build system
+    category: cloud
+    risk: suspicious
+    decision: allow
+    reason: The command writes a secret of the build system, removes one, or starts a pipeline. Everything in a pipeline runs with the rights of the project, so a new secret or a new run is a way into every machine that the pipeline touches.
+    references: ["https://blog.gitguardian.com/ghostaction-campaign-3-325-secrets-stolen/"]
+    match:
+      action: exec
+      program: [gh, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)gh(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)(?:secret|variable)\s+(?:set|delete|remove)(?:\s|$)'
+            - argv_matches: '(?:^|\s)workflow\s+run(?:\s|$)'
+            - argv_matches: '(?:^|\s)run\s+rerun(?:\s|$)'
+            - all_of:
+                - argv_matches: '(?:^|\s)api(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:-X|--method)[= ]\s*(?:DELETE|PUT|POST|PATCH)(?:\s|$)'
+                - argv_matches: '(?:^|\s)/?repos/\S*actions/(?:secrets|variables|workflows)'
+    tests:
+      - name: a new secret of the build system is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 830, comm: gh, exe: /usr/bin/gh, argv: [gh, secret, set, AWS_DEPLOY_KEY] }
+      - name: a started pipeline is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 831, comm: gh, exe: /usr/bin/gh, argv: [gh, workflow, run, release.yml, --ref, main] }
+      - name: a deleted secret through the interface is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 832, comm: gh, exe: /usr/bin/gh, argv: [gh, api, -X, DELETE, repos/acme/app/actions/secrets/NPM_TOKEN] }
+      - name: a list of the secret names stays quiet
+        expect: allow
+        process: { pid: 833, comm: gh, exe: /usr/bin/gh, argv: [gh, secret, list] }
+      - name: a list of the runs stays quiet
+        expect: allow
+        process: { pid: 834, comm: gh, exe: /usr/bin/gh, argv: [gh, run, list] }
+

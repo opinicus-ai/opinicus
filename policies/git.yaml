@@ -8,15 +8,20 @@ rules:
     category: git
     risk: approval_required
     decision: approval_required
-    reason: A force push writes over the history of the remote branch. Work of other people can disappear and no reflog on the server can bring it back.
+    reason: A force push writes over the history of the remote branch. Work of other people can disappear and no reflog on the server can bring it back. The flag `--no-verify` also stops the pre-push hook of the team, so a lease push with that flag needs the same approval.
     references: ["https://git-scm.com/docs/git-push#Documentation/git-push.txt---force"]
     match:
       action: exec
       program: [git, sudo, sh, bash, zsh, hub]
       all_of:
         - argv_matches: '(?:^|\s)push(?:\s|$)'
-        - argv_matches: '(?:^|\s)(?:--force|-f)(?:\s|$)'
-      argv_not_matches: '--force-with-lease'
+        - any_of:
+            - all_of:
+                - argv_matches: '(?:^|\s)(?:--force|-f)(?:\s|$)'
+                - argv_not_matches: '--force-with-lease'
+            - all_of:
+                - argv_matches: '(?:^|\s)--force-with-lease'
+                - argv_matches: '(?:^|\s)--no-verify(?:\s|$)'
     exceptions:
       - argv_any: ["--dry-run", "-n"]
     tests:
@@ -35,6 +40,9 @@ rules:
       - name: a lease protected force push stays quiet
         expect: allow
         process: { pid: 302, comm: git, exe: /usr/bin/git, argv: [git, push, --force-with-lease, origin, feature/x] }
+      - name: a lease push that also skips the hooks needs approval
+        expect: approval_required
+        process: { pid: 305, comm: git, exe: /usr/bin/git, argv: [git, push, --force-with-lease, --no-verify, origin, feature/x] }
       - name: a dry run is an exception and stays quiet
         expect: allow
         process: { pid: 303, comm: git, exe: /usr/bin/git, argv: [git, push, --force, --dry-run, origin, main] }
@@ -105,7 +113,8 @@ rules:
     category: git
     risk: approval_required
     decision: approval_required
-    reason: The command deletes changes that are not committed. Git has no copy of them, so the work of the user is gone.
+    reason: The command deletes changes that are not committed. Git has no copy of them, so the work of the user is gone. A forced worktree removal deletes the whole directory in the same way.
+    references: ["https://git-scm.com/docs/git-restore"]
     match:
       action: exec
       program: [git, sudo, sh, bash, zsh]
@@ -117,8 +126,26 @@ rules:
             - argv_matches: '(?:^|\s)clean(?:\s|$)'
             - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*f[a-zA-Z]*|--force)(?:\s|$)'
         - argv_matches: '(?:^|\s)checkout\s+--\s+\S+'
-        - argv_matches: '(?:^|\s)restore\s+(?:--\S+\s+)*\.(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)\S*git\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*checkout(?:\s|$)'
+            - argv_not_matches: '(?:^|\s)-[bB](?:\s|$)'
+            - any_of:
+                - argv_matches: '(?:^|\s)(?:\S+/)?[^\s/]+\.[A-Za-z][A-Za-z0-9]{0,7}(?:\s|$)'
+                - argv_matches: '(?:^|\s)\.(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:--force|-f)(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)\S*git\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*restore\s+(?:-\S+\s+)*[^-\s]\S*'
+            - any_of:
+                - not:
+                    argv_matches: '(?:^|\s)(?:--staged|-S)(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:--worktree|-W)(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)\S*git\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*switch(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:--discard-changes|--force|-f)(?:\s|$)'
         - argv_matches: '(?:^|\s)stash\s+(?:clear|drop)(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)worktree\s+remove(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:--force|-f)(?:\s|$)'
     exceptions:
       - argv_matches: '(?:^|\s)(?:--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(?:\s|$)'
     tests:
@@ -134,6 +161,27 @@ rules:
       - name: dropping the stash needs approval
         expect: approval_required
         process: { pid: 333, comm: git, exe: /usr/bin/git, argv: [git, stash, clear] }
+      - name: a restore of named files needs approval
+        expect: approval_required
+        process:
+          pid: 337
+          comm: git
+          exe: /usr/bin/git
+          argv: [git, restore, src/auth.ts, src/session.ts]
+          cwd: /home/dev/app
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: a checkout of one file without the separator needs approval
+        expect: approval_required
+        process: { pid: 338, comm: git, exe: /usr/bin/git, argv: [git, checkout, client/components/bundle-wizard/index.tsx] }
+      - name: a checkout of the whole tree needs approval
+        expect: approval_required
+        process: { pid: 339, comm: git, exe: /usr/bin/git, argv: [git, checkout, "."] }
+      - name: a forced branch change needs approval
+        expect: approval_required
+        process: { pid: 344, comm: git, exe: /usr/bin/git, argv: [git, switch, --discard-changes, main] }
+      - name: a forced worktree removal needs approval
+        expect: approval_required
+        process: { pid: 345, comm: git, exe: /usr/bin/git, argv: [git, worktree, remove, --force, ../feature-wt] }
       - name: a dry run of clean is an exception and stays quiet
         expect: allow
         process: { pid: 334, comm: git, exe: /usr/bin/git, argv: [git, clean, -nfd] }
@@ -143,6 +191,24 @@ rules:
       - name: a branch change stays quiet
         expect: allow
         process: { pid: 336, comm: git, exe: /usr/bin/git, argv: [git, checkout, main] }
+      - name: a new branch stays quiet
+        expect: allow
+        process: { pid: 346, comm: git, exe: /usr/bin/git, argv: [git, checkout, -b, new-branch] }
+      - name: a checkout of a release branch stays quiet
+        expect: allow
+        process: { pid: 347, comm: git, exe: /usr/bin/git, argv: [git, checkout, release/1.4] }
+      - name: a commit message with the word checkout stays quiet
+        expect: allow
+        process: { pid: 348, comm: git, exe: /usr/bin/git, argv: [git, commit, -m, "fix the checkout page in src/pages/checkout.tsx"] }
+      - name: taking a file out of the index stays quiet
+        expect: allow
+        process: { pid: 349, comm: git, exe: /usr/bin/git, argv: [git, restore, --staged, src/auth.ts] }
+      - name: a new worktree stays quiet
+        expect: allow
+        process: { pid: 350, comm: git, exe: /usr/bin/git, argv: [git, worktree, add, ../feature-wt] }
+      - name: saving work in the stash stays quiet
+        expect: allow
+        process: { pid: 351, comm: git, exe: /usr/bin/git, argv: [git, stash] }
 
   - id: git.refs.delete
     title: Deletion of a local branch or tag
@@ -160,6 +226,9 @@ rules:
         - all_of:
             - argv_matches: '(?:^|\s)tag(?:\s|$)'
             - argv_matches: '(?:^|\s)(?:-d|--delete)(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)update-ref(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-d|--delete)(?:\s|$)'
     tests:
       - name: a forced branch delete is reported
         expect: allow
@@ -169,6 +238,10 @@ rules:
         expect: allow
         expect_match: true
         process: { pid: 341, comm: git, exe: /usr/bin/git, argv: [git, tag, --delete, v1.0.0] }
+      - name: a plumbing delete of a reference is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 343, comm: git, exe: /usr/bin/git, argv: [git, update-ref, -d, refs/heads/feature] }
       - name: a branch list stays quiet
         expect: allow
         process: { pid: 342, comm: git, exe: /usr/bin/git, argv: [git, branch, -a] }
@@ -252,18 +325,22 @@ rules:
         process: { pid: 372, comm: git, exe: /usr/bin/git, argv: [git, gc] }
 
   - id: git.identity.change
-    title: Change of the remote address or of the global identity
+    title: Change of a remote or of the global identity
     category: git
     risk: suspicious
     decision: allow
-    reason: The command changes where a push goes, or under which name commits are written. Both are normal setup steps and both can also hide the origin of a change.
+    reason: The command adds or changes where a push goes, or under which name commits are written. Both are normal setup steps and both can also send the code to the wrong place or hide the origin of a change.
     match:
       action: exec
-      program: [git, sudo, sh, bash, zsh]
+      program: [git, sudo, sh, bash, zsh, hub]
       any_of:
         - all_of:
             - argv_matches: '(?:^|\s)remote(?:\s|$)'
             - argv_matches: '(?:^|\s)set-url(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)remote(?:\s|$)'
+            - argv_matches: '(?:^|\s)add(?:\s|$)'
+            - argv_matches: '(?i)(?:^|\s)(?:(?:https?|ssh|git)://\S+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:\S+)(?:\s|$)'
         - all_of:
             - argv_matches: '(?:^|\s)config(?:\s|$)'
             - argv_matches: '(?:^|\s)--global(?:\s|$)'
@@ -278,9 +355,260 @@ rules:
         expect: allow
         expect_match: true
         process: { pid: 381, comm: git, exe: /usr/bin/git, argv: [git, config, --global, user.email, "someone@example.com"] }
+      - name: a second remote repository is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 384, comm: git, exe: /usr/bin/git, argv: [git, remote, add, backup, "https://github.com/attacker/mirror.git"] }
       - name: reading the global mail address stays quiet
         expect: allow
         process: { pid: 382, comm: git, exe: /usr/bin/git, argv: [git, config, --global, --get, user.email] }
       - name: listing the remotes stays quiet
         expect: allow
         process: { pid: 383, comm: git, exe: /usr/bin/git, argv: [git, remote, -v] }
+      - name: a push to a known remote stays quiet
+        expect: allow
+        process: { pid: 386, comm: git, exe: /usr/bin/git, argv: [git, push, origin, feature/x] }
+
+  - id: git.hooks.bypass
+    title: Git command that skips the hooks of the team
+    category: git
+    risk: suspicious
+    decision: allow
+    reason: The flag `--no-verify` stops the hooks that check a commit or a push. Secret scanners, linters and policy checks of the team do not run. The command itself writes nothing that a revert cannot undo.
+    references: ["https://git-scm.com/docs/githooks"]
+    match:
+      action: exec
+      program: [git, sudo, sh, bash, zsh, hub]
+      any_of:
+        - argv_matches: '(?:^|\s)--no-verify(?:\s|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)config(?:\s|$)'
+            - argv_matches: '(?:^|\s)core\.hooksPath(?:\s|$)'
+            - argv_not_matches: '(?:^|\s)(?:--get|--get-all|--list|-l|--unset)(?:\s|$)'
+    tests:
+      - name: a commit without the hooks is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 390, comm: git, exe: /usr/bin/git, argv: [git, commit, --no-verify, -m, "fix auth flow"] }
+      - name: a push without the hooks is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 391, comm: git, exe: /usr/bin/git, argv: [git, push, --no-verify, origin, main] }
+      - name: a new hook directory is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 392, comm: git, exe: /usr/bin/git, argv: [git, config, core.hooksPath, .githooks-attacker] }
+      - name: a normal commit stays quiet
+        expect: allow
+        process: { pid: 393, comm: git, exe: /usr/bin/git, argv: [git, commit, -m, "add the login form"] }
+      - name: reading the hook directory stays quiet
+        expect: allow
+        process: { pid: 394, comm: git, exe: /usr/bin/git, argv: [git, config, --get, core.hooksPath] }
+
+  - id: git.history.local-rewrite
+    title: Rewrite of commits that are already made
+    category: git
+    risk: suspicious
+    decision: allow
+    reason: The command writes commits again under a new identifier. The old commits stay in the reflog, so the step can be undone. A branch that is already pushed needs a force push after this step.
+    references: ["https://git-scm.com/docs/git-rebase"]
+    match:
+      action: exec
+      program: [git, sudo, sh, bash, zsh]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)rebase(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-i|--interactive|--autosquash)(?:\s|$)'
+        - argv_matches: '(?:^|\s)--amend(?:\s|$)'
+        - argv_matches: '(?:^|\s)replace\s+(?:--graft|--edit|--delete|-d|-f|--force)(?:\s|$)'
+    tests:
+      - name: an interactive rebase is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 400, comm: git, exe: /usr/bin/git, argv: [git, rebase, -i, "HEAD~12"] }
+      - name: a changed last commit is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 401, comm: git, exe: /usr/bin/git, argv: [git, commit, --amend, --no-edit] }
+      - name: a grafted commit is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 402, comm: git, exe: /usr/bin/git, argv: [git, replace, --graft, abc1234, def5678] }
+      - name: a normal rebase stays quiet
+        expect: allow
+        process: { pid: 403, comm: git, exe: /usr/bin/git, argv: [git, rebase, main] }
+      - name: a pull with a rebase stays quiet
+        expect: allow
+        process: { pid: 404, comm: git, exe: /usr/bin/git, argv: [git, pull, --rebase] }
+
+  - id: git.export.whole-repository
+    title: Export of the whole repository into one file
+    category: git
+    risk: suspicious
+    decision: allow
+    reason: The command writes every branch and every commit of the repository into one file. Such a file holds all the history and all the secrets that the history ever had, and a later upload sends it away in one step.
+    references: ["https://git-scm.com/docs/git-bundle"]
+    match:
+      action: exec
+      program: [git, sudo, sh, bash, zsh]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)bundle(?:\s|$)'
+            - argv_matches: '(?:^|\s)create(?:\s|$)'
+        - argv_matches: '(?:^|\s)fast-export(?:\s|$)'
+    tests:
+      - name: a bundle of the whole repository is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 410, comm: git, exe: /usr/bin/git, argv: [git, bundle, create, /home/dev/backup.bundle, --all] }
+      - name: a fast export is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 411, comm: git, exe: /usr/bin/git, argv: [git, fast-export, --all] }
+      - name: a check of a bundle stays quiet
+        expect: allow
+        process: { pid: 412, comm: git, exe: /usr/bin/git, argv: [git, bundle, verify, /home/dev/backup.bundle] }
+      - name: a log stays quiet
+        expect: allow
+        process: { pid: 413, comm: git, exe: /usr/bin/git, argv: [git, log, --oneline] }
+
+  - id: git.remote.credential-in-url
+    title: Password or token inside a repository address
+    category: git
+    risk: suspicious
+    decision: allow
+    reason: The command line holds a password or a token inside the address. The secret goes into the shell history and into the Git configuration, where every program on the machine can read it. Use a credential helper or a key instead.
+    references: ["https://git-scm.com/docs/gitcredentials"]
+    match:
+      action: exec
+      program: [git, hub, sudo, sh, bash, zsh]
+      any_of:
+        - argv_matches: '(?i)(?:https?|ssh|git)://[^/\s]+:[^@\s]+@'
+        - argv_matches: '(?:^|\s)\S*(?:ghp_|gho_|ghu_|ghs_|github_pat_|glpat-)[A-Za-z0-9_-]{10,}'
+    tests:
+      - name: a token in the push address is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 420, comm: git, exe: /usr/bin/git, argv: [git, push, "https://x-access-token:ghp_0123456789abcdef@github.com/victim/repo.git", main] }
+      - name: a password in a new remote is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 421, comm: git, exe: /usr/bin/git, argv: [git, remote, set-url, origin, "https://bob:s3cr3t@git.example.com/app.git"] }
+      - name: a normal clone stays quiet
+        expect: allow
+        process: { pid: 422, comm: git, exe: /usr/bin/git, argv: [git, clone, "https://github.com/org/app.git"] }
+      - name: a clone over ssh stays quiet
+        expect: allow
+        process: { pid: 423, comm: git, exe: /usr/bin/git, argv: [git, clone, "ssh://git@github.com/org/app.git"] }
+
+  - id: git.add.secret-file
+    title: A file with secrets goes into the index
+    category: git
+    risk: suspicious
+    decision: allow
+    reason: The command puts a file with credentials into the index. After the next commit the secret is in the history, and the next push sends it to the server. Remove the file from the index and rotate the secret.
+    references: ["https://docs.github.com/code-security/secret-scanning/about-secret-scanning"]
+    match:
+      action: exec
+      program: [git, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)\S*git\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*add(?:\s|$)'
+        - argv_matches: '(?i)(?:^|\s)\S*(?:\.env(?:\.[a-z0-9]+)?|\.npmrc|\.netrc|\.pypirc|id_[rd]sa|\.pem|\.p12|\.pfx|\.key|\.keystore|credentials(?:\.json|\.ya?ml)?|secrets?\.(?:json|ya?ml|env|txt))(?:\s|$)'
+    tests:
+      - name: adding an environment file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 430, comm: git, exe: /usr/bin/git, argv: [git, add, .env, .env.local] }
+      - name: adding a private key is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 431, comm: git, exe: /usr/bin/git, argv: [git, add, deploy/id_rsa] }
+      - name: adding the whole tree stays quiet
+        expect: allow
+        process: { pid: 432, comm: git, exe: /usr/bin/git, argv: [git, add, -A] }
+      - name: adding source files stays quiet
+        expect: allow
+        process: { pid: 433, comm: git, exe: /usr/bin/git, argv: [git, add, src/main.rs, src/keyboard.ts] }
+
+  - id: git.gh.repo-delete
+    title: Deletion of the repository on the server
+    category: git
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes the whole repository on the server. The issues, the pull requests, the releases and the rights of the team go with it. A local clone holds the commits only, and no Git command can bring the rest back.
+    references: ["https://cli.github.com/manual/gh_repo_delete"]
+    match:
+      action: exec
+      program: [gh, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)gh(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)repo\s+delete(?:\s|$)'
+            - all_of:
+                - argv_matches: '(?:^|\s)api(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:-X|--method)[= ]\s*DELETE(?:\s|$)'
+                - argv_matches: '(?:^|\s)/?repos/[^/\s]+/[^/\s]+(?:\s|$)'
+    tests:
+      - name: a repository delete needs approval
+        expect: approval_required
+        process:
+          pid: 440
+          comm: gh
+          exe: /usr/bin/gh
+          argv: [gh, repo, delete, acme/app, --yes]
+          cwd: /home/dev/app
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: the same delete through the interface needs approval
+        expect: approval_required
+        process: { pid: 441, comm: gh, exe: /usr/bin/gh, argv: [gh, api, -X, DELETE, repos/acme/app] }
+      - name: a new pull request stays quiet
+        expect: allow
+        process: { pid: 442, comm: gh, exe: /usr/bin/gh, argv: [gh, pr, create, --fill] }
+      - name: a look at the repository stays quiet
+        expect: allow
+        process: { pid: 443, comm: gh, exe: /usr/bin/gh, argv: [gh, repo, view, acme/app] }
+      - name: a clone stays quiet
+        expect: allow
+        process: { pid: 444, comm: gh, exe: /usr/bin/gh, argv: [gh, repo, clone, acme/app] }
+      - name: a release delete belongs to another rule and stays quiet here
+        expect: allow
+        process: { pid: 445, comm: gh, exe: /usr/bin/gh, argv: [gh, release, delete, v1.2.0, --yes] }
+
+  - id: git.gh.remote-destructive
+    title: Removal of a guard or of a release on the server
+    category: git
+    risk: suspicious
+    decision: allow
+    reason: The command takes away the protection of a branch, deletes a release or stops a workflow. A person with rights can set all of them again, but until then the guards of the repository are open.
+    references: ["https://cli.github.com/manual/gh_api"]
+    match:
+      action: exec
+      program: [gh, sudo, sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)gh(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)release\s+delete(?:\s|$)'
+            - argv_matches: '(?:^|\s)workflow\s+(?:disable|delete)(?:\s|$)'
+            - all_of:
+                - argv_matches: '(?:^|\s)api(?:\s|$)'
+                - argv_matches: '(?:^|\s)(?:-X|--method)[= ]\s*DELETE(?:\s|$)'
+                - argv_matches: '(?:^|\s)/?repos/\S*(?:protection|branches|rulesets|releases|collaborators)'
+    tests:
+      - name: a release delete is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 450, comm: gh, exe: /usr/bin/gh, argv: [gh, release, delete, v1.2.0, --yes] }
+      - name: the removal of the branch protection is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 451, comm: gh, exe: /usr/bin/gh, argv: [gh, api, -X, DELETE, repos/acme/app/branches/main/protection] }
+      - name: a stopped workflow is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 452, comm: gh, exe: /usr/bin/gh, argv: [gh, workflow, disable, release.yml] }
+      - name: a new pull request stays quiet
+        expect: allow
+        process: { pid: 453, comm: gh, exe: /usr/bin/gh, argv: [gh, pr, create, --fill] }
+      - name: a list of releases stays quiet
+        expect: allow
+        process: { pid: 454, comm: gh, exe: /usr/bin/gh, argv: [gh, release, list] }

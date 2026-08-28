@@ -344,3 +344,533 @@ rules:
       - name: a normal delete stays quiet
         expect: allow
         process: { pid: 231, comm: rm, exe: /usr/bin/rm, argv: [rm, secrets.txt] }
+
+  # sources: research/threats/incidents/fs-antigravity-drive-wipe.md
+  - id: filesystem.delete.mount-root
+    title: Recursive deletion of a mounted drive
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes a whole mounted drive. That drive often holds the only copy of the data, or it holds the backup.
+    references: ["https://incidentdatabase.ai/cite/1433/"]
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)[\x22\x27]?(?:/mnt(?:/[^/\s\x22\x27]+)?|/media(?:/[^/\s\x22\x27]+){0,2}|/Volumes(?:/[^/\s\x22\x27]+)?|/run/media(?:/[^/\s\x22\x27]+){0,2})/?[\x22\x27]?(?:\s|$)'
+    tests:
+      - name: a delete of a mounted drive needs approval
+        expect: approval_required
+        process: { pid: 240, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /mnt/backup], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a delete of a mounted drive on macOS needs approval
+        expect: approval_required
+        process: { pid: 241, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf /Volumes/Archive"] }
+      - name: a delete inside a mounted drive stays quiet
+        expect: allow
+        process: { pid: 242, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /mnt/data/scratch/build], cwd: /home/dev/app }
+      - name: a delete of the build output stays quiet
+        expect: allow
+        process: { pid: 243, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./target], cwd: /home/dev/app }
+      - name: a delete of the module directory stays quiet
+        expect: allow
+        process: { pid: 244, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, node_modules], cwd: /home/dev/app }
+
+  # sources: research/threats/incidents/fs-codex-app-windows-outside-project.md,
+  #          research/threats/incidents/behavior-claude-code-rm-tilde-mac-wipe.md
+  - id: filesystem.delete.user-data
+    title: Recursive deletion of a data directory of the user
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes a data directory of the user, for example Documents or Downloads. These files are personal, and a build cannot make them again.
+    references: ["https://community.openai.com/t/critical-data-loss-issue-in-codex-app-for-windows-agent-executed-file-deletion-outside-project-directory/1375894"]
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)[\x22\x27]?(?:~|\$HOME|\$\{HOME\}|/home/[^/\s\x22\x27]+|/Users/[^/\s\x22\x27]+|/root)/(?:Documents|Downloads|Desktop|Pictures|Photos|Music|Videos|Movies)/?[\x22\x27]?(?:\s|$)'
+    tests:
+      - name: a delete of the download directory needs approval
+        expect: approval_required
+        process: { pid: 250, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "~/Downloads", "~/Desktop"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: the expanded document path also needs approval
+        expect: approval_required
+        process: { pid: 251, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /home/dev/Documents] }
+      - name: the home variable in a shell command needs approval
+        expect: approval_required
+        process: { pid: 252, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf \"$HOME/Documents\""] }
+      - name: a delete inside the download directory stays quiet
+        expect: allow
+        process: { pid: 253, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "~/Downloads/old-build"], cwd: /home/dev/app }
+      - name: a delete of a module directory under the home stays quiet
+        expect: allow
+        process: { pid: 254, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "~/app/node_modules"] }
+
+  # sources: research/threats/incidents/fs-codex-cleanup-blast-radius.md
+  - id: filesystem.find.delete-wide
+    title: Search that deletes over the whole machine
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The search walks the whole file system or the whole home directory and deletes every file that it finds. The command does not stop at the project.
+    references: ["https://github.com/openai/codex/issues/12277"]
+    match:
+      action: exec
+      program: [find, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, timeout, nice, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:\S*/)?find(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)-delete(?:\s|$)'
+            - argv_matches: '(?:^|\s)-(?:exec|execdir)\s+(?:sudo\s+)?(?:\S*/)?(?:rm|shred|unlink|truncate)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:\S*/)?find\s+(?:-[^\s]+\s+)*[\x22\x27]?(?:/|~|\$HOME|\$\{HOME\}|/home/[^/\s\x22\x27]+|/Users/[^/\s\x22\x27]+|/root|/etc|/usr|/bin|/sbin|/lib|/lib64|/boot|/opt|/srv|/var|/data|/mnt|/media|/Volumes)/?[\x22\x27]?(?:\s|$)'
+    tests:
+      - name: a delete search over the whole file system needs approval
+        expect: approval_required
+        process: { pid: 260, comm: find, exe: /usr/bin/find, argv: [find, /, -xdev, -name, "*.tmp", -delete], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: a delete search over the whole home directory needs approval
+        expect: approval_required
+        process: { pid: 261, comm: find, exe: /usr/bin/find, argv: [find, /home/dev, -type, d, -name, .cache, -exec, rm, -rf, "{}", +] }
+      - name: a delete search in the project stays quiet
+        expect: allow
+        process: { pid: 262, comm: find, exe: /usr/bin/find, argv: [find, ".", -name, "*.pyc", -delete], cwd: /home/dev/app }
+      - name: a delete search in a build directory stays quiet
+        expect: allow
+        process: { pid: 263, comm: find, exe: /usr/bin/find, argv: [find, ./build, -type, f, -delete], cwd: /home/dev/app }
+      - name: a delete search under the project path stays quiet
+        expect: allow
+        process: { pid: 264, comm: find, exe: /usr/bin/find, argv: [find, /home/dev/app, -name, "*.tmp", -delete] }
+      - name: a search without a delete stays quiet
+        expect: allow
+        process: { pid: 265, comm: find, exe: /usr/bin/find, argv: [find, /, -name, "*.log"] }
+
+  # sources: research/threats/incidents/fs-codex-cleanup-blast-radius.md
+  - id: filesystem.interpreter.delete-system-path
+    title: Interpreter that deletes a system directory or a home directory
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The interpreter deletes a directory tree of the operating system or the whole home directory. No delete command is in the command line, but the effect is the same.
+    references: ["https://github.com/openai/codex/issues/12277"]
+    match:
+      any_of:
+        - action: exec
+          program: [python, python2, python3, node, nodejs, deno, bun, perl, ruby, npx, pnpm, yarn, sh, bash, zsh, dash, sudo, doas, env, xargs]
+          argv_matches: '(?i)(?:shutil\.rmtree|removedirs|remove_tree|rmtree|rmSync|fs\.rm\b|rm_rf|remove_dir_all|rimraf)[^\n]{0,40}?[\s\x22\x27(\[,=](?:/(?:etc|usr|bin|sbin|lib|lib64|boot|opt|srv|var|data|root|mnt|media|Volumes)(?:[/\x22\x27\s),;]|$)|(?:/|~|\$HOME|\$\{HOME\}|/home/[^/\s\x22\x27]+|/Users/[^/\s\x22\x27]+)/?(?:[\x22\x27\s),;]|$))'
+        - action: input
+          program: [python, python2, python3, node, nodejs, deno, bun, perl, ruby]
+          input_matches: '(?i)(?:shutil\.rmtree|removedirs|remove_tree|rmtree|rmSync|fs\.rm\b|rm_rf|remove_dir_all|rimraf)[^\n]{0,40}?[\s\x22\x27(\[,=](?:/(?:etc|usr|bin|sbin|lib|lib64|boot|opt|srv|var|data|root|mnt|media|Volumes)(?:[/\x22\x27\s),;]|$)|(?:/|~|\$HOME|\$\{HOME\}|/home/[^/\s\x22\x27]+|/Users/[^/\s\x22\x27]+)/?(?:[\x22\x27\s),;]|$))'
+    exceptions:
+      - argv_matches: '(?:/tmp/|/var/tmp/|/var/cache/|/var/folders/|/dev/shm/)'
+      - input_matches: '(?:/tmp/|/var/tmp/|/var/cache/|/var/folders/|/dev/shm/)'
+    tests:
+      - name: a python delete of a system directory needs approval
+        expect: approval_required
+        process: { pid: 270, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, "import shutil; shutil.rmtree('/opt/old-service')"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a node delete of the home directory needs approval
+        expect: approval_required
+        process: { pid: 271, comm: node, exe: /usr/bin/node, argv: [node, -e, "fs.rmSync('/home/dev',{recursive:true,force:true})"] }
+      - name: a python script that deletes the home directory needs approval
+        expect: approval_required
+        process: { pid: 272, comm: python3, exe: /usr/bin/python3, argv: [python3, ./cleanup.py], cwd: /home/dev/app }
+        input: { source: file, data: "import shutil, os\nshutil.rmtree(os.path.expanduser('~'))\n" }
+      - name: a python delete of a build directory stays quiet
+        expect: allow
+        process: { pid: 273, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, "import shutil; shutil.rmtree('build')"], cwd: /home/dev/app }
+      - name: a python delete of a relative build path stays quiet
+        expect: allow
+        process: { pid: 274, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, "import shutil; shutil.rmtree('./target')"], cwd: /home/dev/app }
+      - name: a python delete under a temporary directory stays quiet
+        expect: allow
+        process: { pid: 275, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, "import shutil; shutil.rmtree('/tmp/build-cache')"] }
+      - name: a python script that deletes a project directory stays quiet
+        expect: allow
+        process: { pid: 276, comm: python3, exe: /usr/bin/python3, argv: [python3, ./cleanup.py], cwd: /home/dev/app }
+        input: { source: file, data: "import shutil\nshutil.rmtree('dist')\n" }
+
+  - id: filesystem.perm.recursive-system-tree
+    title: Recursive permission change of a system tree or of the home directory
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The command changes the rights of every file in a system tree or in the whole home directory. The old rights are gone, the user can lose access, and the machine can stop working.
+    match:
+      action: exec
+      program: [chmod, chown, chgrp, sudo, doas, sh, bash, zsh, dash, ksh, env, xargs, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:\S*/)?(?:chmod|chown|chgrp)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*R[a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)[\x22\x27]?(?:/|~|\$HOME|\$\{HOME\}|/home|/home/[^/\s\x22\x27]+|/Users|/Users/[^/\s\x22\x27]+|/root|/etc|/usr|/var|/bin|/sbin|/lib|/lib64|/boot|/opt|/srv)/?[\x22\x27]?(?:\s|$)'
+    tests:
+      - name: a recursive permission change of the whole file system needs approval
+        expect: approval_required
+        process: { pid: 280, comm: chmod, exe: /usr/bin/chmod, argv: [chmod, -R, "777", /], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a recursive owner change of a system tree needs approval
+        expect: approval_required
+        process: { pid: 281, comm: sudo, exe: /usr/bin/sudo, argv: [sudo, chown, -R, "dev:dev", /usr] }
+      - name: a recursive permission change of the home directory needs approval
+        expect: approval_required
+        process: { pid: 282, comm: chmod, exe: /usr/bin/chmod, argv: [chmod, -R, "000", /home/dev] }
+      - name: a recursive permission change in the project stays quiet
+        expect: allow
+        process: { pid: 283, comm: chmod, exe: /usr/bin/chmod, argv: [chmod, -R, "755", ./scripts], cwd: /home/dev/app }
+      - name: a recursive permission change of a web directory stays quiet
+        expect: allow
+        process: { pid: 284, comm: chmod, exe: /usr/bin/chmod, argv: [chmod, -R, "777", /var/www] }
+      - name: a recursive owner change of a local install directory stays quiet
+        expect: allow
+        process: { pid: 285, comm: sudo, exe: /usr/bin/sudo, argv: [sudo, chown, -R, "dev:dev", /usr/local] }
+
+  # sources: research/threats/incidents/fs-antigravity-drive-wipe.md,
+  #          research/threats/incidents/fs-codex-cleanup-blast-radius.md
+  - id: filesystem.delete.unresolved-variable
+    title: Recursive deletion of a path that comes from a variable
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The command builds the delete target from a shell variable. An empty or wrong variable moves the delete to the root directory or to the home directory.
+    match:
+      any_of:
+        - action: exec
+          program: [sh, bash, zsh, dash, ksh, fish, sudo, doas, env, busybox, make, npm, pnpm, yarn]
+          all_of:
+            - argv_matches: '(?:^|\s)rm(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+            - argv_matches: '(?:^|\s)[\x22\x27]?\$\{?[A-Za-z_][A-Za-z0-9_]*(?::[-?=+][^}\s]*)?\}?(?:[\x22\x27]|/|\s|$)'
+        - action: input
+          all_of:
+            - input_matches: '(?:^|\s)rm(?:\s|$)'
+            - input_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+            - input_matches: '(?:^|\s)[\x22\x27]?\$\{?[A-Za-z_][A-Za-z0-9_]*(?::[-?=+][^}\s]*)?\}?(?:[\x22\x27]|/|\s|$)'
+    exceptions:
+      - argv_matches: '\$\{[A-Za-z_][A-Za-z0-9_]*:[-?=+]'
+      - input_matches: '\$\{[A-Za-z_][A-Za-z0-9_]*:[-?=+]'
+    tests:
+      - name: an empty variable in a delete is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 290, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "BUILD_DIR=\"\"; rm -rf \"$BUILD_DIR/\""], cwd: /home/dev/app }
+        ancestry: [{ comm: claude }]
+      - name: a variable target in the standard input is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 291, comm: bash, exe: /usr/bin/bash, argv: [bash, -s] }
+        input: { source: stdin, data: "rm -rf $TARGET/sub\n" }
+      - name: a guarded variable stays quiet
+        expect: allow
+        process: { pid: 292, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf \"${BUILD_DIR:?}/dist\""], cwd: /home/dev/app }
+      - name: a delete of a fixed build path stays quiet
+        expect: allow
+        process: { pid: 293, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf ./target"], cwd: /home/dev/app }
+
+  # sources: research/threats/incidents/fs-codex-app-windows-outside-project.md
+  - id: filesystem.delete.above-work-tree
+    title: Recursive deletion above the work tree
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The command deletes a directory above the project. It can hit another project or a directory that the user did not give to the agent.
+    match:
+      action: exec
+      program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - argv_matches: '(?:^|\s)[\x22\x27]?(?:\.\./)+[^\s\x22\x27]'
+    tests:
+      - name: a delete of a directory beside the project is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 300, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ../shared-libs], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: a delete of the modules of another project is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 301, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ../old-app/node_modules], cwd: /home/dev/app }
+      - name: a delete of the build output stays quiet
+        expect: allow
+        process: { pid: 302, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./target], cwd: /home/dev/app }
+      - name: a delete of build directories stays quiet
+        expect: allow
+        process: { pid: 303, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, dist, build, .next], cwd: /home/dev/app }
+
+  - id: filesystem.delete.work-tree-self
+    title: Recursive deletion of the work tree itself
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The command deletes the project directory itself. Every change that is not committed and every file that Git does not track goes away.
+    match:
+      any_of:
+        - action: exec
+          program: [rm, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox]
+          all_of:
+            - argv_matches: '(?:^|\s)rm(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+            - argv_matches: '(?:^|\s)[\x22\x27]?(?:\.|\./|\$PWD|\$\{PWD\}|\$\(pwd\)|`pwd`|\*)/?[\x22\x27]?(?:\s|$)'
+        - action: input
+          all_of:
+            - input_matches: '(?:^|\s)rm(?:\s|$)'
+            - input_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+            - input_matches: '(?:^|\s)[\x22\x27]?(?:\.|\./|\$PWD|\$\{PWD\}|\$\(pwd\)|`pwd`|\*)/?[\x22\x27]?(?:\s|$)'
+    tests:
+      - name: a delete of the current directory is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 310, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "."], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a delete of the working directory variable is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 311, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf \"$PWD\""], cwd: /home/dev/app }
+      - name: a delete of every entry in the standard input is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 312, comm: bash, exe: /usr/bin/bash, argv: [bash, -s], cwd: /home/dev/app }
+        input: { source: stdin, data: "rm -rf *\n" }
+      - name: a delete of the build output stays quiet
+        expect: allow
+        process: { pid: 313, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./target], cwd: /home/dev/app }
+      - name: a delete of two build directories stays quiet
+        expect: allow
+        process: { pid: 314, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./dist, ./build], cwd: /home/dev/app }
+
+  # sources: research/threats/scenarios/fs.md (SC Mass deletion without rm),
+  #          research/threats/incidents/fs-codex-cleanup-blast-radius.md
+  - id: filesystem.mirror.rsync-delete
+    title: Copy that deletes files at the destination
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The copy removes every file at the destination that is not in the source. A wrong source or a wrong destination empties a whole directory.
+    references: ["https://download.samba.org/pub/rsync/rsync.1"]
+    match:
+      action: exec
+      program: [rsync, sh, bash, zsh, dash, ksh, sudo, doas, env, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:\S*/)?rsync(?:\s|$)'
+        - argv_matches: '(?:^|\s)--del(?:ete(?:-(?:before|during|delay|after|excluded))?)?(?:\s|$)'
+    exceptions:
+      - argv_matches: '(?:^|\s)(?:--dry-run|-[a-zA-Z]*n[a-zA-Z]*)(?:\s|$)'
+    tests:
+      - name: a mirror copy that deletes at the destination is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 320, comm: rsync, exe: /usr/bin/rsync, argv: [rsync, -a, --delete, ./build/, /srv/app-current/], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a normal copy stays quiet
+        expect: allow
+        process: { pid: 321, comm: rsync, exe: /usr/bin/rsync, argv: [rsync, -a, ./build/, ./deploy/], cwd: /home/dev/app }
+      - name: a dry run of a mirror copy stays quiet
+        expect: allow
+        process: { pid: 322, comm: rsync, exe: /usr/bin/rsync, argv: [rsync, -an, --delete, ./build/, /srv/app-current/], cwd: /home/dev/app }
+
+  # sources: research/threats/incidents/fs-gemini-cli-move-deletion.md
+  - id: filesystem.move.destructive
+    title: Move of many files onto one destination
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The move has a wildcard or many sources. If the destination is not a directory, every file goes onto the same name and only the last file stays.
+    references: ["https://github.com/google-gemini/gemini-cli/issues/4586"]
+    match:
+      action: exec
+      program: [mv, sh, bash, zsh, dash, ksh, sudo, doas, env, busybox]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:\S*/)?mv(?:\s+-[^\s]+)*(?:\s+[^-\s]\S*){3,}\s*$'
+            - not:
+                argv_matches: '/[\x22\x27]?\s*$'
+            - not:
+                argv_matches: '(?:^|\s)(?:-t|--target-directory)(?:\s|=|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:\S*/)?mv(?:\s|$)'
+            - argv_matches: '(?:^|\s)[^\s]*[*?][^\s]*(?:\s|$)'
+    tests:
+      - name: a move of many files onto one name is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 330, comm: mv, exe: /usr/bin/mv, argv: [mv, a.txt, b.txt, c.txt, dest.txt], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: gemini }]
+      - name: a move with a wildcard is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 331, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "mv * \"../my project\""], cwd: /home/dev/app }
+      - name: a rename of one file stays quiet
+        expect: allow
+        process: { pid: 332, comm: mv, exe: /usr/bin/mv, argv: [mv, src/a.rs, src/b.rs], cwd: /home/dev/app }
+      - name: a move into a directory stays quiet
+        expect: allow
+        process: { pid: 333, comm: mv, exe: /usr/bin/mv, argv: [mv, a.txt, b.txt, docs/], cwd: /home/dev/app }
+      - name: a move with an explicit target directory stays quiet
+        expect: allow
+        process: { pid: 334, comm: mv, exe: /usr/bin/mv, argv: [mv, -t, docs, a.txt, b.txt, c.txt], cwd: /home/dev/app }
+
+  # sources: research/threats/incidents/fs-codex-cleanup-blast-radius.md
+  - id: filesystem.interpreter.tree-delete
+    title: Interpreter that deletes a directory tree outside the project
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The interpreter deletes a whole directory tree, and the target is not inside the project. No delete command is in the command line, so the step is easy to miss.
+    match:
+      any_of:
+        - action: exec
+          program: [python, python2, python3, node, nodejs, deno, bun, perl, ruby, npx, pnpm, yarn, sh, bash, zsh, dash, sudo, doas, env, xargs]
+          argv_matches: '(?i)(?:shutil\.rmtree|removedirs|remove_tree|rmtree|rmSync|fs\.rm\b|rm_rf|remove_dir_all|rimraf)[^\n]{0,40}?[\s\x22\x27(\[,=](?:/|~|\.\./|\$)'
+        - action: input
+          program: [python, python2, python3, node, nodejs, deno, bun, perl, ruby]
+          input_matches: '(?i)(?:shutil\.rmtree|removedirs|remove_tree|rmtree|rmSync|fs\.rm\b|rm_rf|remove_dir_all|rimraf)[^\n]{0,40}?[\s\x22\x27(\[,=](?:/|~|\.\./|\$)'
+    exceptions:
+      - argv_matches: '(?:/tmp/|/var/tmp/|/var/cache/|/var/folders/|/dev/shm/)'
+      - input_matches: '(?:/tmp/|/var/tmp/|/var/cache/|/var/folders/|/dev/shm/)'
+    tests:
+      - name: a node delete of a directory in the home is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 340, comm: node, exe: /usr/bin/node, argv: [node, -e, "fs.rmSync('~/project-x',{recursive:true,force:true})"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a rimraf of a directory beside the project is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 341, comm: npx, exe: /usr/bin/npx, argv: [npx, rimraf, ../sibling-app/dist], cwd: /home/dev/app }
+      - name: a python script that deletes a directory in the home is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 342, comm: python3, exe: /usr/bin/python3, argv: [python3, ./cleanup.py], cwd: /home/dev/app }
+        input: { source: file, data: "import shutil\nshutil.rmtree('~/data-archive')\n" }
+      - name: a python delete of a build directory stays quiet
+        expect: allow
+        process: { pid: 343, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, "import shutil; shutil.rmtree('build')"], cwd: /home/dev/app }
+      - name: a python delete of a relative build path stays quiet
+        expect: allow
+        process: { pid: 344, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, "import shutil; shutil.rmtree('./target')"], cwd: /home/dev/app }
+      - name: a rimraf of the build output stays quiet
+        expect: allow
+        process: { pid: 345, comm: npx, exe: /usr/bin/npx, argv: [npx, rimraf, dist], cwd: /home/dev/app }
+
+  # sources: research/threats/incidents/fs-codex-cleanup-blast-radius.md,
+  #          research/threats/incidents/behavior-claude-code-rm-tilde-mac-wipe.md
+  - id: filesystem.delete.agent-state
+    title: Deletion of the configuration of an agent
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The command deletes the configuration, the credentials or the history of a coding agent. The agent removes its own record of the session with it.
+    match:
+      action: exec
+      program: [rm, mv, shred, truncate, sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:rm|mv|shred|truncate)(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)[\x22\x27]?(?:\S*/)?\.(?:claude|codex|cursor|gemini|aider|continue|copilot|windsurf)(?:\.[A-Za-z0-9_-]+)?(?:/\S*)?[\x22\x27]?(?:\s|$)'
+            - argv_matches: '(?:^|\s)[\x22\x27]?(?:~|\$HOME|\$\{HOME\}|/home/[^/\s\x22\x27]+|/Users/[^/\s\x22\x27]+|/root)/\.(?:vscode|vscode-server|zed)(?:/\S*)?[\x22\x27]?(?:\s|$)'
+            - argv_matches: '(?:^|\s)[\x22\x27]?\S*/\.config/(?:Code|github-copilot|Cursor)(?:/\S*)?[\x22\x27]?(?:\s|$)'
+    tests:
+      - name: a delete of the agent configuration is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 350, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "~/.codex"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: a delete of the editor extensions is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 351, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, /home/dev/.vscode/extensions] }
+      - name: a delete of the module directory stays quiet
+        expect: allow
+        process: { pid: 352, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./node_modules], cwd: /home/dev/app }
+      - name: a delete of a package cache stays quiet
+        expect: allow
+        process: { pid: 353, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "~/.cache/pip"] }
+      - name: a delete of the editor settings of the project stays quiet
+        expect: allow
+        process: { pid: 354, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, .vscode], cwd: /home/dev/app }
+
+  # sources: research/threats/incidents/behavior-claude-code-rm-tilde-mac-wipe.md
+  - id: filesystem.dotfile.shell-startup
+    title: Change of a shell startup file of the user
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The command replaces or deletes a startup file of the shell. Every new shell of the user gets the new content, and the old content has no copy.
+    match:
+      action: exec
+      program: [rm, mv, tee, sed, cp, dd, truncate, ln, install, shred, sh, bash, zsh, dash, ksh, sudo, doas, busybox]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:rm|mv|tee|sed|cp|dd|truncate|ln|install|shred)(?:\s|$)'
+        - argv_matches: '(?:^|\s)[\x22\x27]?(?:~|\$HOME|\$\{HOME\}|/home/[^/\s\x22\x27]+|/Users/[^/\s\x22\x27]+|/root)/\.(?:bashrc|bash_profile|bash_login|bash_logout|profile|zshrc|zprofile|zshenv|zlogin|gitconfig|vimrc|tmux\.conf|inputrc|config/git/config|config/fish/config\.fish)[\x22\x27]?(?:\s|$)'
+    exceptions:
+      - argv_matches: '(?:^|\s)(?:-a|--append)(?:\s|$)'
+    tests:
+      - name: a delete of the shell startup file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 360, comm: rm, exe: /usr/bin/rm, argv: [rm, -f, "~/.bashrc"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a rewrite of the profile file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 361, comm: tee, exe: /usr/bin/tee, argv: [tee, /home/dev/.profile] }
+      - name: an append to the shell startup file stays quiet
+        expect: allow
+        process: { pid: 362, comm: tee, exe: /usr/bin/tee, argv: [tee, -a, "~/.bashrc"] }
+      - name: a change of a project file stays quiet
+        expect: allow
+        process: { pid: 363, comm: sed, exe: /usr/bin/sed, argv: [sed, -i, "s/a/b/", ./src/main.rs], cwd: /home/dev/app }
+
+  # sources: research/threats/scenarios/fs.md (SC Deletion of database files and backup files)
+  - id: filesystem.data.destroy-file
+    title: Deletion or emptying of a database file or a backup file
+    category: filesystem
+    risk: suspicious
+    decision: allow
+    reason: The command deletes or empties a database file or a backup file. No database program runs, so no rule of the database pack sees this step.
+    match:
+      action: exec
+      program: [rm, mv, unlink, shred, truncate, cp, sh, bash, zsh, dash, ksh, sudo, doas, env, xargs, busybox]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:rm|mv|unlink|shred)(?:\s|$)'
+            - any_of:
+                - argv_matches: '(?:^|\s)[\x22\x27]?\S*\.(?:sqlite|sqlite3|db|rdb|dump|bak|mdb|sql\.gz|sql\.bz2|sql\.zst|tar\.gz\.enc)[\x22\x27]?(?:\s|$)'
+                - argv_matches: '(?:^|\s)[\x22\x27]?\S*(?:backup|backups|dumps|snapshots)/\S+'
+        - all_of:
+            - argv_matches: '(?:^|\s)truncate(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-s|--size)[= ]?\s?0(?:\s|$)'
+            - argv_matches: '(?:^|\s)[\x22\x27]?\S*\.(?:sqlite|sqlite3|db|rdb|dump|bak|mdb|csv|sql\.gz)[\x22\x27]?(?:\s|$)'
+        - argv_matches: '(?:^|\s)cp\s+(?:-\S+\s+)*/dev/null\s+\S'
+    tests:
+      - name: a delete of a database file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 370, comm: rm, exe: /usr/bin/rm, argv: [rm, app.db], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a delete of a backup file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 371, comm: rm, exe: /usr/bin/rm, argv: [rm, -f, backups/prod-2026-08-01.dump], cwd: /home/dev/app }
+      - name: an empty write over a data file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 372, comm: truncate, exe: /usr/bin/truncate, argv: [truncate, -s, "0", data/app.sqlite], cwd: /home/dev/app }
+      - name: a copy of the empty device over a dump is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 373, comm: cp, exe: /usr/bin/cp, argv: [cp, /dev/null, dump.sql.gz], cwd: /home/dev/app }
+      - name: an empty write over a log file stays quiet
+        expect: allow
+        process: { pid: 374, comm: truncate, exe: /usr/bin/truncate, argv: [truncate, -s, "0", app.log], cwd: /home/dev/app }
+      - name: a delete of a migration file stays quiet
+        expect: allow
+        process: { pid: 375, comm: rm, exe: /usr/bin/rm, argv: [rm, migrations/001_init.sql], cwd: /home/dev/app }
+      - name: a delete of the build output stays quiet
+        expect: allow
+        process: { pid: 376, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, ./target], cwd: /home/dev/app }

