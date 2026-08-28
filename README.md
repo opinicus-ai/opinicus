@@ -216,6 +216,9 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 * [docs/POLICY.md](docs/POLICY.md) — the rule format and the rule pack.
 * [docs/RESEARCH.md](docs/RESEARCH.md) — the Linux research questions of
   PROJECT.md section 10 with measured answers, and the limits they show.
+* [docs/DETECTION-RESEARCH.md](docs/DETECTION-RESEARCH.md) — which mechanism
+  the firewall should watch with, measured across four spikes, and the
+  layered recommendation that follows.
 
 ## Licence
 
