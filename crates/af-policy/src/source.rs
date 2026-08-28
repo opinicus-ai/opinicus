@@ -58,7 +58,7 @@ impl<'de> Deserialize<'de> for Words {
 }
 
 /// Which action kind a rule applies to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
     /// A process is about to run a program.

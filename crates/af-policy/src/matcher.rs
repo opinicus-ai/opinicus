@@ -4,7 +4,7 @@
 //! match at run time reads only the compiled form, because a held process
 //! waits while the engine runs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use af_core::{Action, EvalContext, ProcessInfo};
 use regex::Regex;
@@ -90,6 +90,22 @@ impl Matcher {
             any_of: compile_list(source.any_of.as_deref())?,
             empty_any_of,
         })
+    }
+
+    /// Collects every action kind that this condition can match.
+    ///
+    /// A nested condition can name its own action kind, so the function walks
+    /// the whole tree. The result stays empty when no condition names a kind,
+    /// which means the rule matches any action.
+    pub(crate) fn collect_action_kinds(&self, out: &mut BTreeSet<ActionKind>) {
+        if let Some(kind) = self.action {
+            out.insert(kind);
+        }
+        for nested in self.all_of.iter().chain(self.any_of.iter()) {
+            nested.collect_action_kinds(out);
+        }
+        // A `not` block describes what must NOT match, so its action kind
+        // says nothing about what the rule can match.
     }
 
     /// Returns true when every condition of the block matches the action.

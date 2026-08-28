@@ -15,6 +15,26 @@ pub fn load_policy(options: &PolicyOptions) -> Result<PolicySet> {
     Ok(set)
 }
 
+/// The action kinds that the monitor of this version really makes.
+///
+/// The firewall judges a new program and the content that it reads. It does
+/// not observe a file open or a network connection yet, because that needs a
+/// system-call source that the monitor does not have. A rule that matches only
+/// an action kind outside this list can never fire, and the user must know
+/// that instead of trusting a rule that is silent.
+pub const SUPPORTED_ACTIONS: &[&str] = &["exec", "input"];
+
+/// Returns true when the monitor can ever make an action that the rule matches.
+///
+/// A rule that names no action kind matches any action, so it is reachable.
+pub fn is_reachable(rule: &af_core::RuleInfo) -> bool {
+    rule.actions.is_empty()
+        || rule
+            .actions
+            .iter()
+            .any(|kind| SUPPORTED_ACTIONS.contains(&kind.as_str()))
+}
+
 /// Runs a `policy` sub-command and returns the exit code.
 pub fn run(command: PolicyCommand) -> Result<i32> {
     match command {
@@ -38,15 +58,31 @@ fn list(options: PolicyOptions, json: bool) -> Result<i32> {
     let width = rules.iter().map(|r| r.rule_id.len()).max().unwrap_or(10);
     println!("{:<width$}  {:<18}  {:<18}  TITLE", "RULE", "RISK", "DECISION");
     for rule in &rules {
+        let mark = if is_reachable(rule) { "" } else { "  (inactive)" };
         println!(
-            "{:<width$}  {:<18}  {:<18}  {}",
+            "{:<width$}  {:<18}  {:<18}  {}{mark}",
             rule.rule_id,
             rule.risk.label(),
             rule.decision.label(),
             rule.title
         );
     }
-    println!("\n{} rule(s)", rules.len());
+
+    let unreachable: Vec<&af_core::RuleInfo> =
+        rules.iter().filter(|r| !is_reachable(r)).collect();
+    println!("\n{} rule(s), {} active", rules.len(), rules.len() - unreachable.len());
+    if !unreachable.is_empty() {
+        eprintln!(
+            "\nagent-firewall: {} rule(s) cannot fire on this version, because the\n\
+             monitor does not observe the action kind that they need. The monitor\n\
+             makes these action kinds: {}.",
+            unreachable.len(),
+            SUPPORTED_ACTIONS.join(", ")
+        );
+        for rule in &unreachable {
+            eprintln!("  {} (needs {})", rule.rule_id, rule.actions.join(", "));
+        }
+    }
     Ok(0)
 }
 

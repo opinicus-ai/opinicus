@@ -113,6 +113,8 @@ impl CompiledRule {
 
     /// Makes the description that `policy list` shows.
     fn to_info(&self) -> RuleInfo {
+        let mut kinds = std::collections::BTreeSet::new();
+        self.matcher.collect_action_kinds(&mut kinds);
         RuleInfo {
             rule_id: self.id.clone(),
             title: self.title.clone(),
@@ -121,6 +123,7 @@ impl CompiledRule {
             decision: self.decision,
             source: self.source.clone(),
             disabled: !self.enabled,
+            actions: kinds.iter().map(|k| k.label().to_string()).collect(),
         }
     }
 }

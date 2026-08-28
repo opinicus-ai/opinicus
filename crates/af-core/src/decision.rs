@@ -191,6 +191,13 @@ pub struct RuleInfo {
     /// True when the rule is switched off.
     #[serde(default)]
     pub disabled: bool,
+    /// The action kinds that the rule can match, for example `file_open`.
+    ///
+    /// The list is empty when the rule matches any action kind. A monitor that
+    /// never makes one of these action kinds can never match the rule, so the
+    /// user interface uses this list to report a rule that cannot fire.
+    #[serde(default)]
+    pub actions: Vec<String>,
 }
 
 #[cfg(test)]

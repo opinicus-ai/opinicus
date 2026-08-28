@@ -113,7 +113,20 @@ pub fn doctor() -> Result<i32> {
     }
 
     match af_policy::PolicySet::builtin() {
-        Ok(set) => println!("\n  built-in rules: {}", set.len()),
+        Ok(set) => {
+            let rules = set.rules();
+            let inactive = rules
+                .iter()
+                .filter(|r| !crate::policy_cmds::is_reachable(r))
+                .count();
+            println!("\n  built-in rules: {}", rules.len());
+            if inactive > 0 {
+                println!(
+                    "  inactive rules: {inactive} (they need an action kind that this\n\
+                                       monitor does not observe; run `policy list` for the list)"
+                );
+            }
+        }
         Err(error) => println!("\n  built-in rules: cannot load them ({error})"),
     }
 

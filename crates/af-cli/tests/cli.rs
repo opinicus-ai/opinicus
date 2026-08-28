@@ -93,6 +93,34 @@ fn policy_test_passes_for_the_builtin_rules() {
 }
 
 #[test]
+fn policy_list_reports_rules_that_cannot_fire() {
+    let (code, out, err) = firewall(&["policy", "list"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("active"), "the count must name the active rules:\n{out}");
+    // The monitor of this version makes only exec and input actions. A rule
+    // that needs a file or network action can never fire, and the user must be
+    // told instead of trusting a rule that stays silent.
+    assert!(
+        err.contains("cannot fire"),
+        "the firewall must report the rules that cannot fire:\n{err}"
+    );
+    assert!(
+        err.contains("network.connect.production-host"),
+        "a network rule needs an action kind that the monitor does not make:\n{err}"
+    );
+}
+
+#[test]
+fn doctor_reports_the_inactive_rule_count() {
+    let (code, out, _) = firewall(&["doctor"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("inactive rules"),
+        "doctor must name the rules that cannot fire:\n{out}"
+    );
+}
+
+#[test]
 fn a_harmless_command_runs_without_a_question() {
     let (code, out, _) = firewall(&["run", "--approve", "deny", "--", "/bin/echo", "hello"]);
     assert_eq!(code, 0);
