@@ -20,10 +20,10 @@ for how to run it again.
 
 | item | count |
 | --- | ---: |
-| incident reports in `incidents/` | 57 |
-| scenarios in `scenarios/` | 147 |
-| scenarios the monitor can see today (`exec` or `input` only) | **77** |
-| scenarios that need an observable the monitor does not make | **70** |
+| incident reports in `incidents/` | 75 |
+| scenarios in `scenarios/` | 199 |
+| scenarios the monitor can see today (`exec` or `input` only) | **125** |
+| scenarios that need an observable the monitor does not make | **74** |
 
 ## Observable summary
 
@@ -33,10 +33,10 @@ not make `file_open` or `network_connect`.
 
 | the signal needs | scenarios | state |
 | --- | ---: | --- |
-| `exec` or `input` only | 77 | can become a rule now |
-| `file_open` or `network_connect` | 70 | blocked on the monitor |
+| `exec` or `input` only | 125 | can become a rule now |
+| `file_open` or `network_connect` | 74 | blocked on the monitor |
 
-**48 percent of the threat catalogue cannot be expressed today.** This is
+**37 percent of the threat catalogue cannot be expressed today.** This is
 independent evidence for the layer 1 work that `docs/DETECTION-RESEARCH.md`
 recommends: `seccomp RET_TRACE` adds exactly these two observables for about
 1.2 times the cost.
@@ -52,15 +52,15 @@ monitor does not make.
 
 | policy pack | gap | partial | blocked | actionable now |
 | --- | ---: | ---: | ---: | ---: |
-| cross (spans packs) | 35 | 10 | 28 | 17 |
-| process | 29 | 5 | 12 | 22 |
-| filesystem | 18 | 7 | 15 | 10 |
-| network | 17 | 2 | 8 | 11 |
-| cloud | 9 | 2 | 4 | 7 |
-| git | 5 | 4 | 2 | 7 |
-| database | 2 | 1 | 1 | 2 |
+| cross (spans packs) | 45 | 13 | 29 | 29 |
+| process | 47 | 5 | 13 | 39 |
+| filesystem | 22 | 8 | 16 | 14 |
+| network | 21 | 2 | 8 | 15 |
+| cloud | 15 | 2 | 4 | 13 |
+| git | 9 | 4 | 3 | 10 |
+| database | 3 | 1 | 1 | 3 |
 | mcp | 1 | 0 | 0 | 1 |
-| **total** | **116** | **31** | **70** | **77** |
+| **total** | **163** | **35** | **74** | **124** |
 
 ## The interruption budget
 
@@ -87,42 +87,42 @@ The rule for spending the budget:
 
 ## Incident ledger
 
-57 reports in `incidents/`, named `<axis>-<slug>.md`. Each one holds the
+75 reports in `incidents/`, named `<axis>-<slug>.md`. Each one holds the
 facts, the sources and the lesson for the policy pack.
 
 | axis | reports |
 | --- | ---: |
-| supply | 9 |
-| inject | 7 |
-| behavior | 6 |
-| mcp | 6 |
-| cloud | 5 |
-| evade | 5 |
-| exfil | 5 |
-| secrets | 5 |
-| vcs | 5 |
-| fs | 4 |
+| supply | 11 |
+| inject | 9 |
+| behavior | 8 |
+| mcp | 8 |
+| evade | 7 |
+| exfil | 7 |
+| secrets | 7 |
+| vcs | 7 |
+| cloud | 6 |
+| fs | 5 |
 
 ## Scenario ledger
 
-147 scenarios in `scenarios/<axis>.md`. Every scenario holds a behaviour, an
+199 scenarios in `scenarios/<axis>.md`. Every scenario holds a behaviour, an
 example, a signal written only in observables the monitor has, a decision, a
 severity and a coverage state.
 
 | axis | scenarios | gap | partial | blocked on an observable |
 | --- | ---: | ---: | ---: | ---: |
-| behavior | 14 | 9 | 5 | 5 |
-| cloud | 15 | 12 | 3 | 7 |
-| evade | 15 | 12 | 3 | 6 |
-| exfil | 15 | 14 | 1 | 12 |
-| fs | 15 | 10 | 5 | 4 |
-| inject | 15 | 12 | 3 | 9 |
-| mcp | 15 | 13 | 2 | 5 |
-| secrets | 15 | 14 | 1 | 12 |
-| supply | 13 | 11 | 2 | 3 |
-| vcs | 15 | 9 | 6 | 7 |
+| behavior | 19 | 14 | 5 | 5 |
+| cloud | 21 | 18 | 3 | 7 |
+| evade | 21 | 17 | 4 | 7 |
+| exfil | 20 | 18 | 2 | 12 |
+| fs | 19 | 13 | 6 | 4 |
+| inject | 19 | 16 | 3 | 10 |
+| mcp | 20 | 18 | 2 | 5 |
+| secrets | 20 | 19 | 1 | 12 |
+| supply | 19 | 17 | 2 | 4 |
+| vcs | 21 | 13 | 7 | 8 |
 
-`exfil` and `secrets` are the most blocked axes: 12 of 15 scenarios in each
+`exfil` and `secrets` are the most blocked axes: 12 of 20 scenarios in each
 need an observable that the monitor does not make. That is why the firewall
 today is strong on a destructive command and weak on data that leaves the
 machine.
@@ -143,3 +143,4 @@ Behaviour that no observable of any planned layer reports.
 | --- | --- | --- | --- |
 | 2026-08 | 57 added | 147 added | first research run, ten axes |
 | 2026-08 | — | — | ledger rebuilt from the files on disk; observable and interruption-budget analysis added |
+| 2026-08 | 18 added | 52 added | rerun added 18 incident reports and 52 scenarios; no axis failed |

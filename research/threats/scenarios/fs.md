@@ -142,6 +142,46 @@ behavior: The agent removes a database or backup as a plain file: the local dev 
 example: `rm app.db`; `rm -f backups/prod-2026-08-01.dump`; `rm cache/session.store` where that is the only session store; `mv data.sqlite data.sqlite.old && truncate -s 0 data.sqlite`
 signal: exec(rm/mv/unlink-shaped program, argv carries a path ending in `.sqlite`, `.sqlite3`, `.db`, `.rdb`, `.dump`, `.sql.gz`, or `*.sql` under a `backup`/`dump` directory segment), plus file_open(path, write) with truncate intent on the same patterns via the truncation scenario. argv matching only; the fs-side complement to the SQL-layer rules in database.yaml.
 
+### SC fs-16 Recursive delete landing inside a cloud-sync root
+- category: filesystem
+- decision: approval_required | severity: 4
+- pack: filesystem | coverage: gap
+- observable: exec-input
+- sources: fs-cursor-rmdir-drive-wipe, behavior-claude-code-rm-tilde-mac-wipe
+behavior: The agent deletes into a cloud-sync root — Dropbox, Google Drive, OneDrive, iCloud Drive (`~/Library/Mobile Documents`). The builtin user-data rule knows Documents, Downloads, Desktop and friends but not the sync roots, and on Windows OneDrive literally hosts Desktop and Documents (`C:\Users\dev\OneDrive\Desktop`), so matching that assumes the plain profile layout can miss the same directories by one path segment. Deletion here does not just remove local bytes: the sync client propagates the tombstone to every signed-in device and to the cloud copy, so the blast radius is every copy of the data the user has. The drive-wipe incident took Desktop and Documents exactly this way; a home-sweep like the Mac wipe takes the sync roots with it.
+example: `rm -rf ~/Dropbox/work-project`; `Remove-Item -Recurse -Force C:\Users\dev\OneDrive\old-photos`; `rm -rf "~/Library/Mobile Documents/com~apple~CloudDocs/archive"`; `rmdir /s /q "%USERPROFILE%\Google Drive\backups"`
+signal: exec(rm/rmdir/Remove-Item-shaped recursive delete) whose path arguments resolve under the session user's home (HOME from env, cwd + argv resolution as in the other rules) and contain a sync-root segment (`Dropbox`, `OneDrive`, `Google Drive`, `GoogleDrive`, `Mobile Documents`, `iCloud`). The bare sync root escalates to deny, subtrees to approval_required. Pure exec-input matching today; a file_open(write) complement would extend the gate to interpreter deletes inside sync roots.
+
+### SC fs-17 Snapshot and backup-store destruction
+- category: filesystem
+- decision: approval_required | severity: 4
+- pack: filesystem | coverage: gap
+- observable: exec-input
+- sources: cloud-pocketos-railway-volume-delete, cloud-kiro-delete-and-recreate
+behavior: The agent deletes the safety net itself: ZFS snapshots or whole datasets (`zfs destroy`), Btrfs subvolumes (`btrfs subvolume delete`), LVM volumes and their snapshots (`lvremove`, `vgremove`), macOS local Time Machine snapshots (`tmutil deletelocalsnapshots`), or a Timeshift/rsnapshot/borg store directory under a cleanup or disk-space push. After this step every later mistake in the session is permanent — there is no previous version to roll back to. None of the delete rules key on these programs because they are not rm; the database-file rule only knows backup files, not backup volumes and snapshot layers. The motive has a direct cloud-side precedent: the PocketOS agent deleted the database and then its backups too.
+example: `zfs destroy tank/projects@auto-2026-06`; `btrfs subvolume delete /mnt/backups/auto-daily`; `sudo lvremove -f vg0/snap-backup`; `tmutil deletelocalsnapshots /`; `rm -rf /timeshift`
+signal: exec(zfs, argv contains `destroy`; btrfs with `subvolume delete`; lvremove/vgremove; tmutil with `deletelocalsnapshots` or `delete`; or rm-shaped recursive delete whose target matches snapshot-store names (`timeshift`, `rsnapshot`, `borg`, `snapshots`, `.snapshots`)) under agent ancestry — pure argv and program-name matching on the exec observable. Nothing in filesystem.yaml matches any of these programs today.
+
+### SC fs-18 Immutable flag stripped before deletion
+- category: filesystem
+- decision: approval_required | severity: 3
+- pack: filesystem | coverage: gap
+- observable: exec-input
+- sources: behavior-cursor-plan-mode-pkill-despite-freeze
+behavior: A delete fails with EPERM because the file carries the immutable attribute (`chattr +i` set by an admin script, hardening tooling, or the user). The agent's repair is to strip the flag and delete anyway: `chattr -i file && rm file`. Each half looks innocent — chattr is an attribute change, and the rm of a single file matches no recursive-delete rule — but together they are the agent defeating a protection a human deliberately put in place. This is the failed-command retry-escalation pattern of the Cursor Plan-Mode incident (compounding errors through attempted fixes) applied to filesystem protections; system-path variants of the follow-up delete are partially gated, but the attribute-strip primitive itself is matched nowhere.
+example: `sudo chattr -i /etc/resolv.conf && rm /etc/resolv.conf`; `chattr -i app.lock && rm -f app.lock`; an `lsattr -R .` sweep followed by `chattr -i` on every flagged file before a cleanup
+signal: exec(chattr, argv contains `-i`) under agent ancestry — approval_required on the chattr event alone, since stripping immutability has no agent-legitimate use; session state (a delete-class exec on the same path within a window after `chattr -i` on it) upgrades to terminate. Pure argv matching on exec-input; no rule in filesystem.yaml or process.yaml mentions chattr today.
+
+### SC fs-19 Archive extraction used as a rollback over live trees
+- category: filesystem
+- decision: approval_required | severity: 3
+- pack: filesystem | coverage: partial
+- observable: exec-input
+- sources: -
+behavior: The agent "restores" state by extracting an old archive over a live tree: a tarball unpacked with `-C .` at the work-tree root, `unzip -o backup.zip -d ~/app`, `tar xf release.tgz -C /srv/app`. Every path the archive contains overwrites the newer file at the same path, so the result is a mixed old/new tree — files created since the snapshot survive, everything the archive touches silently reverts. This is how an agent implements "roll back to the last good state" without git, and no rule sees it: the process-pack archive rule gates extraction into system directories only, and extraction flags look identical whether the destination is empty or full of work.
+example: `tar xzf backup-2026-05.tar.gz -C .` at the work-tree root; `unzip -o site-backup.zip -d /var/www/app`; `tar xf old-release.tgz -C ~/apps/production`
+signal: exec(tar with an extraction flag (`x`, `--extract`) whose `-C` destination resolves to the session work-tree root or outside it, or unzip/7z with overwrite flags (`-o`) and a destination outside the work tree) under agent ancestry — cwd + argv resolution as in the delete rules. exec-input today. Partial: process.archive.system-directory already gates the `-C /usr/local/bin`-style system destinations; work-tree-root and user-directory destinations are the gap. Layer-1 sharpening: a burst of file_open(write) events from a tar/unzip child over paths read earlier in the session is the overwrite signature.
+
 ## Coverage summary for this axis
 
 | decision | count |

