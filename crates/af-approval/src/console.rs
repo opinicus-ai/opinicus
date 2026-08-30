@@ -196,7 +196,10 @@ mod tests {
 
     #[test]
     fn a_closed_terminal_with_text_still_gives_the_line() {
-        assert_eq!(end_of_input(b"allow".to_vec()), Answer::Line("allow".into()));
+        assert_eq!(
+            end_of_input(b"allow".to_vec()),
+            Answer::Line("allow".into())
+        );
         assert_eq!(end_of_input(Vec::new()), Answer::Ended);
     }
 

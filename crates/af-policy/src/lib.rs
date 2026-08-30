@@ -149,11 +149,9 @@ impl CompiledRule {
         };
         let key = subject.distinct_key(threshold.distinct);
         let reached = if threshold.distinct == DistinctKey::None {
-            subject.memory().count_with_current(
-                &self.id,
-                subject.ts(),
-                threshold.window_seconds,
-            )
+            subject
+                .memory()
+                .count_with_current(&self.id, subject.ts(), threshold.window_seconds)
         } else {
             subject.memory().distinct_with_current(
                 &self.id,
@@ -273,8 +271,8 @@ impl PolicySet {
     /// Loads rules from text. `source` names the origin for messages.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str, source: &str) -> Result<PolicySet> {
-        let file: PolicyFile =
-            serde_yaml_ng::from_str(text).map_err(|err| Error::policy(format!("{source}: {err}")))?;
+        let file: PolicyFile = serde_yaml_ng::from_str(text)
+            .map_err(|err| Error::policy(format!("{source}: {err}")))?;
         if file.version != FORMAT_VERSION {
             return Err(Error::policy(format!(
                 "{source}: rule format version {} is not supported, expected {FORMAT_VERSION}",

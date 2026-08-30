@@ -145,8 +145,16 @@ impl Verdict {
                 .then(b.risk.cmp(&a.risk))
                 .then(a.rule_id.cmp(&b.rule_id))
         });
-        let decision = matches.iter().map(|m| m.decision).max().unwrap_or(Decision::Allow);
-        let risk = matches.iter().map(|m| m.risk).max().unwrap_or(RiskLevel::Info);
+        let decision = matches
+            .iter()
+            .map(|m| m.decision)
+            .max()
+            .unwrap_or(Decision::Allow);
+        let risk = matches
+            .iter()
+            .map(|m| m.risk)
+            .max()
+            .unwrap_or(RiskLevel::Info);
         Self {
             decision,
             risk,

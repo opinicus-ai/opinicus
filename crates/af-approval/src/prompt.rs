@@ -136,7 +136,9 @@ fn wrap(text: &str) -> Vec<String> {
     if characters.len() <= MAX_CONTENT {
         return vec![text.to_string()];
     }
-    let rest_width = MAX_CONTENT.saturating_sub(CONTINUATION.chars().count()).max(1);
+    let rest_width = MAX_CONTENT
+        .saturating_sub(CONTINUATION.chars().count())
+        .max(1);
     let mut parts = Vec::new();
     let mut start = 0;
     let mut width = MAX_CONTENT;
@@ -223,7 +225,10 @@ mod tests {
         let fixture = Fixture::psql("DROP DATABASE customer_prod");
         let text = render_prompt(&fixture.request(), false);
 
-        assert!(text.contains("┌─ Agent Firewall ─ approval required"), "{text}");
+        assert!(
+            text.contains("┌─ Agent Firewall ─ approval required"),
+            "{text}"
+        );
         assert!(text.contains("claude"), "{text}");
         assert!(text.contains("-> bash"), "{text}");
         assert!(text.contains("-> migrate.sh"), "{text}");
@@ -274,8 +279,14 @@ mod tests {
     fn colour_marks_the_risk_level() {
         let fixture = Fixture::psql("DROP DATABASE prod");
         let text = render_prompt(&fixture.request(), true);
-        assert!(text.contains(&format!("{RED}approval required{RESET}")), "{text}");
-        assert!(text.contains(&format!("{RED}approval-required{RESET}")), "{text}");
+        assert!(
+            text.contains(&format!("{RED}approval required{RESET}")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{RED}approval-required{RESET}")),
+            "{text}"
+        );
     }
 
     #[test]
@@ -283,7 +294,10 @@ mod tests {
         let mut fixture = Fixture::psql("DROP DATABASE prod");
         fixture.set_risk(RiskLevel::Suspicious);
         let text = render_prompt(&fixture.request(), true);
-        assert!(text.contains(&format!("{YELLOW}suspicious{RESET}")), "{text}");
+        assert!(
+            text.contains(&format!("{YELLOW}suspicious{RESET}")),
+            "{text}"
+        );
         assert!(!text.contains(RED), "{text}");
     }
 
@@ -347,4 +361,3 @@ mod tests {
         assert!(text.contains("(no rule matched)"), "{text}");
     }
 }
-

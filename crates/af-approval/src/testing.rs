@@ -80,10 +80,8 @@ impl Fixture {
 
     /// Makes a question from an action and the process that performs it.
     fn with(action: Action, process: ProcessInfo) -> Self {
-        let mut session = SessionMeta::new(
-            vec!["claude".to_string()],
-            "/home/dev/project".to_string(),
-        );
+        let mut session =
+            SessionMeta::new(vec!["claude".to_string()], "/home/dev/project".to_string());
         session.session_id = SessionId::from("afw-test-session");
         session.root_pid = 10;
         session.agent = AgentMeta::from_program("claude");

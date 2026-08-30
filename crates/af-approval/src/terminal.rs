@@ -207,9 +207,8 @@ impl TerminalApprover {
                         return outcome;
                     }
                     None if attempt < MAX_ANSWERS => {
-                        console.write_text(
-                            "agent-firewall: answer a, s, d or t.\nanswer [a/s/d/t]: ",
-                        );
+                        console
+                            .write_text("agent-firewall: answer a, s, d or t.\nanswer [a/s/d/t]: ");
                     }
                     None => {
                         console.write_text(
@@ -394,10 +393,7 @@ mod tests {
             .with_color(false)
             .with_console(console);
 
-        assert_eq!(
-            approver.request(&fixture.request()),
-            ApprovalOutcome::Allow
-        );
+        assert_eq!(approver.request(&fixture.request()), ApprovalOutcome::Allow);
         let text = watch.text();
         assert!(text.contains("Agent Firewall"), "{text}");
         assert!(text.contains("DROP DATABASE customer_prod"), "{text}");
@@ -453,10 +449,8 @@ mod tests {
     #[test]
     fn the_approver_asks_again_after_a_word_that_it_does_not_know() {
         let fixture = Fixture::psql("DROP DATABASE prod");
-        let console = FakeConsole::new(vec![
-            Answer::Line("maybe".into()),
-            Answer::Line("a".into()),
-        ]);
+        let console =
+            FakeConsole::new(vec![Answer::Line("maybe".into()), Answer::Line("a".into())]);
         let watch = console.watch();
         let mut approver = TerminalApprover::new(ApprovalMode::Ask)
             .with_color(false)
@@ -464,7 +458,11 @@ mod tests {
 
         assert_eq!(approver.request(&fixture.request()), ApprovalOutcome::Allow);
         assert_eq!(watch.reads(), 2);
-        assert!(watch.text().contains("answer a, s, d or t"), "{}", watch.text());
+        assert!(
+            watch.text().contains("answer a, s, d or t"),
+            "{}",
+            watch.text()
+        );
     }
 
     #[test]
@@ -498,7 +496,11 @@ mod tests {
         let start = Instant::now();
         assert_eq!(approver.request(&fixture.request()), ApprovalOutcome::Deny);
         assert!(start.elapsed() < FAST, "the approver waited");
-        assert!(watch.text().contains("no answer after 30 seconds"), "{}", watch.text());
+        assert!(
+            watch.text().contains("no answer after 30 seconds"),
+            "{}",
+            watch.text()
+        );
     }
 
     #[test]
@@ -530,9 +532,15 @@ mod tests {
 
         let again = Fixture::psql("DROP DATABASE prod");
         assert_eq!(approver.request(&again.request()), ApprovalOutcome::Allow);
-        assert_eq!(watch.reads(), 1, "the approver asked the same question again");
+        assert_eq!(
+            watch.reads(),
+            1,
+            "the approver asked the same question again"
+        );
         assert!(
-            watch.text().contains("allowed by an earlier session answer"),
+            watch
+                .text()
+                .contains("allowed by an earlier session answer"),
             "{}",
             watch.text()
         );
@@ -551,10 +559,7 @@ mod tests {
     #[test]
     fn a_session_answer_does_not_open_a_different_action() {
         let fixture = Fixture::psql("DROP DATABASE a");
-        let console = FakeConsole::new(vec![
-            Answer::Line("s".into()),
-            Answer::Line("d".into()),
-        ]);
+        let console = FakeConsole::new(vec![Answer::Line("s".into()), Answer::Line("d".into())]);
         let watch = console.watch();
         let mut approver = TerminalApprover::new(ApprovalMode::Ask)
             .with_color(false)
@@ -563,7 +568,11 @@ mod tests {
         approver.request(&fixture.request());
         let other = Fixture::psql("DROP DATABASE b");
         assert_eq!(approver.request(&other.request()), ApprovalOutcome::Deny);
-        assert_eq!(watch.reads(), 2, "the approver did not ask the second question");
+        assert_eq!(
+            watch.reads(),
+            2,
+            "the approver did not ask the second question"
+        );
     }
 
     #[test]

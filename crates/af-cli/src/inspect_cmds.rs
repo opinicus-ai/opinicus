@@ -15,8 +15,8 @@ use crate::policy_cmds::load_policy;
 
 /// Draws the process tree of a recorded trace.
 pub fn tree(args: TreeArgs) -> Result<i32> {
-    let events = read_trace(&args.trace)
-        .with_context(|| format!("cannot read {}", args.trace.display()))?;
+    let events =
+        read_trace(&args.trace).with_context(|| format!("cannot read {}", args.trace.display()))?;
     let graph = ProcessGraph::from_trace(&events);
     println!("{}", graph.render_tree());
     Ok(0)
@@ -38,8 +38,8 @@ struct ReplayHit {
 /// A replay proves that a rule change gives the answer that the author
 /// expects, and it needs no dangerous command.
 pub fn replay(args: ReplayArgs) -> Result<i32> {
-    let events = read_trace(&args.trace)
-        .with_context(|| format!("cannot read {}", args.trace.display()))?;
+    let events =
+        read_trace(&args.trace).with_context(|| format!("cannot read {}", args.trace.display()))?;
     let policy = load_policy(&args.policy)?;
     let graph = ProcessGraph::from_trace(&events);
     let session = session_of(&events);
@@ -267,7 +267,11 @@ pub fn doctor(args: DoctorArgs) -> Result<i32> {
     println!("agent-firewall doctor\n");
     println!("  system-call filter: {}\n", filter.label());
     let capabilities = af_monitor::Monitor::capabilities(filter);
-    let width = capabilities.iter().map(|c| c.name.len()).max().unwrap_or(20);
+    let width = capabilities
+        .iter()
+        .map(|c| c.name.len())
+        .max()
+        .unwrap_or(20);
     let mut missing_critical = false;
     for capability in &capabilities {
         let mark = if capability.available { "yes" } else { "no " };

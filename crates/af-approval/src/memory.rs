@@ -330,7 +330,10 @@ mod tests {
 
     #[test]
     fn a_proc_path_loses_the_process_identifier() {
-        assert_eq!(mask_proc_path("/proc/1234/status").unwrap(), "/proc/<pid>/status");
+        assert_eq!(
+            mask_proc_path("/proc/1234/status").unwrap(),
+            "/proc/<pid>/status"
+        );
         assert_eq!(mask_proc_path("/proc/77").unwrap(), "/proc/<pid>");
         assert!(mask_proc_path("/proc/self/status").is_none());
     }

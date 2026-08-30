@@ -15,9 +15,7 @@ use af_core::{
     MemoryEffect, MonitorCapability, Pid, PolicyEngine, ProcessInfo, SessionMemory, SessionMeta,
     TimestampNanos, Verdict,
 };
-use af_monitor::{
-    InputSnapshot, Intercept, Monitor, MonitorConfig, MonitorHandler, SyscallFilter,
-};
+use af_monitor::{InputSnapshot, Intercept, Monitor, MonitorConfig, MonitorHandler, SyscallFilter};
 use af_provenance::ProcessGraph;
 use af_recorder::{FanoutSink, Retention, StreamSink, TraceWriter};
 use anyhow::{bail, Context, Result};
@@ -145,9 +143,9 @@ pub fn run(args: RunArgs) -> Result<i32> {
 pub fn parse_syscall_filter(text: &str) -> Result<SyscallFilter> {
     match SyscallFilter::parse(text) {
         Some(filter) => Ok(filter),
-        None => bail!(
-            "`--syscall-filter` accepts write-only, all-opens or off, but it got `{text}`"
-        ),
+        None => {
+            bail!("`--syscall-filter` accepts write-only, all-opens or off, but it got `{text}`")
+        }
     }
 }
 
@@ -651,7 +649,14 @@ impl MonitorHandler for FirewallHandler {
         // are two different questions, so the caller keeps asking about them
         // — but a threshold rule fires again and again for a burst that is
         // really one event, and the session answers that one time.
-        self.resolve(&judged, &ancestry, &action, &verdict, Intercept::Deny, false)
+        self.resolve(
+            &judged,
+            &ancestry,
+            &action,
+            &verdict,
+            Intercept::Deny,
+            false,
+        )
     }
 
     fn on_syscall(&mut self, pid: Pid, action: &Action, ancestry_pids: &[Pid]) -> Intercept {
@@ -694,7 +699,14 @@ impl MonitorHandler for FirewallHandler {
         // the action completely. The program then gets an ordinary
         // permission error and can say so in its own words, which `SIGKILL`
         // would take away from it.
-        self.resolve(&process, &ancestry, action, &verdict, Intercept::Refuse, true)
+        self.resolve(
+            &process,
+            &ancestry,
+            action,
+            &verdict,
+            Intercept::Refuse,
+            true,
+        )
     }
 }
 
@@ -970,10 +982,19 @@ rules:
         let second = handler.on_exec(&rm_process(401, "b"), &[], None);
         let third = handler.on_exec(&rm_process(402, "c"), &[], None);
 
-        assert_eq!(first, Intercept::Continue, "the first delete is below the threshold");
-        assert_eq!(second, Intercept::Deny, "the burst is refused once it fires");
         assert_eq!(
-            third, Intercept::Deny,
+            first,
+            Intercept::Continue,
+            "the first delete is below the threshold"
+        );
+        assert_eq!(
+            second,
+            Intercept::Deny,
+            "the burst is refused once it fires"
+        );
+        assert_eq!(
+            third,
+            Intercept::Deny,
             "a refusal must stick for the rest of the session, not just an allow"
         );
         assert_eq!(handler.asked, 1, "the session asks one time");

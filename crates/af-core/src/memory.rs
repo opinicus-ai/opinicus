@@ -424,7 +424,10 @@ mod tests {
     fn one_mark_of_one_subtree_keeps_one_record() {
         let mut memory = SessionMemory::new();
         for step in 0..10_000 {
-            memory.apply(mark("read", MarkScope::Session, 7, Some(600)), seconds(step));
+            memory.apply(
+                mark("read", MarkScope::Session, 7, Some(600)),
+                seconds(step),
+            );
         }
         let kept = memory.marks.get("read").map(Vec::len).unwrap_or(0);
         assert_eq!(
@@ -470,7 +473,11 @@ mod tests {
                 seconds(step),
             );
         }
-        let kept = memory.occurrences.get("fs.burst").map(Vec::len).unwrap_or(0);
+        let kept = memory
+            .occurrences
+            .get("fs.burst")
+            .map(Vec::len)
+            .unwrap_or(0);
         assert!(kept <= 11, "the window keeps only its own seconds: {kept}");
     }
 }

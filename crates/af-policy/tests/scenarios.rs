@@ -14,11 +14,8 @@ fn builtin() -> PolicySet {
 #[test]
 fn a_drop_database_through_psql_needs_approval() {
     let policy = builtin();
-    let case = exec(&["psql", "-c", "DROP DATABASE customer_prod"]).with_ancestry(&[
-        "bash",
-        "bash",
-        "claude",
-    ]);
+    let case = exec(&["psql", "-c", "DROP DATABASE customer_prod"])
+        .with_ancestry(&["bash", "bash", "claude"]);
     let verdict = policy.evaluate(&case.ctx());
     assert_eq!(verdict.decision, Decision::ApprovalRequired);
     assert!(
@@ -238,7 +235,6 @@ fn the_rule_list_names_every_rule_with_its_source() {
     assert!(infos.iter().all(|i| i.source.starts_with("builtin:")));
     assert!(infos.iter().all(|i| !i.disabled));
 }
-
 
 // ---------------------------------------------------------------------------
 // Session memory

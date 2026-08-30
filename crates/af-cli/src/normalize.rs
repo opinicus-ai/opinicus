@@ -141,7 +141,11 @@ mod tests {
 
     #[test]
     fn a_shell_command_keeps_the_shell_as_the_program() {
-        let raw = process(&["bash", "-c", "psql -c 'SELECT 1'"], "/usr/bin/bash", "/tmp");
+        let raw = process(
+            &["bash", "-c", "psql -c 'SELECT 1'"],
+            "/usr/bin/bash",
+            "/tmp",
+        );
         assert_eq!(for_policy(&raw).program_name(), "bash");
     }
 

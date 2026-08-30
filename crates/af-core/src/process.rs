@@ -217,7 +217,10 @@ impl Action {
                 None => format!("connect to {addr}:{port}"),
             },
             Action::Input { source, data } => {
-                format!("{source:?} content: {}", crate::display::truncate(data, 160))
+                format!(
+                    "{source:?} content: {}",
+                    crate::display::truncate(data, 160)
+                )
             }
         }
     }

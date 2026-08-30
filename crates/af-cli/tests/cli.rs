@@ -157,7 +157,10 @@ fn the_off_mode_marks_every_file_and_network_rule() {
 fn an_unknown_filter_mode_is_refused() {
     let (code, _out, err) = firewall(&["policy", "list", "--syscall-filter", "everything"]);
     assert_ne!(code, 0, "the firewall must not guess what the user meant");
-    assert!(err.contains("write-only"), "the error names the modes:\n{err}");
+    assert!(
+        err.contains("write-only"),
+        "the error names the modes:\n{err}"
+    );
 }
 
 #[test]
@@ -293,7 +296,6 @@ fn the_user_can_allow_a_dangerous_command() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // Session memory in a replay
 // ---------------------------------------------------------------------------
@@ -317,9 +319,7 @@ fn session_start_line() -> String {
         String::from(r#""cwd":"/home/dev/app""#),
         String::from(r#""agent":{"kind":"claude_code"}"#),
         String::from(r#""schema_version":1"#),
-        String::from(
-            r#""baseline":{"git_remotes":["origin","https://github.com/acme/app.git"]}"#,
-        ),
+        String::from(r#""baseline":{"git_remotes":["origin","https://github.com/acme/app.git"]}"#),
     ]
     .join(",");
     let line = [
@@ -355,7 +355,14 @@ fn write_memory_trace(path: &Path) {
         exec_line(2, 0, 100, 1, "claude", &["claude"]),
         exec_line(3, 1, 200, 100, "bash", &["bash"]),
         // The chain of requirement B.1: read a credential, then send data out.
-        exec_line(4, 2, 300, 200, "cat", &["cat", "/home/dev/.aws/credentials"]),
+        exec_line(
+            4,
+            2,
+            300,
+            200,
+            "cat",
+            &["cat", "/home/dev/.aws/credentials"],
+        ),
         exec_line(
             5,
             3,
@@ -400,7 +407,10 @@ fn a_replay_finds_the_chain_the_burst_and_the_new_remote() {
         "memory.git.push-unknown-remote",
         "memory.filesystem.delete-burst",
     ] {
-        assert!(out.contains(wanted), "the replay must find {wanted}:\n{out}");
+        assert!(
+            out.contains(wanted),
+            "the replay must find {wanted}:\n{out}"
+        );
     }
 
     // The push to the remote that the work tree already had must stay quiet,
@@ -427,8 +437,22 @@ fn write_two_tool_call_trace(path: &Path) {
         session_start_line(),
         exec_line(2, 0, 100, 1, "claude", &["claude"]),
         // The first tool call reads the credential store.
-        exec_line(3, 1, 200, 100, "sh", &["sh", "-c", "cat ~/.aws/credentials"]),
-        exec_line(4, 2, 300, 200, "cat", &["cat", "/home/dev/.aws/credentials"]),
+        exec_line(
+            3,
+            1,
+            200,
+            100,
+            "sh",
+            &["sh", "-c", "cat ~/.aws/credentials"],
+        ),
+        exec_line(
+            4,
+            2,
+            300,
+            200,
+            "cat",
+            &["cat", "/home/dev/.aws/credentials"],
+        ),
         // The second tool call, a different subtree, sends data away.
         exec_line(5, 3, 201, 100, "sh", &["sh", "-c", "curl -T report.txt"]),
         exec_line(
@@ -577,7 +601,10 @@ fn a_replay_judges_a_file_open_and_a_connection() {
         "network.connect.remote-database",
         "memory.credentials.read-mark",
     ] {
-        assert!(out.contains(wanted), "the replay must find {wanted}:\n{out}");
+        assert!(
+            out.contains(wanted),
+            "the replay must find {wanted}:\n{out}"
+        );
     }
 
     // A source file and a local database are ordinary work.

@@ -47,9 +47,7 @@ impl Case {
 
     /// Adds one environment variable to the process and to the action.
     pub fn with_env(mut self, name: &str, value: &str) -> Self {
-        self.process
-            .env
-            .insert(name.to_string(), value.to_string());
+        self.process.env.insert(name.to_string(), value.to_string());
         if let Action::Exec { env, .. } = &mut self.action {
             env.insert(name.to_string(), value.to_string());
         }
@@ -174,10 +172,7 @@ pub fn is_quiet(verdict: &Verdict) -> bool {
 /// The helper does exactly what the launcher and the replay command do: it
 /// evaluates one action, applies the effects that the engine asks for, and
 /// then goes to the next action. The list of verdicts comes back in order.
-pub fn play(
-    policy: &dyn af_core::PolicyEngine,
-    steps: &[(TimestampNanos, &Case)],
-) -> Vec<Verdict> {
+pub fn play(policy: &dyn af_core::PolicyEngine, steps: &[(TimestampNanos, &Case)]) -> Vec<Verdict> {
     let mut memory = SessionMemory::new();
     let mut out = Vec::new();
     for (ts, case) in steps {

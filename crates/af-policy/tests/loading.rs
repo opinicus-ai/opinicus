@@ -158,7 +158,11 @@ fn a_directory_gives_every_rule_file_and_skips_other_files() {
     let rule_ids: Vec<String> = set.rules().into_iter().map(|r| r.rule_id).collect();
     assert!(rule_ids.contains(&"local.extra.marker".to_string()));
     assert!(rule_ids.contains(&"filesystem.shred".to_string()));
-    assert_eq!(rule_ids.len(), 2, "the text file must stay out: {rule_ids:?}");
+    assert_eq!(
+        rule_ids.len(),
+        2,
+        "the text file must stay out: {rule_ids:?}"
+    );
 }
 
 #[test]
@@ -180,9 +184,7 @@ fn a_local_rule_replaces_a_builtin_rule_with_the_same_id() {
 
 #[test]
 fn merge_adds_the_rules_of_another_set() {
-    let mut set = set_from(
-        "version: 1\nname: test.a\ndescription: First.\nrules: []\n",
-    );
+    let mut set = set_from("version: 1\nname: test.a\ndescription: First.\nrules: []\n");
     assert!(set.is_empty());
     let other = PolicySet::builtin().expect("the built-in pack loads");
     let count = other.len();
@@ -480,7 +482,10 @@ rules:
 "#,
     );
     let key = file_open("/home/dev/.ssh/id_ed25519", true);
-    assert_eq!(ids(&set.evaluate(&key.ctx())), vec!["test.glob".to_string()]);
+    assert_eq!(
+        ids(&set.evaluate(&key.ctx())),
+        vec!["test.glob".to_string()]
+    );
 
     let read_key = file_open("/home/dev/.ssh/id_ed25519", false);
     assert!(set.evaluate(&read_key.ctx()).matches.is_empty());
@@ -551,7 +556,10 @@ rules:
 "#,
     );
     let prod = exec(&["psql"]).with_env("PGHOST", "prod-db");
-    assert_eq!(ids(&set.evaluate(&prod.ctx())), vec!["test.value".to_string()]);
+    assert_eq!(
+        ids(&set.evaluate(&prod.ctx())),
+        vec!["test.value".to_string()]
+    );
 
     let dev = exec(&["psql"]).with_env("PGHOST", "dev-db");
     assert!(set.evaluate(&dev.ctx()).matches.is_empty());
@@ -781,7 +789,6 @@ rules:
     assert_eq!(failure.actual, Decision::ApprovalRequired);
     assert_eq!(failure.source, "test.yaml");
 }
-
 
 // ---------------------------------------------------------------------------
 // Session memory: rule format, load errors and lint

@@ -96,7 +96,10 @@ fn list(options: PolicyOptions, filter: SyscallFilter, json: bool) -> Result<i32
     }
 
     let width = rules.iter().map(|r| r.rule_id.len()).max().unwrap_or(10);
-    println!("{:<width$}  {:<18}  {:<18}  TITLE", "RULE", "RISK", "DECISION");
+    println!(
+        "{:<width$}  {:<18}  {:<18}  TITLE",
+        "RULE", "RISK", "DECISION"
+    );
     for rule in &rules {
         let mark = if is_reachable(rule, filter) {
             ""
@@ -112,10 +115,8 @@ fn list(options: PolicyOptions, filter: SyscallFilter, json: bool) -> Result<i32
         );
     }
 
-    let unreachable: Vec<&af_core::RuleInfo> = rules
-        .iter()
-        .filter(|r| !is_reachable(r, filter))
-        .collect();
+    let unreachable: Vec<&af_core::RuleInfo> =
+        rules.iter().filter(|r| !is_reachable(r, filter)).collect();
     println!(
         "\n{} rule(s), {} active with `--syscall-filter {}`",
         rules.len(),
@@ -196,11 +197,7 @@ fn test(options: PolicyOptions) -> Result<i32> {
         println!("{} policy test(s) passed", report.passed);
         Ok(0)
     } else {
-        eprintln!(
-            "{} passed, {} failed",
-            report.passed,
-            report.failures.len()
-        );
+        eprintln!("{} passed, {} failed", report.passed, report.failures.len());
         Ok(1)
     }
 }

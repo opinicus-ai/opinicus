@@ -98,7 +98,12 @@ fn describe_process(process: &ProcessInfo) -> String {
 ///
 /// Every block or question must be explainable, so this text always holds the
 /// chain, the operation, the policy and the decision.
-pub fn explain(ancestry: &[ProcessInfo], process: &ProcessInfo, action: &Action, verdict: &Verdict) -> String {
+pub fn explain(
+    ancestry: &[ProcessInfo],
+    process: &ProcessInfo,
+    action: &Action,
+    verdict: &Verdict,
+) -> String {
     let mut out = String::new();
     out.push_str(&provenance_chain(ancestry, process));
     out.push_str("\nAttempted operation:\n  ");

@@ -79,7 +79,16 @@ mod tests {
 
     #[test]
     fn parse_refuses_every_other_word() {
-        for text in ["", " ", "a", "yes", "auto", "auto-allow", "terminate", "ask deny"] {
+        for text in [
+            "",
+            " ",
+            "a",
+            "yes",
+            "auto",
+            "auto-allow",
+            "terminate",
+            "ask deny",
+        ] {
             assert_eq!(ApprovalMode::parse(text), None, "text: {text:?}");
         }
     }

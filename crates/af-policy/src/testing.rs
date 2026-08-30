@@ -114,7 +114,11 @@ pub(crate) fn run_tests(rules: &[CompiledRule]) -> TestReport {
             let case = build_case(test);
             let subject = Subject::with_memory(&case.context(), &memory);
             let (matched, _) = rule.evaluate_one(&subject);
-            let actual = if matched { rule.decision } else { Decision::Allow };
+            let actual = if matched {
+                rule.decision
+            } else {
+                Decision::Allow
+            };
             if actual == test.expect && matched == wants_match(test) {
                 report.passed += 1;
             } else {
@@ -137,8 +141,7 @@ pub(crate) fn run_tests(rules: &[CompiledRule]) -> TestReport {
 /// that expects `allow` must not match, because a quiet action matches no
 /// rule. A rule that reports without stopping needs `expect_match: true`.
 pub(crate) fn wants_match(test: &TestSource) -> bool {
-    test.expect_match
-        .unwrap_or(test.expect != Decision::Allow)
+    test.expect_match.unwrap_or(test.expect != Decision::Allow)
 }
 
 /// Builds the context of one declared test.
@@ -385,11 +388,7 @@ mod tests {
                 let case = build_case(test);
                 let ctx = case.context();
                 let (verdict, _) = set.evaluate_with_memory(&ctx, &memory);
-                let names: Vec<&str> = verdict
-                    .matches
-                    .iter()
-                    .map(|m| m.rule_id.as_str())
-                    .collect();
+                let names: Vec<&str> = verdict.matches.iter().map(|m| m.rule_id.as_str()).collect();
                 if test.expect == Decision::Allow {
                     if verdict.decision != Decision::Allow {
                         problems.push(format!(

@@ -75,11 +75,8 @@ pub use crate::SyscallFilter;
 /// The kernel tests this mask itself, which is what keeps the write-only
 /// filter cheap: the measured file workload fell from 1034 stops to 3.
 #[cfg(target_arch = "x86_64")]
-const WRITE_FLAGS: u32 = (libc::O_WRONLY
-    | libc::O_RDWR
-    | libc::O_CREAT
-    | libc::O_TRUNC
-    | libc::O_APPEND) as u32;
+const WRITE_FLAGS: u32 =
+    (libc::O_WRONLY | libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC | libc::O_APPEND) as u32;
 
 /// The error that a refused call returns to the program.
 const REFUSE_ERRNO: i32 = libc::EPERM;
@@ -632,7 +629,10 @@ mod tests {
 
     #[test]
     fn the_parts_that_mean_nothing_go_away() {
-        assert_eq!(clean("/home/dev/./app/../.ssh/id_rsa"), "/home/dev/.ssh/id_rsa");
+        assert_eq!(
+            clean("/home/dev/./app/../.ssh/id_rsa"),
+            "/home/dev/.ssh/id_rsa"
+        );
         assert_eq!(clean("/home//dev/"), "/home/dev");
     }
 
