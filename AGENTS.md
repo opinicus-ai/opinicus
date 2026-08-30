@@ -33,6 +33,10 @@ Orientation for coding agents working in this repository.
   done when its exit-gate measurement is committed next to runnable code —
   not when the code compiles. The benign corpus of M1 is the quiet test for
   every milestone that can ask a question.
+- Work is ticketed in `.rohrpost` (the `rp` CLI) under epic `[af]`, one
+  ticket per milestone with its exit gate in the body. `rp ready` shows the
+  unblocked work; claim with `rp claim`, resolve with a `rp comment` +
+  `rp close` that names the committed measurement.
 - Numbers in documents must come from a measurement with a source (a doc
   section, a test, or a spike under `research/` with runnable code).
 - Threat research runs through `research/threats/README.md` (skill:

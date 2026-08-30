@@ -26,3 +26,4 @@ research/spikes/**/*.so
 research/spikes/**/bin/
 research/spikes/**/results/
 research/spikes/**/scratch/
+.rohrpost/tickets.jsonl

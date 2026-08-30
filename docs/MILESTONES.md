@@ -256,3 +256,4 @@ code.
 | date | note |
 | --- | --- |
 | 2026-08-30 | plan adopted; M1–M7 planned; the Linux PoC (exec `ptrace` + `seccomp` filter, session memory, the 144-rule pack, replay, the threat catalogue) is the standing baseline |
+| 2026-08-30 | the ladder is tracked as rohrpost tickets under epic `[af]` (`rp tree`, `rp ready`); each `[af-N]` ticket carries its milestone's deliverables and exit gate |
