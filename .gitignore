@@ -3,6 +3,9 @@
 
 # Recorded traces. A trace can hold command lines of the user.
 *.jsonl
+# ... but the rohrpost ticket store is git-native and tracked.
+!.rohrpost/log.jsonl
+!.rohrpost/tickets.jsonl
 
 # Working directory of the demonstration and of the end-to-end test.
 /tmp
@@ -26,4 +29,3 @@ research/spikes/**/*.so
 research/spikes/**/bin/
 research/spikes/**/results/
 research/spikes/**/scratch/
-.rohrpost/tickets.jsonl
