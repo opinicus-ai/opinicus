@@ -225,6 +225,28 @@ pub struct BaselineMissingSource {
     pub capture: String,
 }
 
+/// A question about a variable token that the child shell expands.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VarResolvesSource {
+    /// Pattern with exactly one group that reads the variable name from the
+    /// command line, or from the input text of an input action.
+    pub capture: String,
+    /// Where the value may land for the condition to match.
+    pub to: Vec<VarResolveTarget>,
+}
+
+/// Where the value of a variable may land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VarResolveTarget {
+    /// The home directory of the child process.
+    Home,
+    /// The root of the file system, which an empty value also produces when
+    /// the token carries a trailing slash.
+    Root,
+}
+
 /// One condition.
 ///
 /// Every field is optional. Every field that the file writes must match, so
@@ -318,6 +340,9 @@ pub struct MatchSource {
     /// A value that the session did not know at its start.
     #[serde(default)]
     pub baseline_missing: Option<BaselineMissingSource>,
+    /// A variable token that the child shell expands to a named target.
+    #[serde(default)]
+    pub var_resolves: Option<VarResolvesSource>,
 }
 
 /// One process record of a declared test.

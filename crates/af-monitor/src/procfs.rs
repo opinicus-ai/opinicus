@@ -13,8 +13,11 @@ use af_core::{Pid, ProcessInfo};
 /// Environment names that the monitor always keeps.
 ///
 /// A rule needs these names to see which database, cluster or cloud account a
-/// command works on. The list holds no name that normally holds a secret.
+/// command works on, and `HOME` lets a rule compare a variable of the command
+/// line with the home directory that the child shell will expand it to. The
+/// list holds no name that normally holds a secret.
 pub const DEFAULT_ENV_ALLOWLIST: &[&str] = &[
+    "HOME",
     "PGHOST",
     "PGDATABASE",
     "PGUSER",

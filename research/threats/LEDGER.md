@@ -20,9 +20,9 @@ for how to run it again.
 
 | item | count |
 | --- | ---: |
-| incident reports in `incidents/` | 75 |
-| scenarios in `scenarios/` | 199 |
-| scenarios the monitor can see today (`exec` or `input` only) | **125** |
+| incident reports in `incidents/` | 76 |
+| scenarios in `scenarios/` | 200 |
+| scenarios the monitor can see today (`exec` or `input` only) | **126** |
 | scenarios that need an observable the monitor does not make | **74** |
 
 ## Observable summary
@@ -33,7 +33,7 @@ not make `file_open` or `network_connect`.
 
 | the signal needs | scenarios | state |
 | --- | ---: | --- |
-| `exec` or `input` only | 125 | can become a rule now |
+| `exec` or `input` only | 126 | can become a rule now |
 | `file_open` or `network_connect` | 74 | blocked on the monitor |
 
 **37 percent of the threat catalogue cannot be expressed today.** This is
@@ -54,13 +54,13 @@ monitor does not make.
 | --- | ---: | ---: | ---: | ---: |
 | cross (spans packs) | 45 | 13 | 29 | 29 |
 | process | 47 | 5 | 13 | 39 |
-| filesystem | 22 | 8 | 16 | 14 |
+| filesystem | 22 | 9 | 16 | 15 |
 | network | 21 | 2 | 8 | 15 |
 | cloud | 15 | 2 | 4 | 13 |
 | git | 9 | 4 | 3 | 10 |
 | database | 3 | 1 | 1 | 3 |
 | mcp | 1 | 0 | 0 | 1 |
-| **total** | **163** | **35** | **74** | **124** |
+| **total** | **163** | **36** | **74** | **125** |
 
 ## The interruption budget
 
@@ -94,7 +94,7 @@ facts, the sources and the lesson for the policy pack.
 | --- | ---: |
 | supply | 11 |
 | inject | 9 |
-| behavior | 8 |
+| behavior | 9 |
 | mcp | 8 |
 | evade | 7 |
 | exfil | 7 |
@@ -111,7 +111,7 @@ severity and a coverage state.
 
 | axis | scenarios | gap | partial | blocked on an observable |
 | --- | ---: | ---: | ---: | ---: |
-| behavior | 19 | 14 | 5 | 5 |
+| behavior | 20 | 14 | 6 | 5 |
 | cloud | 21 | 18 | 3 | 7 |
 | evade | 21 | 17 | 4 | 7 |
 | exfil | 20 | 18 | 2 | 12 |
@@ -144,3 +144,4 @@ Behaviour that no observable of any planned layer reports.
 | 2026-08 | 57 added | 147 added | first research run, ten axes |
 | 2026-08 | — | — | ledger rebuilt from the files on disk; observable and interruption-budget analysis added |
 | 2026-08 | 18 added | 52 added | rerun added 18 incident reports and 52 scenarios; no axis failed |
+| 2026-08 | 1 added | 1 added | manual add: Simon Brook LinkedIn report, Auto Mode `$HOME` drift home wipe; distinct from the 2025-12 `rm -rf ~/` twin |

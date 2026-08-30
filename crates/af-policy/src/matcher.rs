@@ -10,7 +10,7 @@ use af_core::{Action, EvalContext, MarkScope, Pid, ProcessInfo, SessionMemory, T
 use regex::Regex;
 
 use crate::glob::Glob;
-use crate::source::{ActionKind, DistinctKey, MatchSource, Words};
+use crate::source::{ActionKind, DistinctKey, MatchSource, VarResolveTarget, Words};
 
 /// An empty memory for a caller that keeps none.
 ///
@@ -57,6 +57,7 @@ pub(crate) struct Matcher {
     empty_any_of: bool,
     marked: Option<MarkedCondition>,
     baseline_missing: Option<BaselineCondition>,
+    var_resolves: Option<VarResolvesCondition>,
 }
 
 /// A compiled question about a mark of an earlier action.
@@ -77,6 +78,17 @@ pub(crate) struct BaselineCondition {
     set: String,
     /// Pattern with exactly one group over the joined command line.
     capture: Regex,
+}
+
+/// A compiled question about a variable token that the child shell expands.
+#[derive(Debug)]
+pub(crate) struct VarResolvesCondition {
+    /// Pattern with exactly one group over the command line: the name.
+    capture: Regex,
+    /// True when the value may be the home directory of the child.
+    home: bool,
+    /// True when the value may be the root, or empty.
+    root: bool,
 }
 
 impl Matcher {
@@ -119,6 +131,7 @@ impl Matcher {
             empty_any_of,
             marked: compile_marked(source)?,
             baseline_missing: compile_baseline(source)?,
+            var_resolves: compile_var_resolves(source)?,
         })
     }
 
@@ -212,7 +225,11 @@ impl Matcher {
         }
         if !self.path_prefix.is_empty() {
             match subject.path {
-                Some(path) if self.path_prefix.iter().any(|p| path.starts_with(p.as_str())) => {}
+                Some(path)
+                    if self
+                        .path_prefix
+                        .iter()
+                        .any(|p| path.starts_with(p.as_str())) => {}
                 _ => return false,
             }
         }
@@ -230,7 +247,11 @@ impl Matcher {
         }
         if !self.cwd_not_prefix.is_empty() {
             if let Some(cwd) = subject.cwd {
-                if self.cwd_not_prefix.iter().any(|p| cwd.starts_with(p.as_str())) {
+                if self
+                    .cwd_not_prefix
+                    .iter()
+                    .any(|p| cwd.starts_with(p.as_str()))
+                {
                     return false;
                 }
             }
@@ -313,6 +334,11 @@ impl Matcher {
                 return false;
             }
         }
+        if let Some(condition) = &self.var_resolves {
+            if !subject.var_resolves(condition) {
+                return false;
+            }
+        }
         true
     }
 
@@ -349,7 +375,11 @@ impl Matcher {
             ActionKind::FileOpen,
             !self.path_prefix.is_empty(),
         );
-        add("path_glob", ActionKind::FileOpen, !self.path_glob.is_empty());
+        add(
+            "path_glob",
+            ActionKind::FileOpen,
+            !self.path_glob.is_empty(),
+        );
         add(
             "path_matches",
             ActionKind::FileOpen,
@@ -407,6 +437,7 @@ impl Matcher {
             && !self.empty_any_of
             && self.marked.is_none()
             && self.baseline_missing.is_none()
+            && self.var_resolves.is_none()
     }
 
     /// Returns true when `any_of` is present but holds no condition.
@@ -470,6 +501,47 @@ fn compile_baseline(source: &MatchSource) -> Result<Option<BaselineCondition>, C
     }))
 }
 
+/// Compiles the `var_resolves` block of a condition.
+///
+/// The pattern must hold exactly one group, because the group is the name of
+/// the variable that the engine looks up in the environment of the child.
+fn compile_var_resolves(
+    source: &MatchSource,
+) -> Result<Option<VarResolvesCondition>, CompileError> {
+    let Some(block) = &source.var_resolves else {
+        return Ok(None);
+    };
+    let capture = Regex::new(&block.capture).map_err(|err| {
+        format!(
+            "field `var_resolves.capture` has a bad pattern `{}`: {err}",
+            block.capture
+        )
+    })?;
+    let groups = capture.captures_len() - 1;
+    if groups != 1 {
+        return Err(format!(
+            "field `var_resolves.capture` needs exactly one group, but `{}` has {groups}",
+            block.capture
+        ));
+    }
+    let mut home = false;
+    let mut root = false;
+    for target in &block.to {
+        match target {
+            VarResolveTarget::Home => home = true,
+            VarResolveTarget::Root => root = true,
+        }
+    }
+    if !home && !root {
+        return Err("field `var_resolves.to` names no target".to_string());
+    }
+    Ok(Some(VarResolvesCondition {
+        capture,
+        home,
+        root,
+    }))
+}
+
 fn words(source: &Option<Words>) -> Vec<String> {
     source.as_ref().map(|w| w.0.clone()).unwrap_or_default()
 }
@@ -502,9 +574,8 @@ fn compile_env(
             out.push((name.clone(), None));
             continue;
         }
-        let compiled = Regex::new(pattern).map_err(|err| {
-            format!("field `env.{name}` has a bad pattern `{pattern}`: {err}")
-        })?;
+        let compiled = Regex::new(pattern)
+            .map_err(|err| format!("field `env.{name}` has a bad pattern `{pattern}`: {err}"))?;
         out.push((name.clone(), Some(compiled)));
     }
     Ok(out)
@@ -697,15 +768,48 @@ impl<'a> Subject<'a> {
         }
     }
 
+    /// Returns true when a variable token of the command line, or of the
+    /// input text, expands to a target that the condition names.
+    ///
+    /// The value comes from the environment of the child, never from the
+    /// command line: the shell that runs the command is the only judge that
+    /// matters, and an approval layer that reads the value anywhere else has
+    /// approved the wrong command more than once. A name that the environment
+    /// does not hold keeps the condition quiet, because a missing name says
+    /// nothing about the value the child will see.
+    fn var_resolves(&self, condition: &VarResolvesCondition) -> bool {
+        let text = match self.kind {
+            ActionKind::Exec => Some(self.argv_joined.as_str()),
+            ActionKind::Input => self.input,
+            _ => None,
+        };
+        let Some(text) = text else {
+            return false;
+        };
+        let home = self.env_value("HOME").map(without_trailing_slash);
+        for found in condition.capture.captures_iter(text) {
+            let Some(name) = found.get(1) else {
+                continue;
+            };
+            let Some(value) = self.env_value(name.as_str()) else {
+                continue;
+            };
+            let value = without_trailing_slash(value);
+            let root = value.is_empty();
+            let home = home.is_some_and(|h| !h.is_empty() && value == h);
+            if (condition.root && root) || (condition.home && home) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Returns the value that makes two hits of a rule different.
     pub(crate) fn distinct_key(&self, kind: DistinctKey) -> Option<String> {
         match kind {
             DistinctKey::None => None,
             DistinctKey::Path => self.path.map(str::to_string),
-            DistinctKey::Host => self
-                .host
-                .or(self.addr)
-                .map(str::to_string),
+            DistinctKey::Host => self.host.or(self.addr).map(str::to_string),
             DistinctKey::Program => self
                 .action_program
                 .filter(|name| !name.is_empty())
@@ -761,4 +865,11 @@ fn kind_of(action: &Action) -> ActionKind {
 /// Returns the last part of a path.
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Returns the path without trailing slashes, so that `/Users/simon/` and
+/// `/Users/simon` compare equal. The root becomes the empty string, which an
+/// empty value also produces when the token carries a trailing slash.
+fn without_trailing_slash(path: &str) -> &str {
+    path.trim_end_matches('/')
 }

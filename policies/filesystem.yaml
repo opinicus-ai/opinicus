@@ -571,6 +571,68 @@ rules:
         expect: allow
         process: { pid: 293, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf ./target"], cwd: /home/dev/app }
 
+  # sources: research/threats/incidents/behavior-claude-code-automode-home-wipe.md
+  - id: filesystem.delete.variable-home-root
+    title: Recursive deletion of a variable that resolves to the home directory or the root
+    category: filesystem
+    risk: approval_required
+    decision: approval_required
+    reason: The variable of the delete target expands in the child shell to the home directory or the root. The agent judged the value in a different shell, and so did the approval layer before it.
+    match:
+      any_of:
+        - action: exec
+          program: [sh, bash, zsh, dash, ksh, fish, sudo, doas, env, xargs, timeout, nice, busybox, make, npm, pnpm, yarn]
+          all_of:
+            - argv_matches: '(?:^|\s)rm(?:\s|$)'
+            - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+            - var_resolves:
+                capture: '(?:^|\s)rm(?:[ \t]+(?:-[^\s;&|]+|[^-$\s;&|][^\s;&|]*))*[ \t]+[\x22\x27]?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?'
+                to: [home, root]
+        - action: input
+          all_of:
+            - input_matches: '(?:^|\s)rm(?:\s|$)'
+            - input_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+            - var_resolves:
+                capture: '(?:^|\s)rm(?:[ \t]+(?:-[^\s;&|]+|[^-$\s;&|][^\s;&|]*))*[ \t]+[\x22\x27]?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?'
+                to: [home, root]
+    exceptions:
+      - argv_matches: '\$\{[A-Za-z_][A-Za-z0-9_]*:[-?=+]'
+      - input_matches: '\$\{[A-Za-z_][A-Za-z0-9_]*:[-?=+]'
+    tests:
+      - name: the scratch variable that holds the home directory needs approval
+        expect: approval_required
+        process: { pid: 294, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf $DATA_DIR"], cwd: /home/dev/app, env: { DATA_DIR: /Users/simon, HOME: /Users/simon } }
+        ancestry: [{ comm: claude }]
+      - name: the home directory with a trailing slash also needs approval
+        expect: approval_required
+        process: { pid: 295, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, 'rm -rf "$CLEAN_DIR/"'], cwd: /home/dev/app, env: { CLEAN_DIR: /Users/simon/, HOME: /Users/simon } }
+        ancestry: [{ comm: claude }]
+      - name: the empty variable that pushes the delete onto the root needs approval
+        expect: approval_required
+        process: { pid: 296, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, 'rm -rf "$BASE/"'], cwd: /home/dev/app, env: { BASE: "", HOME: /home/dev } }
+        ancestry: [{ comm: claude }]
+      - name: a delete over standard input that aims at the home directory needs approval
+        expect: approval_required
+        process: { pid: 297, comm: bash, exe: /usr/bin/bash, argv: [bash, -s], env: { CLEAN_DIR: /Users/simon, HOME: /Users/simon } }
+        ancestry: [{ comm: claude }]
+        input: { source: stdin, data: "rm -rf $CLEAN_DIR\n" }
+      - name: the build directory inside the project stays quiet
+        expect: allow
+        process: { pid: 298, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, 'rm -rf "$BUILD_DIR"'], cwd: /home/dev/app, env: { BUILD_DIR: /home/dev/app/target, HOME: /home/dev } }
+        ancestry: [{ comm: claude }]
+      - name: a variable the environment does not hold stays quiet
+        expect: allow
+        process: { pid: 299, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "rm -rf $TARGET/sub"], cwd: /home/dev/app, env: { HOME: /home/dev } }
+        ancestry: [{ comm: claude }]
+      - name: a guarded variable stays quiet
+        expect: allow
+        process: { pid: 306, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, 'rm -rf "${BUILD_DIR:?}"'], cwd: /home/dev/app, env: { BUILD_DIR: "", HOME: /home/dev } }
+        ancestry: [{ comm: claude }]
+      - name: a variable that only stands beside the delete stays quiet
+        expect: allow
+        process: { pid: 307, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "SCRATCH=$DATA_DIR; rm -rf ./target"], cwd: /home/dev/app, env: { DATA_DIR: /Users/simon, HOME: /Users/simon } }
+        ancestry: [{ comm: claude }]
+
   # sources: research/threats/incidents/fs-codex-app-windows-outside-project.md
   - id: filesystem.delete.above-work-tree
     title: Recursive deletion above the work tree

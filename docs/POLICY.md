@@ -314,6 +314,48 @@ pushes to. A session that changes no remote never sees the rule. The same
 holds for a work tree with no remote at session start, where the baseline is
 empty: the first `remote add` plus `push` asks once.
 
+#### `var_resolves` — what does the variable expand to?
+
+A match field for `exec` and `input`. The block reads a variable name out of
+the command line, or out of the input text of an `input` action, and asks
+where the child shell will expand that variable to.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `capture` | regex | Pattern with **exactly one** group. The group is the variable name. |
+| `to` | list | Where the value may land: `home`, `root`, or both. |
+
+The value comes from the environment **of the child**, never from the
+command line and never from anything the agent believes about the variable.
+The shell that runs the command is the only judge that matters: an approval
+layer that reads the value anywhere else has approved the wrong command more
+than once. `home` compares against `HOME` of that same environment, and both
+sides lose their trailing slashes, so `/Users/simon/` and `/Users/simon`
+are equal. `root` also accepts an empty value, because a quoted empty
+variable before a slash expands to the root.
+
+A name that the environment does not hold keeps the block quiet: the monitor
+keeps selected names only, and a missing name says nothing about the value
+the child will see. A pattern without exactly one group, or a `to` list with
+no target, is a load error.
+
+```yaml
+    match:
+      action: exec
+      program: [sh, bash, zsh]
+      all_of:
+        - argv_matches: '(?:^|\s)rm(?:\s|$)'
+        - argv_matches: '(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)'
+        - var_resolves:
+            capture: '(?:^|\s)rm(?:[ \t]+(?:-[^\s;&|]+|[^-$\s;&|][^\s;&|]*))*[ \t]+[\x22\x27]?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?'
+            to: [home, root]
+```
+
+The pattern in the example reads the variable only after the `rm` and its
+flags, so a variable that stands beside the delete (`SCRATCH=$DIR; rm -rf
+./target`) keeps the rule quiet. `filesystem.delete.variable-home-root` is
+the built-in rule that carries it.
+
 ### Regular expressions
 
 The engine uses the `regex` crate. It has no look-around, because it always

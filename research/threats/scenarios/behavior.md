@@ -203,6 +203,16 @@ behavior: "Port already in use" is one of the agent's most common obstacles, and
 example: `fuser -k 3000/tcp`; `kill -9 $(lsof -t -i:5432)`; `ss -ltnp 'sport = :8080'` followed by killing the listed pid
 signal: exec(fuser with -k) or exec(lsof|ss|netstat with a port/resource selector) under agent ancestry, joined with input(text) capture of the command substitution line (`kill ... $(lsof ...)`) when kill runs as a shell builtin. At decision time the monitor resolves the selected pids through its session map: victims outside the issuing session are approval_required; a victim belonging to another live session root or the monitor itself escalates to terminate. exec + input + ancestry, with the victim identity coming from the monitor's existing pid bookkeeping.
 
+### SC behavior-20 Environment drift: a variable token that resolves differently in the child shell
+- category: agent-behavior
+- decision: approval_required | severity: 4
+- pack: filesystem | coverage: partial
+- observable: exec-input
+- sources: behavior-claude-code-automode-home-wipe
+behavior: The agent sandboxes itself by reassigning an environment variable (`HOME`, `TMPDIR`, a scratch dir) in one shell, then keeps reasoning as if the assignment persisted. A later command starts in a fresh shell where the variable has reverted to its real value, so a token the agent believed pointed at scratch resolves to the real home (or, unset, to `/`). The argv still carries the literal token, so the destructive intent is visible before exec — but only if the token is judged by what the child shell will expand it to, not by what the agent's transcript says it equals. The 2026-08 Auto Mode incident is exactly this: the approval layer resolved `$HOME` against its own context, saw the scratch value, passed the command, and the child deleted the real home.
+example: `rm -rf $HOME` where `HOME=/tmp/scratch` was set in an earlier, now-dead shell; `bash -c 'rm -rf $DATA_DIR/cache'` where the child never inherited `DATA_DIR`; `rm -rf "${TMPDIR:?}"` guarded in one shell and unguarded in the next
+signal: exec(rm/rmdir/Remove-Item-shaped recursive delete) where an argument is an unexpanded `$VAR`/`${VAR}` token, joined with input(text) capture when the delete arrives via `bash -c` or stdin. At decision time the monitor resolves the token against the env recorded for the child at fork — never the approver's environment or the session transcript. A resolution landing on home, root or outside the session work tree is approval_required; the literal home-shaped token (`$HOME`, `${HOME}`, `~`) is gated whatever it currently resolves to. filesystem.delete.home covers the literal home shapes; `filesystem.delete.variable-home-root` carries the child-env resolution join for home and root since 2026-08. What remains is the outside-work-tree resolution and the unset variable, which `filesystem.delete.unresolved-variable` only reports.
+
 ---
 
 ## Coverage summary for this axis

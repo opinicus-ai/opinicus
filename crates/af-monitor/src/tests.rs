@@ -674,7 +674,12 @@ fn environment_keeps_only_useful_names() {
         procfs::keep_env("PGDATABASE", "customer_prod", &extra),
         Some("customer_prod".to_string())
     );
-    assert_eq!(procfs::keep_env("HOME", "/home/dev", &extra), None);
+    // HOME stays, because a rule compares a variable with the home directory
+    // that the child shell expands it to.
+    assert_eq!(
+        procfs::keep_env("HOME", "/home/dev", &extra),
+        Some("/home/dev".to_string())
+    );
     // The name stays, because a rule can use its presence. The value goes.
     assert_eq!(
         procfs::keep_env("PGPASSWORD", "hunter2", &extra),
@@ -861,7 +866,10 @@ fn connect_shell() -> Option<&'static str> {
 fn listening_port() -> (std::net::TcpListener, u16) {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("a free port on the loopback address");
-    let port = listener.local_addr().expect("the address of the port").port();
+    let port = listener
+        .local_addr()
+        .expect("the address of the port")
+        .port();
     (listener, port)
 }
 
@@ -973,7 +981,11 @@ fn a_refused_open_fails_and_the_program_runs_on() {
         after.exists(),
         "the program keeps running after a refusal, so the next command works"
     );
-    assert_eq!(outcome.exit_code, Some(0), "the session itself is untouched");
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "the session itself is untouched"
+    );
     assert!(!outcome.terminated_by_firewall);
     assert!(
         handler.opened("secret.env", true),
@@ -1153,7 +1165,9 @@ fn the_capability_report_follows_the_filter_mode() {
     assert!(detail_of(&write_only, "file_open_events").0);
     assert!(detail_of(&write_only, "network_events").0);
     assert!(
-        detail_of(&write_only, "file_open_events").1.contains("read"),
+        detail_of(&write_only, "file_open_events")
+            .1
+            .contains("read"),
         "the report must name the read that this mode does not see"
     );
 
