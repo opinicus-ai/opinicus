@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Firewall — Architecture Overview</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --color-paper:       #f5f5f5;
+      --color-paper-2:     #ececec;
+      --color-ink:         #2d3142;
+      --color-muted:       #4f5d75;
+      --color-soft:        #7a8399;
+      --color-rule:        rgba(45,49,66,0.12);
+      --color-accent:      #eb6c36;
+      --color-accent-tint: rgba(235,108,54,0.08);
+      --color-link:        #2e5aa8;
+      --font-sans:   'Geist', system-ui, sans-serif;
+      --font-serif:  'Instrument Serif', 'Times New Roman', serif;
+      --font-mono:   'Geist Mono', ui-monospace, Menlo, monospace;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      min-height: 100vh;
+      padding: 3rem 2rem;
+      color: var(--color-ink);
+    }
+
+    .container { max-width: 1320px; margin: 0 auto; }
+
+    .header { margin-bottom: 2rem; }
+
+    .header-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.75rem;
+    }
+
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.75rem, 3vw + 1rem, 2.5rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      color: var(--color-ink);
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      font-size: 1rem;
+      line-height: 1.55;
+      color: var(--color-muted);
+      max-width: 60ch;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr 0.85fr;
+      gap: 1rem;
+      margin: 1.5rem 0 3rem;
+    }
+
+    .card {
+      background: #ffffff;
+      border-radius: 6px;
+      border: 1px solid var(--color-rule);
+      padding: 1.25rem;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 0.875rem;
+      padding-bottom: 0.875rem;
+      border-bottom: 1px solid rgba(45,49,66,0.08);
+    }
+
+    .card-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .card-dot.ink    { background: var(--color-ink); }
+    .card-dot.muted  { background: var(--color-muted); }
+    .card-dot.coral  { background: var(--color-accent); }
+    .card-dot.link   { background: var(--color-link); }
+    .card-dot.soft   { background: var(--color-soft); }
+
+    .card h3 {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--color-ink);
+      letter-spacing: -0.005em;
+    }
+
+    .card ul {
+      list-style: none;
+      color: var(--color-muted);
+      font-size: 0.8125rem;
+      line-height: 1.55;
+    }
+
+    .card li {
+      margin-bottom: 0.3rem;
+      padding-left: 0.875rem;
+      position: relative;
+    }
+
+    .card li::before {
+      content: '—';
+      position: absolute;
+      left: 0;
+      color: rgba(45,49,66,0.25);
+      font-size: 0.75rem;
+    }
+
+    section { margin-bottom: 3.5rem; }
+
+    .section-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-accent);
+      margin-bottom: 0.5rem;
+    }
+
+    section h2 {
+      font-family: var(--font-serif);
+      font-size: 1.5rem;
+      font-weight: 400;
+      letter-spacing: -0.01em;
+      margin-bottom: 0.375rem;
+    }
+
+    .section-caption {
+      font-size: 0.9375rem;
+      line-height: 1.55;
+      color: var(--color-muted);
+      max-width: 70ch;
+      margin-bottom: 1.25rem;
+    }
+
+    .diagram-container {
+      background: transparent;
+      border: none;
+      padding: 0;
+      overflow-x: auto;
+    }
+
+    svg { width: 100%; min-width: 1000px; display: block; }
+
+    .footer {
+      margin-top: 1rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid rgba(45,49,66,0.10);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      color: var(--color-soft);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <div class="header">
+      <p class="header-eyebrow">Architecture · C4-style overview</p>
+      <h1>Agent Firewall</h1>
+      <p class="subtitle">A local security layer for coding agents: it follows every process the agent starts, and a dangerous action is judged and stopped before it runs — at the exec boundary and at the system-call boundary.</p>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-dot coral"></span>
+          <h3>Seven layers, one shared contract</h3>
+        </div>
+        <ul>
+          <li>Every crate talks through the types of <span style="font-family:var(--font-mono);font-size:0.75rem">af-core</span></li>
+          <li>No layer touches a platform detail of another</li>
+          <li>A macOS or Windows collector swaps in without changes elsewhere</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-dot ink"></span>
+          <h3>Two enforcement boundaries</h3>
+        </div>
+        <ul>
+          <li>Entry of <span style="font-family:var(--font-mono);font-size:0.75rem">execve</span> — the new program never ran</li>
+          <li>Seccomp stop of a held open / connect — no byte written, no packet sent</li>
+          <li>A path is sound to refuse with, never to allow with</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-dot muted"></span>
+          <h3>Deterministic by design</h3>
+        </div>
+        <ul>
+          <li>No model, no network, no clock in the decision path</li>
+          <li>The recorded trace replays to the same verdict</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Section 01 · System context (C4 L1) -->
+    <section>
+      <p class="section-eyebrow">01 · System context — C4 level 1</p>
+      <h2>The firewall sits between the agent and the machine</h2>
+      <p class="section-caption">One command starts the session. The firewall traces the whole process tree, judges each action against policy, and either lets it run, refuses it with an ordinary permission error, or kills the tree. Only the kernel and the developer are outside the loop.</p>
+      <div class="diagram-container">
+        <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="c1-context-title c1-context-desc">
+          <title id="c1-context-title">Agent Firewall system context</title>
+          <desc id="c1-context-desc">System context: a developer runs the Agent Firewall, which traces the coding agent's process tree through the Linux kernel, matches rules loaded from policy files, prompts the developer for approval, and appends decisions to a trace journal.</desc>
+          <defs>
+            <marker id="c1-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+            </marker>
+            <marker id="c1-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/>
+            </marker>
+          </defs>
+
+          <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+          <!-- Machine zone (drawn before arrows) -->
+          <rect x="264" y="88" width="976" height="496" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <rect x="276" y="92" width="192" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="372" y="101" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">THE MACHINE · LINUX HOST</text>
+
+          <!-- Arrows -->
+          <line x1="200" y1="332" x2="440" y2="332" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c1-arrow)"/>
+          <rect x="296" y="310" width="40" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="316" y="319" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RUNS</text>
+
+          <line x1="648" y1="332" x2="792" y2="332" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#c1-arrow-accent)"/>
+          <rect x="696" y="310" width="64" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="728" y="319" fill="#eb6c36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TRACE + BPF</text>
+
+          <line x1="956" y1="296" x2="956" y2="168" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c1-arrow)"/>
+          <rect x="964" y="228" width="52" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="990" y="237" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SYSCALLS</text>
+
+          <path d="M 944,136 H 568 Q 560,136 560,144 V 280" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c1-arrow)"/>
+          <rect x="720" y="114" width="56" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="748" y="123" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RAW STOPS</text>
+
+          <path d="M 488,280 V 72 Q 488,64 496,64 H 992 Q 1000,64 1000,72 V 104" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c1-arrow)"/>
+          <rect x="400" y="180" width="80" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="440" y="189" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ENFORCE VERDICT</text>
+
+          <path d="M 880,392 V 432 Q 880,440 888,440 H 984 Q 992,440 992,448 V 472" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c1-arrow)"/>
+          <rect x="912" y="418" width="76" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="950" y="427" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">OPEN · CONNECT</text>
+
+          <line x1="528" y1="384" x2="528" y2="452" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c1-arrow)"/>
+          <rect x="536" y="408" width="64" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="568" y="417" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">READS RULES</text>
+
+          <path d="M 472,384 V 488 Q 472,496 464,496 H 448" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c1-arrow)"/>
+          <rect x="416" y="436" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="440" y="445" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">APPEND</text>
+
+          <line x1="440" y1="352" x2="200" y2="352" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#c1-arrow)"/>
+          <rect x="288" y="360" width="44" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="310" y="369" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PROMPT</text>
+
+          <!-- Nodes -->
+          <rect x="72" y="300" width="128" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="72" y="300" width="128" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+          <rect x="80" y="306" width="30" height="12" rx="2" fill="transparent" stroke="rgba(122,131,153,0.40)" stroke-width="0.8"/>
+          <text x="95" y="315" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">USER</text>
+          <text x="136" y="330" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Developer</text>
+          <text x="136" y="347" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">shell · /dev/tty</text>
+
+          <rect x="440" y="280" width="208" height="104" rx="6" fill="#f5f5f5"/>
+          <rect x="440" y="280" width="208" height="104" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+          <rect x="448" y="286" width="38" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+          <text x="467" y="295" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SYSTEM</text>
+          <text x="544" y="324" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Agent Firewall</text>
+          <text x="544" y="341" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">af-cli + af-monitor</text>
+          <text x="544" y="357" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">user space · no root</text>
+
+          <rect x="792" y="296" width="176" height="96" rx="6" fill="#f5f5f5"/>
+          <rect x="792" y="296" width="176" height="96" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+          <rect x="800" y="302" width="26" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+          <text x="813" y="311" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+          <text x="880" y="330" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Coding agent</text>
+          <text x="880" y="347" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">claude → bash → psql</text>
+
+          <rect x="944" y="104" width="176" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="944" y="104" width="176" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+          <rect x="952" y="110" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+          <text x="964" y="119" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OS</text>
+          <text x="1032" y="138" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Linux kernel</text>
+          <text x="1032" y="155" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ptrace · seccomp BPF</text>
+
+          <rect x="944" y="472" width="176" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="944" y="472" width="176" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+          <rect x="952" y="478" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+          <text x="964" y="487" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OS</text>
+          <text x="1032" y="506" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Filesystem + net</text>
+          <text x="1032" y="523" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">open · connect</text>
+
+          <rect x="440" y="452" width="176" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="440" y="452" width="176" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <rect x="448" y="458" width="32" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+          <text x="464" y="467" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RULES</text>
+          <text x="528" y="486" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Policy rules</text>
+          <text x="528" y="503" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">policies/*.yaml</text>
+
+          <rect x="272" y="452" width="176" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="272" y="452" width="176" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <rect x="280" y="458" width="24" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+          <text x="292" y="467" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LOG</text>
+          <text x="360" y="486" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Trace journal</text>
+          <text x="360" y="503" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">session.jsonl</text>
+
+          <!-- Legend -->
+          <line x1="40" y1="636" x2="1240" y2="636" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <text x="40" y="658" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+          <rect x="40" y="666" width="16" height="12" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+          <text x="64" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">System (focal)</text>
+          <rect x="250" y="666" width="16" height="12" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+          <text x="274" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">External / OS</text>
+          <rect x="460" y="666" width="16" height="12" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <text x="484" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Store / rules &amp; trace</text>
+          <rect x="670" y="666" width="16" height="12" rx="2" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+          <text x="694" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">User / input</text>
+          <line x1="880" y1="672" x2="894" y2="672" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c1-arrow)"/>
+          <text x="904" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Control / data flow</text>
+          <line x1="1090" y1="672" x2="1104" y2="672" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#c1-arrow-accent)"/>
+          <text x="1114" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Monitoring path</text>
+        </svg>
+      </div>
+    </section>
+
+    <!-- Section 02 · Containers (C4 L2) -->
+    <section>
+      <p class="section-eyebrow">02 · Containers — C4 level 2</p>
+      <h2>Seven crates, one contract, two decision lanes</h2>
+      <p class="section-caption">The launcher starts the session and the monitor reports one normalized <span style="font-family:var(--font-mono);font-size:0.85rem">Event</span> per kernel stop. The decision lane answers with a verdict; the recorder and the engine never write memory directly — the caller applies the effects, in event order.</p>
+      <div class="diagram-container">
+        <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="c2-containers-title c2-containers-desc">
+          <title id="c2-containers-title">Agent Firewall containers</title>
+          <desc id="c2-containers-desc">Container diagram of the seven crates: af-cli launches, af-monitor traces via ptrace and seccomp, af-core holds the shared event and decision types, af-policy, af-provenance and af-approval form the decision lane, af-recorder writes the trace journal, and rule files feed the session.</desc>
+          <defs>
+            <marker id="c2-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+            </marker>
+          </defs>
+
+          <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+          <!-- Zones -->
+          <rect x="56" y="216" width="456" height="184" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <rect x="64" y="220" width="168" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="148" y="229" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">USER SPACE · SESSION</text>
+
+          <rect x="820" y="112" width="200" height="384" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <rect x="828" y="116" width="104" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="880" y="125" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">DECISION PATH</text>
+
+          <!-- Arrows -->
+          <line x1="248" y1="304" x2="320" y2="304" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="268" y="282" width="40" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="288" y="291" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SPAWN</text>
+
+          <line x1="480" y1="304" x2="568" y2="304" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="504" y="282" width="40" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="524" y="291" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">EVENT</text>
+
+          <path d="M 648,272 V 184 Q 648,176 656,176 H 840" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="716" y="154" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="740" y="163" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ACTION</text>
+
+          <line x1="728" y1="304" x2="840" y2="304" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="748" y="282" width="40" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="768" y="291" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">FACTS</text>
+
+          <path d="M 632,336 V 544 Q 632,552 624,552 H 480" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="640" y="436" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="664" y="445" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RECORD</text>
+
+          <path d="M 840,196 H 796 Q 788,196 788,204 V 296 a 8,8 0 0,0 0,16 V 424 Q 788,432 796,432 H 840" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="736" y="300" width="44" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="758" y="309" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">VERDICT</text>
+
+          <line x1="896" y1="272" x2="896" y2="208" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="904" y="234" width="56" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="932" y="243" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ANCESTRY</text>
+
+          <path d="M 1000,432 H 1104 Q 1104,424 1112,424 V 88 Q 1112,80 1104,80 H 416 Q 408,80 408,88 V 240" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="744" y="58" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="768" y="67" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ENFORCE</text>
+
+          <line x1="480" y1="560" x2="840" y2="560" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="688" y="538" width="40" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="708" y="547" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">JSONL</text>
+
+          <line x1="168" y1="336" x2="168" y2="520" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <rect x="176" y="420" width="64" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="208" y="429" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">LOAD RULES</text>
+
+          <!-- Nodes -->
+          <rect x="88" y="272" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="88" y="272" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="96" y="278" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="108" y="287" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CLI</text>
+          <text x="168" y="306" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">af-cli</text>
+          <text x="168" y="323" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">launcher · CLI</text>
+
+          <rect x="320" y="240" width="160" height="128" rx="6" fill="#f5f5f5"/>
+          <rect x="320" y="240" width="160" height="128" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+          <rect x="328" y="246" width="32" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+          <text x="344" y="255" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">TRACER</text>
+          <text x="400" y="292" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">af-monitor</text>
+          <text x="400" y="309" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ptrace · seccomp</text>
+          <text x="400" y="325" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">raw stops → Event</text>
+
+          <rect x="568" y="272" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="568" y="272" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="576" y="278" width="44" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="598" y="287" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CONTRACT</text>
+          <text x="648" y="306" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">af-core</text>
+          <text x="648" y="323" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Event · Action · Verdict</text>
+
+          <rect x="840" y="144" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="840" y="144" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="848" y="150" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="864" y="159" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ENGINE</text>
+          <text x="920" y="178" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">af-policy</text>
+          <text x="920" y="195" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">rules → verdict</text>
+
+          <rect x="840" y="272" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="840" y="272" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="848" y="278" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="864" y="287" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GRAPH</text>
+          <text x="920" y="306" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">af-provenance</text>
+          <text x="920" y="323" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ancestry graph</text>
+
+          <rect x="840" y="400" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="840" y="400" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="848" y="406" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="864" y="415" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">HUMAN</text>
+          <text x="920" y="434" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">af-approval</text>
+          <text x="920" y="451" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">asks on /dev/tty</text>
+
+          <rect x="88" y="520" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="88" y="520" width="160" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <rect x="96" y="526" width="32" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+          <text x="112" y="535" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RULES</text>
+          <text x="168" y="554" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Policy rules</text>
+          <text x="168" y="571" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">policies/*.yaml</text>
+
+          <rect x="320" y="520" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="320" y="520" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="328" y="526" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="344" y="535" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">WRITE</text>
+          <text x="400" y="554" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">af-recorder</text>
+          <text x="400" y="571" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">JSONL sink</text>
+
+          <rect x="840" y="520" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="840" y="520" width="160" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <rect x="848" y="526" width="24" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+          <text x="860" y="535" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LOG</text>
+          <text x="920" y="554" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Trace journal</text>
+          <text x="920" y="571" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">session.jsonl</text>
+
+          <!-- Legend -->
+          <line x1="40" y1="636" x2="1240" y2="636" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <text x="40" y="658" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+          <rect x="40" y="666" width="16" height="12" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+          <text x="64" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Focal container</text>
+          <rect x="250" y="666" width="16" height="12" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <text x="274" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Crate / container</text>
+          <rect x="460" y="666" width="16" height="12" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <text x="484" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">File / artifact</text>
+          <rect x="670" y="666" width="16" height="12" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="1"/>
+          <text x="694" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Zone / grouping</text>
+          <line x1="880" y1="672" x2="894" y2="672" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c2-arrow)"/>
+          <text x="904" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Data / control flow</text>
+        </svg>
+      </div>
+    </section>
+
+    <!-- Section 03 · Kernel boundary (C4 L3) -->
+    <section>
+      <p class="section-eyebrow">03 · Kernel boundary — C4 level 3</p>
+      <h2>What the monitor sees, and how a stop becomes a verdict</h2>
+      <p class="section-caption">One BPF filter, installed once at the session root, holds <span style="font-family:var(--font-mono);font-size:0.85rem">connect</span> and write-opens; every descendant inherits it. The collector reads registers and tracee memory while the call has not happened, then the performer answers: continue, refuse with <span style="font-family:var(--font-mono);font-size:0.85rem">EPERM</span>, or kill the tree. A refused call never runs — which is why a path is sound to refuse with, and never to allow with.</p>
+      <div class="diagram-container">
+        <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="c3-monitor-title c3-monitor-desc">
+          <title id="c3-monitor-title">Monitor kernel boundary</title>
+          <desc id="c3-monitor-desc">The monitored process tree makes a system call; the seccomp BPF filter returns TRACE for held calls, the kernel stops the process, the collector reads registers and memory to build a normalized event, the decision path returns a verdict, and the performer continues, refuses, or kills the tree.</desc>
+          <defs>
+            <marker id="c3-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+            </marker>
+          </defs>
+
+          <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+          <!-- Zones -->
+          <rect x="288" y="120" width="320" height="344" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <rect x="296" y="124" width="168" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="380" y="133" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">KERNEL · SYSCALL BOUNDARY</text>
+
+          <rect x="640" y="216" width="248" height="304" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <rect x="648" y="220" width="172" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="734" y="229" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">AF-MONITOR · USER SPACE</text>
+
+          <!-- Arrows -->
+          <path d="M 144,232 V 184 Q 144,176 152,176 H 336" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c3-arrow)"/>
+          <rect x="208" y="152" width="64" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="240" y="161" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SYSCALLS</text>
+
+          <line x1="448" y1="216" x2="448" y2="344" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c3-arrow)"/>
+          <rect x="456" y="272" width="64" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="488" y="281" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RET_TRACE</text>
+
+          <path d="M 560,376 H 608 Q 616,376 616,368 V 288 Q 616,280 624,280 H 656" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c3-arrow)"/>
+          <rect x="552" y="318" width="56" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="580" y="327" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RAW STOP</text>
+
+          <line x1="872" y1="280" x2="928" y2="280" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c3-arrow)"/>
+          <rect x="884" y="256" width="40" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="904" y="265" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">EVENT</text>
+
+          <line x1="1036" y1="328" x2="1036" y2="440" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c3-arrow)"/>
+          <rect x="1044" y="376" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="1068" y="385" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ACTION</text>
+
+          <line x1="928" y1="472" x2="872" y2="472" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c3-arrow)"/>
+          <rect x="876" y="452" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="900" y="461" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">DECISION</text>
+
+          <path d="M 656,472 H 160 Q 152,472 152,464 V 328" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c3-arrow)"/>
+          <rect x="380" y="448" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="404" y="457" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ENFORCE</text>
+
+          <!-- Nodes -->
+          <rect x="64" y="232" width="176" height="96" rx="6" fill="#f5f5f5"/>
+          <rect x="64" y="232" width="176" height="96" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+          <rect x="72" y="238" width="26" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+          <text x="85" y="247" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+          <text x="152" y="274" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Monitored tree</text>
+          <text x="152" y="291" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">claude → bash → psql</text>
+
+          <rect x="336" y="152" width="224" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="336" y="152" width="224" height="64" rx="6" fill="rgba(235,108,54,0.05)" stroke="rgba(235,108,54,0.50)" stroke-width="1" stroke-dasharray="4,4"/>
+          <rect x="344" y="158" width="36" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.40)" stroke-width="0.8"/>
+          <text x="362" y="167" fill="rgba(235,108,54,0.80)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">KERNEL</text>
+          <text x="448" y="186" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">seccomp BPF filter</text>
+          <text x="448" y="203" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">connect · open · openat2</text>
+
+          <rect x="336" y="344" width="224" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="336" y="344" width="224" height="64" rx="6" fill="rgba(235,108,54,0.05)" stroke="rgba(235,108,54,0.50)" stroke-width="1" stroke-dasharray="4,4"/>
+          <rect x="344" y="350" width="28" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.40)" stroke-width="0.8"/>
+          <text x="358" y="359" fill="rgba(235,108,54,0.80)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STOP</text>
+          <text x="448" y="378" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Kernel stop</text>
+          <text x="448" y="395" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">PTRACE_EVENT_SECCOMP</text>
+
+          <rect x="656" y="232" width="216" height="96" rx="6" fill="#f5f5f5"/>
+          <rect x="656" y="232" width="216" height="96" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+          <rect x="664" y="238" width="28" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+          <text x="678" y="247" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">READ</text>
+          <text x="764" y="274" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Collector</text>
+          <text x="764" y="291" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">registers · /proc/&lt;pid&gt;/mem</text>
+          <text x="764" y="307" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">reads facts before the call</text>
+
+          <rect x="928" y="232" width="216" height="96" rx="6" fill="#f5f5f5"/>
+          <rect x="928" y="232" width="216" height="96" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="936" y="238" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="952" y="247" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EVENT</text>
+          <text x="1036" y="274" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Normalized event</text>
+          <text x="1036" y="291" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">EventKind · Action</text>
+
+          <rect x="928" y="440" width="216" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="928" y="440" width="216" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="936" y="446" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="954" y="455" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">VERDICT</text>
+          <text x="1036" y="474" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Decision path</text>
+          <text x="1036" y="491" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">provenance · policy · approval</text>
+
+          <rect x="656" y="440" width="216" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="656" y="440" width="216" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="664" y="446" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="676" y="455" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ACT</text>
+          <text x="764" y="474" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Performer</text>
+          <text x="764" y="491" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">continue · EPERM · kill</text>
+
+          <!-- Legend -->
+          <line x1="40" y1="636" x2="1240" y2="636" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <text x="40" y="658" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+          <rect x="40" y="666" width="16" height="12" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+          <text x="64" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">External process</text>
+          <rect x="250" y="666" width="16" height="12" rx="2" fill="rgba(235,108,54,0.05)" stroke="rgba(235,108,54,0.50)" stroke-width="1" stroke-dasharray="3,3"/>
+          <text x="274" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Kernel mechanism</text>
+          <rect x="460" y="666" width="16" height="12" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+          <text x="484" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Focal step</text>
+          <rect x="670" y="666" width="16" height="12" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <text x="694" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Component</text>
+          <rect x="880" y="666" width="16" height="12" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="1"/>
+          <text x="904" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Zone / boundary</text>
+          <line x1="1090" y1="672" x2="1104" y2="672" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c3-arrow)"/>
+          <text x="1114" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Data / control flow</text>
+        </svg>
+      </div>
+    </section>
+
+    <!-- Section 04 · Decision path (C4 L3) -->
+    <section>
+      <p class="section-eyebrow">04 · Decision path — C4 level 3</p>
+      <h2>Provenance, rules, memory, approval — and the replay that re-runs it</h2>
+      <p class="section-caption">The engine reads only facts: session, action, process, ancestry. It returns a verdict plus memory effects, never writing anything itself. Windows use the event time, not the clock. <span style="font-family:var(--font-mono);font-size:0.85rem">agent-firewall replay</span> feeds a recorded trace through the same engine and gets the same verdicts.</p>
+      <div class="diagram-container">
+        <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="c4-decision-title c4-decision-desc">
+          <title id="c4-decision-title">Decision path and replay</title>
+          <desc id="c4-decision-desc">A traced event feeds the provenance graph and the deterministic policy engine; the engine reads session memory and returns a verdict plus memory effects, approval asks the developer on the terminal, the recorder appends the trace journal, and the replay command feeds a recorded trace through the same engine.</desc>
+          <defs>
+            <marker id="c4-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+            </marker>
+          </defs>
+
+          <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+          <!-- Zones -->
+          <rect x="56" y="64" width="1184" height="332" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <rect x="64" y="68" width="248" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="188" y="77" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">LIVE SESSION · SYNCHRONOUS · DETERMINISTIC</text>
+
+          <rect x="800" y="416" width="200" height="128" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <rect x="808" y="420" width="112" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="864" y="429" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">OFFLINE · REPLAY</text>
+
+          <!-- Arrows -->
+          <line x1="232" y1="136" x2="312" y2="136" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="256" y="112" width="40" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="276" y="121" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">CHAIN</text>
+
+          <line x1="472" y1="136" x2="552" y2="136" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="492" y="112" width="52" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="518" y="121" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ANCESTRY</text>
+
+          <line x1="744" y1="136" x2="816" y2="136" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="764" y="112" width="44" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="786" y="121" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">VERDICT</text>
+
+          <line x1="976" y1="136" x2="1064" y2="136" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="1004" y="112" width="32" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="1020" y="121" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ASK</text>
+
+          <line x1="648" y1="260" x2="648" y2="184" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="656" y="216" width="68" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="690" y="225" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">READS MEMORY</text>
+
+          <line x1="576" y1="184" x2="576" y2="260" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#c4-arrow)"/>
+          <rect x="584" y="216" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="608" y="225" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">EFFECTS</text>
+
+          <path d="M 152,168 V 224 Q 152,232 160,232 H 384 Q 392,232 392,240 V 260" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="196" y="208" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="220" y="217" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RECORD</text>
+
+          <path d="M 392,324 V 468 Q 392,476 384,476 H 236" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="280" y="454" width="44" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="302" y="463" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">JSONL</text>
+
+          <path d="M 152,504 V 584 Q 152,592 160,592 H 888 Q 896,592 896,584 V 504" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="480" y="568" width="48" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="504" y="577" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">REPLAY</text>
+
+          <path d="M 1000,472 H 1232 Q 1240,472 1240,464 V 56 Q 1240,48 1232,48 H 616 Q 608,48 608,56 V 88" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <rect x="912" y="24" width="80" height="12" rx="2" fill="#f5f5f5"/>
+          <text x="952" y="33" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SAME ENGINE</text>
+
+          <!-- Nodes -->
+          <rect x="72" y="104" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="72" y="104" width="160" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+          <rect x="80" y="110" width="24" height="12" rx="2" fill="transparent" stroke="rgba(122,131,153,0.40)" stroke-width="0.8"/>
+          <text x="92" y="119" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">IN</text>
+          <text x="152" y="138" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Traced event</text>
+          <text x="152" y="155" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">af-monitor · af-core</text>
+
+          <rect x="312" y="104" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="312" y="104" width="160" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <rect x="320" y="110" width="32" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+          <text x="336" y="119" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GRAPH</text>
+          <text x="392" y="138" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Provenance</text>
+          <text x="392" y="155" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">pid × start time</text>
+
+          <rect x="552" y="88" width="192" height="96" rx="6" fill="#f5f5f5"/>
+          <rect x="552" y="88" width="192" height="96" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+          <rect x="560" y="94" width="36" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+          <text x="578" y="103" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ENGINE</text>
+          <text x="648" y="132" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Policy engine</text>
+          <text x="648" y="149" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">deterministic rules</text>
+
+          <rect x="816" y="104" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="816" y="104" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="824" y="110" width="24" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="836" y="119" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ASK</text>
+          <text x="896" y="138" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Approval</text>
+          <text x="896" y="155" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">asks on /dev/tty</text>
+
+          <rect x="1064" y="104" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="1064" y="104" width="160" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+          <rect x="1072" y="110" width="30" height="12" rx="2" fill="transparent" stroke="rgba(122,131,153,0.40)" stroke-width="0.8"/>
+          <text x="1087" y="119" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">USER</text>
+          <text x="1144" y="138" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Developer</text>
+          <text x="1144" y="155" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">terminal</text>
+
+          <rect x="72" y="440" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="72" y="440" width="160" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <rect x="80" y="446" width="24" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+          <text x="92" y="455" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LOG</text>
+          <text x="152" y="474" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Trace journal</text>
+          <text x="152" y="491" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">session.jsonl</text>
+
+          <rect x="312" y="260" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="312" y="260" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="320" y="266" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="336" y="275" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">WRITE</text>
+          <text x="392" y="294" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Recorder</text>
+          <text x="392" y="311" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">JSONL sink</text>
+
+          <rect x="552" y="260" width="192" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="552" y="260" width="192" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <rect x="560" y="266" width="32" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+          <text x="576" y="275" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">MEM</text>
+          <text x="648" y="294" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Session memory</text>
+          <text x="648" y="311" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">marks · occurrences · baseline</text>
+
+          <rect x="840" y="440" width="160" height="64" rx="6" fill="#f5f5f5"/>
+          <rect x="840" y="440" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <rect x="848" y="446" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+          <text x="866" y="455" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">REPLAY</text>
+          <text x="920" y="474" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Replay command</text>
+          <text x="920" y="491" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">same engine · trace</text>
+
+          <!-- Legend -->
+          <line x1="40" y1="636" x2="1240" y2="636" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+          <text x="40" y="658" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+          <rect x="40" y="666" width="16" height="12" rx="2" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+          <text x="64" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Input / live event</text>
+          <rect x="250" y="666" width="16" height="12" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+          <text x="274" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Store / memory &amp; trace</text>
+          <rect x="460" y="666" width="16" height="12" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+          <text x="484" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Component</text>
+          <rect x="670" y="666" width="16" height="12" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+          <text x="694" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Focal component</text>
+          <rect x="880" y="666" width="16" height="12" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="1"/>
+          <text x="904" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Zone / grouping</text>
+          <line x1="1080" y1="672" x2="1094" y2="672" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#c4-arrow)"/>
+          <text x="1104" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Data / control flow</text>
+          <line x1="1200" y1="672" x2="1214" y2="672" stroke="#4f5d75" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#c4-arrow)"/>
+          <text x="1224" y="676" fill="#4f5d75" font-size="9" font-family="'Geist', sans-serif">Effect write-back</text>
+        </svg>
+      </div>
+    </section>
+
+    <div class="footer">
+      <span>Agent Firewall · Architecture Overview</span>
+      <span>docs/ARCHITECTURE-OVERVIEW.html</span>
+    </div>
+
+  </div>
+</body>
+</html>
