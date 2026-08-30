@@ -6,6 +6,43 @@ otherwise. Each entry names its evidence.
 
 ---
 
+## 2026-08-30 — Correlation and tamper signals obey the interruption budget
+
+A tightening of the direction adopted earlier the same day
+([DIRECTION.md](DIRECTION.md) §3.4, §6):
+
+* **Keyed to the firewall's own identity.** A tamper or correlation rule
+  fires on the state of what the firewall itself installed — the monitor
+  process, the session root, this session's sensor instances (requirement
+  B.5 of [DETECTION-REQUIREMENTS.md](DETECTION-REQUIREMENTS.md)). "No
+  in-process sensor on a foreign process" is never a signal: static binaries
+  and raw `syscall()` are normal in a developer toolchain, and a rule that
+  fires on them fires all day.
+* **The budget applies to high severity too.** A tamper or correlation rule
+  ships only with a negative test proving that a normal session — static
+  binaries included — produces no question and no quarantine.
+
+Evidence: the preload-sensor gap is measured in
+[DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §1 (static binaries, raw
+`syscall()`); the budget is [PRODUCT.md](PRODUCT.md) §5. Rationale: a
+quarantine-first response is the most expensive question there is. It earns
+its cost only when it is nearly never wrong.
+
+## 2026-08-30 — Telemetry is opt-in, never a condition
+
+The tension between DIRECTION.md §7 ("free but agree to telemetry") and §10
+("optional, consented") is settled in favor of opt-in. Telemetry is never a
+condition of the free edition: the firewall is fully functional with
+telemetry off, consent is granular and revocable, and a sample's content is
+inspectable before it is sent.
+
+The research loop does not depend on client telemetry to start:
+`research/threats/` bootstraps the corpus from public incidents, which is
+how the corpus exists before the first consenting user. Rationale: the
+audience most likely to install a security monitor is the audience most
+likely to refuse telemetry. A moat that requires shipping against the
+product's own values ([PRODUCT.md](PRODUCT.md) §3) is not a moat.
+
 ## 2026-08-30 — Direction update: cross-platform sensor architecture
 
 Adopted the direction update. **[DIRECTION.md](DIRECTION.md) is the direction

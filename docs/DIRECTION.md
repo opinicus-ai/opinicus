@@ -172,10 +172,25 @@ expected observation != externally observed behavior
    → a suspicious event in its own right
 ```
 
-A process that the external sensors see but that carries no in-process
-sensor, a sensor that goes quiet inside a live subtree, a report of an action
-that never happens outside — each discrepancy is a high-value signal,
-independent of what the evading process was trying to do.
+What counts as a discrepancy, and what does not. The toolchain itself makes
+"no in-process sensor seen" normal: a static binary and a raw `syscall()`
+never touch the preload, and an ordinary session runs several such programs
+(`kubectl`, `terraform`, most Go tooling). A missing sensor on a foreign
+process is **not** a signal. The discrepancy is keyed to what the firewall
+itself installed in this session — the sensor instances it owns (requirement
+B.5 of [DETECTION-REQUIREMENTS.md](DETECTION-REQUIREMENTS.md)):
+
+* a sensor the firewall installed goes quiet or disappears while its process
+  lives on;
+* a process that the in-process sensor reported spawning never appears in the
+  external view, or appears there without the sensor's report;
+* an action that the sensor reported is contradicted by what the external
+  sensors observed.
+
+The interruption budget of [PRODUCT.md](PRODUCT.md) §5 governs these signals
+like any other. A tamper or correlation rule that cannot prove, with a
+negative test, that a normal session full of static binaries fires nothing
+does not ship.
 
 ---
 
@@ -292,6 +307,14 @@ user chooses
 The property that matters: **suspicious execution stops before it can
 continue.**
 
+High severity does not exempt the detection from the interruption budget — a
+quarantine is the most expensive question there is. A tamper rule keys on the
+firewall's own identity — the monitor process, the session root, the sensor
+instances this session installed — and never on the absence of
+instrumentation on a foreign process, which normal toolchains produce every
+day (section 3.4). Every tamper rule ships with a negative test: a normal
+session, static binaries and all, fires nothing.
+
 Two pieces of this exist today in fail-closed form: `PTRACE_O_EXITKILL` kills
 the tree if the monitor dies, and a traced call with no monitor returns
 `ENOSYS`, so a process breaks rather than going unobserved
@@ -314,8 +337,10 @@ understand:
 * it must not be their sole protection;
 * telemetry is important to improving detection.
 
-Early users get the software free and agree to clearly disclosed telemetry
-collection. Suspicious-event samples are the payload: process tree,
+Telemetry is strictly opt-in. It is never a condition of the free edition:
+the firewall is fully functional with telemetry switched off, consent is
+granular and revocable, and the content of a sample is inspectable before it
+is sent. Suspicious-event samples are the payload: process tree,
 executable hashes, argv, relevant stdin, file operations, relevant
 environment, policy decisions, agent/session identity, and surrounding
 behavioral events.
@@ -329,6 +354,10 @@ not bolted on.** The monitor already redacts environment values by pattern
 Today nothing leaves the machine: traces are local JSON Lines. The telemetry
 program is new work, and it ships only with the redaction design, the consent
 flow, and the disclosure.
+
+The research pipeline does not wait for telemetry. `research/threats/`
+bootstraps the corpus from public incidents, which is how the loop
+(section 8) runs before the first consenting user exists.
 
 ---
 
@@ -489,7 +518,7 @@ The workstreams, and what each one is for:
 | **W2** | Bypass and tamper harness: controlled adversarial tests — `env -u`, static binaries, direct syscalls, unhooking, `setsid`/double-fork, unobserved descendants, monitor tampering — run against **every** sensor | 4, 7 | research harness; feeds the `evade` axis |
 | **W3** | Agent detection subsystem: detector plugin interface, first detectors, confidence scoring, root tagging | 1 | pure software |
 | **W4** | Identity propagation: `PROCESS_IS_AI_CONTROLLED` as session state, escape detection | 2 (outside launch) | pure software |
-| **W5** | Correlation engine: expected-vs-observed comparison, discrepancy events in the schema | §3.4, 7 | software, needs W1 |
+| **W5** | Correlation engine: expected-vs-observed comparison, discrepancy events in the schema, keyed to the firewall's own sensor instances | §3.4, 7 | software, needs W1 |
 | **W6** | Quarantine flow: suspend a subtree as a lasting state, show evidence, record the user's ruling | 6, §6 | pure software |
 | **W7** | Telemetry pipeline design: redaction-first packaging, consent, disclosure | 10, §7 | design + privacy review first |
 | **W8** | Windows spike: survey user-space hooking (Win32, `ntdll` trampolines) and an external observer candidate | §3.2 | research spike |
