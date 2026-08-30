@@ -44,7 +44,11 @@ cannot accept it. A model can explain and suggest. It must not decide.
 
 **User space.** A product that needs root will not be installed. Low friction
 is a security feature, because protection that nobody installs protects
-nobody.
+nobody. This is the law of the developer edition. The enterprise edition may
+later add privileged, policy-enforced components — under the principle that
+*an AI-controlled process must not continue if security visibility is lost* —
+but nothing in the developer edition may require root
+([DIRECTION.md](DIRECTION.md) §10).
 
 ---
 
@@ -88,21 +92,23 @@ feature.**
 
 ## 6. The open question
 
-Test whether the exec boundary is enough in practice, before you build more on
-it.
+The question this document used to ask — *is the exec boundary enough in
+practice?* — was answered: no, and the answer shipped. A single Python
+process deleted a tree, deleted a file and opened a connection while the
+firewall denied everything, because no new program started. The `seccomp`
+filter of [ARCHITECTURE.md](ARCHITECTURE.md) §3a now holds the file opens and
+the connections inside a running program, at about 1.2× cost
+([DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4).
 
-The firewall stops a dangerous **program**. It does not stop a dangerous write
-inside a program that already runs.
+The open questions are now the ten of [DIRECTION.md](DIRECTION.md) §11. The
+one this document weighs in on most directly is the ninth: **how much context
+distinguishes legitimate coding behavior from dangerous behavior?** Session
+memory is the answer so far — the chain of two actions, the burst, the
+baseline — and the interruption budget above is the test every new context
+rule has to pass.
 
-* `psql -c "DROP DATABASE customer_prod"` — caught. A new program starts.
-* A Python script that deletes rows through a database library — not caught.
-  No new program starts.
-
-The answer decides the next investment:
-
-1. `PTRACE_SYSCALL` filtering — full visibility, but it stops the process twice
-   for every system call;
-2. an eBPF or `fanotify` path — low cost, but it needs privileges;
-3. more rules on the present boundary — cheap, and it accepts the limit.
-
-`docs/RESEARCH.md` holds the measurements that this question needs.
+The wider direction changes one thing about this document's frame: a sensor
+is not a boundary. In-process instrumentation will report what a program is
+about to do, the external sensors will report what it actually did, and a
+discrepancy between the two is itself a high-severity signal
+([DIRECTION.md](DIRECTION.md) §3.4).

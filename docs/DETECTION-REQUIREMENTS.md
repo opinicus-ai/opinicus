@@ -259,6 +259,10 @@ measurable time, it cannot break `sudo`, and it needs no privileged tier. It
 also raises the value of step 2: the observables unlock 42 alone but 70 when
 the engine can remember.
 
+Order row 4 (session identity and liveness) has since grown a second job: it
+is the sensing half of tamper detection, which the direction of record makes
+a first-class, high-severity signal ([DIRECTION.md](DIRECTION.md) §6).
+
 There is a second reason to do it first. Section B.1 shows that the chain is
 what separates a dangerous action from a normal one. Without memory, every
 rule about a credential or an upload must fire on one half of a chain, and

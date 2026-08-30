@@ -1,12 +1,19 @@
 # Agent Firewall — Project Summary
 
+> **Direction of record:** [docs/DIRECTION.md](docs/DIRECTION.md), adopted
+> 2026-08-30. This document summarizes the idea, the principles and the plan.
+> Where the two differ, DIRECTION.md wins, and
+> [docs/DECISIONS.md](docs/DECISIONS.md) logs the settlements.
+
 ## 1. Project idea
 
-The project is a behavior-based security layer for coding agents.
+The project is a behavior-based security and observability layer for coding agents.
 
 Its purpose is to let coding agents run directly on a developer machine while still controlling dangerous side effects.
 
 The system is not primarily a sandbox. It is closer to an agent firewall, behavior monitor, or EDR/antivirus for coding agents.
+
+The direction of record widens this in three ways. The system is **cross-platform**, not Linux-only. It observes and controls the agent from **inside and outside the agent process**, with in-process instrumentation as one sensor among several. And it treats the agent as an **identifiable security principal**: once identified, its identity propagates through its whole execution tree, and every descendant action carries that provenance.
 
 The main idea is:
 
@@ -33,7 +40,7 @@ Possible agents include:
 * OpenCode
 * other current or future coding agents
 
-The agent is launched through the monitor, and all descendant processes remain part of the monitored session.
+The agent is launched through the monitor, and all descendant processes remain part of the monitored session. A generic agent detection subsystem (section 3.12) will also recognize agents that were not launched by the firewall, from inside and outside the process, so that no agent vendor's cooperation is ever required.
 
 ⸻
 
@@ -101,9 +108,9 @@ The operating-system event stream remains the source of truth.
 
 ### 2.4 User-space first
 
-The first implementation should work in user space.
+The developer edition works in user space.
 
-The initial goal is not to require:
+It does not require:
 
 * kernel modules;
 * root access;
@@ -111,23 +118,39 @@ The initial goal is not to require:
 * a container;
 * a full endpoint-security installation.
 
-Deeper OS integration can be added later when needed.
+This gives the project a low-friction developer experience. It is the default of the developer edition, not a law for every edition: the enterprise edition can later add privileged, policy-enforced components, governed by the principle that *an AI-controlled process must not continue if security visibility is lost* (DIRECTION.md §10). Nothing in the developer edition may require root.
 
-This gives the project a low-friction developer experience.
+A user-space mechanism is a sensor with a known class of limits. In-process instrumentation is a high-value sensor and never a security boundary; see section 2.6.
 
 ### 2.5 Cross-platform architecture, not immediate feature parity
 
 Linux is the first implementation target.
 
-macOS and Windows should follow later.
+macOS and Windows follow. Windows is a first-class track, not an afterthought: user-space API hooking at the Win32 and `ntdll` layers is the Windows counterpart of the Linux in-process sensor, under the same rule — hooks provide semantic visibility, and independent observation provides assurance (DIRECTION.md §3.2).
 
-The architecture should normalize platform events into one common model, but each operating system can provide different levels of visibility and enforcement.
+The architecture normalizes platform events into one common model, and each operating system provides a different level of visibility and enforcement.
 
 The target platforms are:
 
 * Linux;
 * macOS;
 * Windows.
+
+### 2.6 Defense in depth, and sensors are not boundaries
+
+No single interception mechanism is the design. The system runs several sensors at once — in-process instrumentation, process monitoring, filesystem and network observation — and correlates them (DIRECTION.md §2, §3).
+
+Two rules follow.
+
+**In-process instrumentation is a high-value sensor, not ground truth.** `LD_PRELOAD` on Linux and API hooks on Windows give semantic detail close to the agent, and software can evade or remove them. Their silence or removal is itself a high-severity signal, caught by correlation with the independent outside view.
+
+**Semantic observation is separate from security assurance.** The in-process sensor says "I am about to execute `psql`"; the outside observer says "a descendant executed `psql`". An expected observation that differs from the externally observed behavior is suspicious in its own right (DIRECTION.md §3.4).
+
+The first versions deliberately collect more telemetry than the production system will, because the early data decides where the reliable enforcement boundaries are.
+
+### 2.7 Tamper resistance as a signal
+
+There is effectively no legitimate reason for a coding agent to disable its security monitor. Removing hooks, unloading monitoring libraries, escaping the observed tree, disabling tracing, or touching the firewall's own files or processes is a high-severity event. The response is suspend or quarantine first, show the evidence, and let the user allow it once, create an exception, or terminate (DIRECTION.md §6).
 
 ⸻
 
@@ -338,6 +361,22 @@ Later interfaces can include:
 * process tree viewer;
 * policy editor.
 
+### 3.11 The wider sensor system (direction of record)
+
+Around the layers above, DIRECTION.md §3 adds a sensor stack: in-process instrumentation on Linux (`LD_PRELOAD`, explored as a sensor, never a boundary) and on Windows (Win32/`ntdll` hooking); external observation, where the current `ptrace` and `seccomp` collectors are the first two sensors; and a correlation layer that compares what the in-process sensors expect with what the outside observes.
+
+### 3.12 Agent detection and AI-controlled identity
+
+A detector/plugin subsystem identifies AI-agent processes from several signals — executables, package metadata, manifests, command-line patterns, agent libraries, LLM API usage, characteristic environment variables, and behavior — and tags the root with an identity like `PROCESS_IS_AI_CONTROLLED`. The identity propagates through the execution tree, and every event keeps its provenance: agent, session, process, parent, ancestry, executable, argv, cwd, relevant environment, stdin context where available, file and network activity, timestamp, policy decision (DIRECTION.md §4, §5).
+
+### 3.13 Tamper detection and quarantine
+
+The firewall watches for the removal or evasion of its own sensors and treats it as high severity. A quarantined execution tree is suspended, the evidence is shown, and the user rules (DIRECTION.md §6).
+
+### 3.14 Telemetry and the research pipeline
+
+Early-access telemetry is opt-in, disclosed, and redacted by design; quarantined events can become research samples that feed an automated analysis pipeline whose output is candidate detections — gated by deterministic tests and human review, never published directly by a research agent (DIRECTION.md §7, §8).
+
 ⸻
 
 ## 4. Policy model
@@ -407,7 +446,7 @@ Process behavior
 
 A long-term commercial opportunity is a continuously maintained rule feed.
 
-This is similar to antivirus signature updates, but the rules can describe richer behavior.
+This is similar to antivirus signature updates, but the rules can describe richer behavior. The feed is the output of a pipeline, not a one-time pack: client telemetry (opt-in, redacted) and quarantined events become research samples; automated analysis agents investigate them and propose candidate behaviors and signatures; a regression corpus keeps every detection reproducible; and a human approves what ships. **Research agents never directly publish production detection rules** (DIRECTION.md §8).
 
 A rule can combine:
 
@@ -436,32 +475,36 @@ These cases can become regression tests and new policy rules.
 
 ## 6. Possible business model
 
-The project can use an open-core model.
+The project uses an open-core model with a fixed boundary (DIRECTION.md §9).
 
-### Free / open-source core
+### Open source — the security/runtime infrastructure
 
-Possible free components:
+Everything a user must be able to inspect:
 
-* local runtime;
-* process monitoring;
-* basic policy engine;
-* local rules;
-* CLI;
-* offline operation;
-* local audit log.
+* sensors;
+* interception infrastructure;
+* process tracking;
+* the event schema;
+* the policy engine;
+* the local UI/CLI;
+* the quarantine mechanism;
+* plugin interfaces;
+* basic rules;
+* integration APIs.
 
-This supports adoption and trust.
+Transparency is the point: software with significant machine visibility must be auditable by the people it runs on.
 
-### Paid rule intelligence
+### Private/commercial — the intelligence
 
-A subscription can provide:
+* the telemetry corpus;
+* attack samples;
+* research infrastructure and automated research agents;
+* proprietary detection knowledge;
+* continuously updated signatures and rules;
+* threat intelligence and behavioral models;
+* curated rule feeds.
 
-* continuously maintained policy packs;
-* new threat signatures;
-* tested rules for popular coding agents;
-* rules for cloud and infrastructure tools;
-* production safety policies;
-* signed rule updates.
+The moat is not closed source code. It is the loop: **telemetry → research → detections → deployed protection → new telemetry**. It compounds with adoption.
 
 ### Enterprise control plane
 
@@ -599,9 +642,17 @@ Because this is security software, users need to understand why a decision occur
 
 Every block or approval request should have an explainable provenance chain and matching policy.
 
+### Tamper and evasion
+
+A monitor that an agent can switch off without consequence is a monitor that will be switched off, by accident or by instruction. The system must detect the removal of its own visibility and treat it as high severity (section 2.7). The enterprise edition states the same idea as policy: an AI-controlled process must not continue if security visibility is lost.
+
 ⸻
 
 ## 9. First immediate goal: Linux proof of concept
+
+**Status: done.** The proof of concept shipped, and `docs/RESEARCH.md` records what it proved: a local, deterministic, user-space monitor reconstructs the full provenance of an action and stops a dangerous program before it runs, with no kernel module and no root.
+
+The section below is kept as written, because it records why the project exists.
 
 The first goal is not to build the complete product.
 
@@ -644,7 +695,11 @@ No real database should be modified during testing.
 
 ## 10. Linux research questions
 
-Before finalizing the architecture, answer these experimentally.
+**Answered.** `docs/RESEARCH.md` holds the measured answers to every question in this section, and a test in the workspace keeps each answer true.
+
+The questions the project asks now are the ten of DIRECTION.md §11 — agent identification, sensor coverage, bypass paths, tamper detection, and the rest — with their own workstreams.
+
+The original questions, kept as written:
 
 ### Process monitoring
 
@@ -726,6 +781,8 @@ This will determine which policy signatures are practical.
 
 ## 11. Linux implementation direction
 
+This structure shipped as the seven crates of `docs/ARCHITECTURE.md`. The sensor, detection, correlation, and telemetry subsystems of sections 3.11–3.14 are planned additions in the same shape, not a redesign.
+
 The first research implementation should stay simple.
 
 A likely structure is:
@@ -783,16 +840,7 @@ A good demo is:
 
 If this works reliably, the project has proven the most important part of the concept.
 
-Only after this proof should the project invest heavily in:
-
-* the final event schema;
-* the full policy language;
-* agent-specific log adapters;
-* Windows;
-* macOS;
-* remote management;
-* threat intelligence feeds;
-* commercial packaging.
+**This milestone shipped.** The current milestones are the workstreams of DIRECTION.md §11 — the in-process sensor spike, the bypass harness, agent detection, identity propagation, correlation, quarantine, and the telemetry design — followed by the Windows track and the first alpha release with disclosed, opt-in telemetry.
 
 ⸻
 
@@ -817,4 +865,8 @@ Its main differentiators are:
 * designed for developer machines rather than only isolated containers;
 * extensible to organization-wide security and threat intelligence later.
 
-The immediate task is to prove that this can be done reliably on Linux without requiring a privileged kernel component.
+The immediate task is to prove that this can be done reliably on Linux without requiring a privileged kernel component. **Proven.** The working hypothesis now extends (DIRECTION.md §12):
+
+> AI agents should be treated as identifiable security principals whose actions and descendants can be observed, attributed, constrained, quarantined, and audited independently of the agent vendor.
+
+The vendor-neutral enforcement layer, and the continuously improving threat-intelligence loop behind it, is the differentiation from simply adding another sandbox around a coding agent.

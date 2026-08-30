@@ -1,10 +1,15 @@
 # Agent Firewall
 
-A local security layer for coding agents. It watches what an agent really
-does, and it stops a dangerous action before the action runs.
+A security and observability layer for coding agents. It watches what an
+agent really does — and everything its process tree really does — and it
+stops a dangerous action before the action runs.
 
-Status: proof of concept for Linux. Read [the limits](#what-works-and-what-does-not)
-before you use it.
+The [direction of record](docs/DIRECTION.md) is a cross-platform system that
+observes and controls an agent from inside and outside the agent process,
+with several sensors and no dependence on the agent vendor's cooperation.
+What ships here today is the Linux proof of concept of that idea: an
+external monitor. Read [the limits](#what-works-and-what-does-not) before
+you use it.
 
 ## The problem
 
@@ -188,6 +193,15 @@ program in user space stop a dangerous action inside a deep process chain,
 without a kernel module and without root? The answer on Linux is yes, at the
 exec boundary and at a small set of system calls.
 
+The [direction of record](docs/DIRECTION.md), adopted 2026-08-30, sets the
+work that follows: several sensors instead of one mechanism, in-process
+instrumentation as a sensor (never a boundary), tamper detection as a
+first-class signal, AI-controlled process identity with generic agent
+detection, and the telemetry → research → detections loop. The immediate
+engineering direction is the [learning plan](docs/DIRECTION.md#11-the-learning-plan--immediate-engineering-direction):
+ten questions, answered with measurements from a controlled bypass harness,
+not with preferences.
+
 ### What works and what does not
 
 Works today:
@@ -256,12 +270,19 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 | `crates/af-recorder` | The trace writer and the trace reader for JSON Lines. |
 | `crates/af-cli` | The `agent-firewall` command. It connects all layers. |
 | `policies/` | Policy files in the readable source format. |
+| `research/` | The research areas: mechanism spikes, the shared benchmark, and the threat catalogue with its ledger. Read [research/README.md](research/README.md). |
 | `demo/` | The demonstration: a fake `psql`, a dangerous migration script and an agent simulator. |
 | `tests/e2e.sh` | The end-to-end test. |
 
 ## Documents
 
+* [docs/DIRECTION.md](docs/DIRECTION.md) — the direction of record: the
+  product, the sensor stack, agent identity, tamper, telemetry, the research
+  pipeline, the business split, and the learning plan. Where an older
+  document conflicts, it wins.
 * [PROJECT.md](PROJECT.md) — the idea, the principles and the plan.
+* [docs/DECISIONS.md](docs/DECISIONS.md) — the dated decision log; the
+  newest entry wins.
 * [docs/PRODUCT.md](docs/PRODUCT.md) — the problem, why the constraints are
   not optional, and what kills the product.
 * [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the layers, the path of one

@@ -5,7 +5,8 @@ it. It names the crate of every layer. It shows the path of one `exec`
 through the whole system. It states where the enforcement boundary sits, and
 what the boundary cannot stop.
 
-Read [PROJECT.md](../PROJECT.md) for the idea and the plan. Read
+Read [DIRECTION.md](DIRECTION.md) for the direction of record and
+[PROJECT.md](../PROJECT.md) for the idea and the plan. Read
 [POLICY.md](POLICY.md) for the rule format.
 
 ## 1. The layers
@@ -441,3 +442,43 @@ equal outputs. A test in `crates/af-cli/tests/cli.rs` proves it.
   and no root account. A developer can try it in one minute.
 * **One event schema.** A collector for macOS or Windows can replace
   `af-monitor` without a change in the other layers.
+
+## 8. The direction: from one monitor to a sensor stack
+
+The layers above are what ships. The [direction of record](DIRECTION.md)
+widens the architecture around them, and the two must not be confused: this
+document's sections 1–7 are **as built**, this section is **as directed**.
+
+The target is defense in depth (DIRECTION.md §2): several sensors, correlated,
+rather than one interception mechanism.
+
+| sensor | state | what it adds |
+| --- | --- | --- |
+| exec `ptrace` | **ships** (§3) | provenance, hold-at-exec, session tree |
+| `seccomp` `RET_TRACE` filter | **ships** (§3a) | file opens and connections inside a running program |
+| in-process instrumentation (`LD_PRELOAD`) | planned sensor | semantics close to the agent: what it is about to run, what it feeds its children; never a boundary |
+| correlation of expected vs observed | planned | a discrepancy between the in-process view and this document's sensors is a high-severity signal on its own (DIRECTION.md §3.4) |
+| Landlock | recommended, unbuilt | in-kernel "always no" rules; removes questions ([DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4) |
+| `fanotify` / eBPF | enterprise tier | privileged observation, later (DIRECTION.md §10) |
+| Windows hooks (Win32/`ntdll`) | planned track | the Windows counterpart of the in-process sensor, under the same hook-visibility rule |
+
+Three additions land in this architecture without changing sections 1–7:
+
+* **Agent detection and identity.** A detector/plugin subsystem tags the
+  session root as AI-controlled, and the identity propagates through the
+  provenance graph that already exists (DIRECTION.md §4, §5). The graph keys
+  processes on pid plus start time; the agent identity becomes one more fact
+  the graph carries.
+* **Tamper detection and quarantine.** The fail-closed behaviors that already
+  exist — `PTRACE_O_EXITKILL`, the `ENOSYS` a traced call gets when no
+  monitor answers — become sensed states with their own high-severity events,
+  and the per-action approval flow of §3 grows a tree-level quarantine:
+  suspend, show evidence, let the user rule (DIRECTION.md §6).
+* **Event provenance for research.** The recorder of §5 already writes the
+  normalized schema; the telemetry pipeline (DIRECTION.md §7) is a redacting
+  packaging step in front of it, not a second event format.
+
+The soundness rule of §3a binds every new sensor: **decide on an object,
+never on a pointer into the memory of the program you are judging.** An
+in-process sensor is exempt as a *reporter* — its reports are advisory input
+to correlation — and never as a *decider*.

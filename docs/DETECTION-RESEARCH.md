@@ -10,6 +10,19 @@ came after it:
 Four research threads measured the candidate mechanisms on one machine with
 one shared benchmark. This document holds the result and the recommendation.
 
+> **Direction update, 2026-08-30.** The measurements here stand unchanged.
+> [DIRECTION.md](DIRECTION.md) changes one classification: this document
+> rejected `LD_PRELOAD` as an **enforcement boundary**, and that rejection
+> holds — `env -u LD_PRELOAD` is still one word. The direction of record
+> re-admits in-process instrumentation as a **sensor** for semantic
+> visibility, under the rule that a sensor is never the decider and that its
+> silence or removal is itself a signal, caught by correlating the in-process
+> view with the external sensors ([DIRECTION.md](DIRECTION.md) §3.1, §3.4).
+> The Windows hooking track follows the same rule: hooks provide semantic
+> visibility, independent observation provides assurance. Where this document
+> says a mechanism is "out", read "out as a boundary"; the sensor question is
+> a new experiment, tracked as workstream W1 in DIRECTION.md §11.
+
 Everything below was measured on Fedora 43, kernel 7.0.9, `x86_64`, as a
 normal user with no root and no capability. The spikes are in
 `research/spikes/`, and each one keeps its own `FINDINGS.md` with the raw
