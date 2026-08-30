@@ -529,6 +529,10 @@ output. **W3, W6** are pure software with no kernel risk and can run in
 parallel. **W4, W5** build on W1. **W7** is design work that gates the first
 alpha release. **W8** starts when the Linux learning loop is running.
 
+The sequenced, gate-tracked form of this plan — the milestone ladder, the
+exit gate each step must pass, and the current status — is
+[MILESTONES.md](MILESTONES.md).
+
 ---
 
 ## 12. The product hypothesis
@@ -556,4 +560,5 @@ another sandbox around a coding agent.
 | [DETECTION-REQUIREMENTS.md](DETECTION-REQUIREMENTS.md) | observables and memory the threat catalogue demands |
 | [POLICY.md](POLICY.md) | the rule format and the built-in pack |
 | [DECISIONS.md](DECISIONS.md) | dated decisions; the newest entry wins |
+| [MILESTONES.md](MILESTONES.md) | the execution plan: the milestone ladder, the exit gates, the current status |
 | `research/` (see `research/README.md`) | spikes, the benchmark, the threat catalogue and ledger |

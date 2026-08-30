@@ -9,6 +9,8 @@ Orientation for coding agents working in this repository.
 2. `docs/DECISIONS.md` — the dated decision log; the newest entry wins.
 3. `docs/ARCHITECTURE.md` — what is really built today (as built).
 4. `PROJECT.md` — the idea, the principles, the plan.
+5. `docs/MILESTONES.md` — the game plan: the milestone ladder, the exit
+   gate of each step, the current status.
 
 ## Rules that matter
 
@@ -27,6 +29,10 @@ Orientation for coding agents working in this repository.
 - Rule changes obey the interruption budget (`docs/PRODUCT.md` §5) and carry
   tests in the rule file (`docs/POLICY.md` §6). Every rule change runs
   `cargo test -p af-policy`.
+- Plan and track execution through `docs/MILESTONES.md`. A milestone is
+  done when its exit-gate measurement is committed next to runnable code —
+  not when the code compiles. The benign corpus of M1 is the quiet test for
+  every milestone that can ask a question.
 - Numbers in documents must come from a measurement with a source (a doc
   section, a test, or a spike under `research/` with runnable code).
 - Threat research runs through `research/threats/README.md` (skill:

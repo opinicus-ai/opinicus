@@ -200,7 +200,8 @@ first-class signal, AI-controlled process identity with generic agent
 detection, and the telemetry → research → detections loop. The immediate
 engineering direction is the [learning plan](docs/DIRECTION.md#11-the-learning-plan--immediate-engineering-direction):
 ten questions, answered with measurements from a controlled bypass harness,
-not with preferences.
+not with preferences. The sequenced plan, with the exit gate of each step,
+is [docs/MILESTONES.md](docs/MILESTONES.md).
 
 ### What works and what does not
 
@@ -283,6 +284,8 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 * [PROJECT.md](PROJECT.md) — the idea, the principles and the plan.
 * [docs/DECISIONS.md](docs/DECISIONS.md) — the dated decision log; the
   newest entry wins.
+* [docs/MILESTONES.md](docs/MILESTONES.md) — the game plan: the milestone
+  ladder, the exit gate of each step, and the current status.
 * [docs/PRODUCT.md](docs/PRODUCT.md) — the problem, why the constraints are
   not optional, and what kills the product.
 * [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the layers, the path of one
