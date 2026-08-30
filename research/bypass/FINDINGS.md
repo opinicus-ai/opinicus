@@ -1,0 +1,187 @@
+# The bypass matrix: what the two shipping sensors hold, see, and miss
+
+Harness: `research/bypass/`. Ticket: `[af-1]` (W2 of `docs/DIRECTION.md` §11).
+Machine: Fedora 43, kernel 7.0.9, `x86_64`, uid 1000, no root, no `sudo`,
+`yama/ptrace_scope = 0`, `kernel.io_uring_disabled = 0`, gcc 15.3.1,
+go 1.25.12. Every number below comes from `results/` (regenerable). Re-run
+with `./run.sh` (77 technique runs plus the benign corpus, about 2 minutes).
+
+## Verdict
+
+The two shipping sensors cover far more than their reputation suggests, and
+they fail in exactly three places, each for a named structural reason. Of the
+twelve technique actions run against the product posture (builtin rules,
+`--approve deny`), the firewall **held** one of the most dangerous ones — a
+database client reading `DROP DATABASE` from a file — in all three filter
+modes, it **saw** seven, and it was **silent** on four. Every silent cell has
+a mechanism that would close it, and none of the mechanisms is "a better
+rule": two need new kernel filter coverage, one needs an event kind, one
+needs the input capture to stop keying on program names. The harness also
+caught the product in one behaviour the documents did not know: **a killed
+monitor erases the evidence of its own killing** — the trace survives with
+exactly one line.
+
+## The matrix
+
+`held` — the action did not happen. `seen` — the action happened and the
+trace carries an event for it. `silent` — the action happened and no event
+covers it. The probe pass (catch-all rules, no builtin pack) answers a
+different question: *could a rule act on this event at all?* `holdable` —
+the event was delivered to the engine. `no event` — nothing was delivered.
+`held-indirect` — the probe held a different action of the same run.
+
+| technique / action | scenario | baseline | builtin w-o | builtin a-o | builtin off | probe w-o | probe a-o | probe off |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| static-file-net / write | adjacent: evade-04, evade-06 | works | seen | seen | silent | holdable | holdable | no event |
+| static-file-net / connect | adjacent: evade-04, evade-06 | works | seen | seen | silent | holdable | holdable | no event |
+| rawsys / file | adjacent: evade-06 | works | seen | seen | silent | holdable | holdable | no event |
+| rawsys / connect | adjacent: evade-06 | works | seen | seen | silent | holdable | holdable | no event |
+| escape-setsid / leaf | evade-08 | works | seen | seen | seen | holdable | holdable | holdable |
+| outlive / daemon | behavior-03 | works | seen | seen | seen | holdable | holdable | holdable |
+| uring / uring | evade-15 | works | **silent** | **silent** | **silent** | no event | no event | no event |
+| delete-rename | fs-12, fs-05, fs-07 | works | **silent** | **silent** | **silent** | held-indirect | held-indirect | no event |
+| cred-read / read | secrets-01 | works | silent | seen | silent | held-indirect | holdable | no event |
+| fileclient / byfile-unknown | adjacent: evade-03 | works | **silent** | **silent** | **silent** | held-indirect | held-indirect | no event |
+| fileclient / byfile-psql | adjacent: evade-03 | works | **held** | **held** | **held** | held-indirect | held-indirect | held-indirect |
+| payload-assembly / assembled | evade-05 | works | seen | seen | seen | held-indirect | held-indirect | holdable |
+| pydrop / script-content | **new finding** | works | **silent** | **silent** | **silent** | held-indirect | held-indirect | no event |
+| kill-monitor / kill | evade-07 | works | silent, fail-closed | silent, fail-closed | silent, fail-closed | held-indirect | held-indirect | no event |
+
+Rules that fired in the builtin posture, in total: `filesystem.credentials.read`
+and `memory.credentials.read-mark` (cred-read at `all-opens` only) and
+`database.destructive.drop-database` (byfile-psql, via the input branch, in
+all three modes). Nothing else in the pack matches any technique, which is
+the interruption budget doing its job: most rows are report-shaped events
+waiting for chain-aware rules, not stopping rules.
+
+## What holds — measured
+
+* **The kernel filter is immune to libc bypass.** Static Go binaries and raw
+  `syscall()` file and network access produced the same held opens and
+  connects as libc programs: the filter selects on the syscall number, and a
+  raw `openat` carries the same number. The classic `LD_PRELOAD` evasions
+  (`env -u`, static linking, direct syscalls — `research/spikes/baselines/`)
+  all fail against the external stack.
+* **The launch-model tree cannot be escaped by the classics.** `setsid`,
+  double fork and a re-executed leaf stayed fully traced and fully
+  attributed in every mode (evade-08). The escape surface is what the
+  documents already name: processes the session never started.
+* **A detached daemon cannot outlive the session's knowledge.** The session
+  waited 3.0 s for the daemon and recorded it (`session_end` with
+  `process_count: 2`). It does not escape — but nothing *senses* the
+  detachment: no rule can ask "did this child outlive its parent?", and a
+  30 s daemon would hold the session open for 30 s. That is requirement B.6,
+  unbuilt (behavior-03).
+* **The input capture holds a client reading its payload from a file.** The
+  same binary named `psql` with `-f drop.sql` was held at the exec stop in
+  all three modes, by `database.destructive.drop-database`'s input branch —
+  the statement never appeared in argv. The same binary named `fileclient`
+  was silent everywhere. The name lists decide everything.
+* **Fail-closed holds under attack.** The SIGKILL to the monitor took the
+  whole tree with it, every time, in every mode (`PTRACE_O_EXITKILL`). The
+  attempt never succeeded in surviving.
+
+## The gaps — each with its mechanism
+
+1. **io_uring bypasses the per-syscall filter completely** (evade-15,
+   measured live, `kernel.io_uring_disabled = 0`). One `io_uring_enter`
+   performed `IORING_OP_OPENAT` with write intent; no `openat` syscall ever
+   happened; the write through the returned descriptor left **zero events**
+   in every mode, and no rule could ever act on it. Mechanism: the seccomp
+   filter cannot see ring operations at all. Closing it needs either
+   `io_uring_register`-restricted setups, an `io_uring_enter`-size heuristic,
+   or kernel support (a ring-operation audit hook). Until then it is an
+   honest hole, gated only by the sysctl.
+2. **Delete and rename do not exist** (fs-12, fs-05, fs-07). `unlink` and
+   `rename` produced no events; only the *create* was visible. Mechanism:
+   hold `unlink`, `unlinkat`, `rename`, `renameat2` in the filter and add the
+   event kinds — the schema work the documents already name.
+3. **The input capture keys on program names, and distro reality defeats it.**
+   Two measured rows:
+   * `/usr/bin/python3` is a symlink to `python3.14`; `/proc/<pid>/exe`
+     resolves through the symlink, so the program name is `python3.14`,
+     which is in no interpreter list. A Python script whose text contains
+     `DROP DATABASE` was silent in every mode; the identical script under a
+     binary actually named `python` was held (verified separately with a
+     copy, since a symlink still resolves). The same shape applies to any
+     versioned interpreter. Mechanism: match the interpreter list on the
+     resolved executable's *content family* or a maintained name pattern,
+     never on an exact basename.
+   * A client-shaped binary with `-f payload` that is in no name list is
+     silent everywhere. Mechanism: either extend the name lists or capture
+     read-opens of small files under a size bound at exec time.
+4. **Tamper sensing does not exist, and a killed monitor erases the
+   evidence.** The `/proc` scan and the `SIGKILL` left no event in any mode;
+   the fail-closed machinery killed the tree as designed; and because the
+   recorder buffers its output, the trace survived with exactly **one line**
+   (`session_start`) — the attack erased its own record. Mechanism, in
+   order: durable (unbuffered) writes for the evidence of a dying monitor;
+   monitor identity as a rule-visible fact (B.5); liveness and teardown
+   events (B.6); a tamper event for the scan-and-kill pattern. All four are
+   M4/M5 work; this row is their justification.
+5. **Read-opens are blind in the default mode** (known, re-measured). The
+   credential read was silent at `write-only`, seen at `all-opens` with both
+   credential rules firing. The default stays right (a read is 99.7 % of
+   file traffic); the row exists to keep the trade-off visible.
+
+## What feeds the next milestones
+
+* **M2 (in-process sensor):** the pydrop and byfile rows are its job
+  description. A sensor close to the process sees the interpreter's real
+  identity and the file its arguments name, regardless of name lists. Its
+  registration record must also be durable, or a killed monitor loses it
+  with the rest.
+* **M4 (tamper and quarantine):** the kill-monitor row is the requirements
+  document: sense the scan (B.5 facts), survive with evidence (durable
+  writes), quarantine on the attempt (B.6 liveness for the dying tree).
+* **M5 (correlation):** payload-assembly is visible end to end and still
+  needs a chain rule to become a signal — write, chmod, exec is exactly the
+  two-event shape the session memory was built for. A `marked` rule
+  (write-intent open of a script → exec of that script) is expressible in
+  the shipped engine today and needs no new sensor.
+* **The ledger:** io_uring is confirmed live and unmitigated on a stock
+  Fedora desktop (evade-15); pydrop is a new catalogue candidate for the
+  next research run.
+
+## The benign corpus
+
+A scripted normal session — git init/add/commit/log/status, `cargo new` +
+`cargo build` + run, `npm init` + `npm --version`, `python3`, `find`,
+`grep` — under `--approve deny`, in all three filter modes:
+
+| mode | questions | notes (info-level, allow) | fw exit | session exit |
+| --- | ---: | ---: | --- | --- |
+| write-only | 0 | 1 | 0 | 0 |
+| all-opens | 0 | 5 | 0 | 0 |
+| off | 0 | 1 | 0 | 0 |
+
+The notes are by design, not questions: `allowlist.filesystem.temp-cleanup`
+fires once on the corpus's own cleanup (`rm -rf` of the harness's temporary
+crate directory, an allowlisted safe form), and `all-opens` adds four
+`memory.credentials.read-mark` notes from `npm` reading `~/.npmrc`. The
+marks are the credential-chain memory doing its job at info level.
+`kubectl` is not installed on this machine and the corpus could not
+exercise it. One harness lesson is recorded in `benign.sh`: a corpus crate
+created inside the repository tree is registered into the repository's
+cargo workspace by `cargo new` itself (it rewrites the root manifest), so
+the corpus crate is now created and built outside the repository, and the
+repository manifest excludes `tmp/`.
+
+## Method
+
+* `orchestrate.py` runs every cell: fresh scratch directory, local listener
+  where needed, `timeout 12 s` (25 s for the daemon row), `--retention all`
+  so witnesses are visible, `--approve deny` as the hostile reviewer.
+* The **baseline pass** runs every technique with no firewall first; a
+  technique that cannot produce its effect standalone is a broken
+  measurement, not a finding.
+* The **probe pass** separates "the sensor delivered an event a rule could
+  act on" from "a rule happens to exist". It holds writes, connects, execs
+  from the harness scratch tree and drop-statements in captured input.
+* `classify.py` verifies every effect from the filesystem and the listener
+  log — never from the technique's own stdout — parses the trace
+  structurally, and prints the matrix. `results/matrix.json` holds one
+  record per run.
+* The io_uring technique needs no liburing; it sets the ring up through raw
+  syscalls and reports which sqe layout the kernel accepted
+  (`open_flags` slot on this kernel).

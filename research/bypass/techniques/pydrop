@@ -1,0 +1,25 @@
+#!/bin/sh
+# pydrop — a Python script whose text contains a destructive statement.
+#
+# The monitor snapshots the script file of an interpreter at the exec stop
+# and folds its text into the exec verdict (crates/af-monitor/src/inspect.rs).
+# But the snapshot keys on the program name, and it accepts only "python"
+# and "python3" — while /usr/bin/python3 is a symlink to python3.14 on this
+# machine, /proc/<pid>/exe resolves through the symlink, and the program
+# name becomes "python3.14". The snapshot never fires for the name that
+# every real session uses.
+#
+#   pydrop <marker-file>
+#
+# Writes drop.py next to the marker and runs it with python3. If the input
+# capture fired, the firewall holds python3 at its exec stop and the marker
+# stays empty.
+set -e
+DIR="$(dirname "$1")"
+cat > "$DIR/drop.py" <<'EOF'
+import os
+with open(os.environ["PYDROP_MARKER"], "a") as f:
+    f.write("pydrop\n")
+print("DROP DATABASE customer_prod")
+EOF
+PYDROP_MARKER="$1" python3 "$DIR/drop.py"

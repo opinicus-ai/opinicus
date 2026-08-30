@@ -257,3 +257,4 @@ code.
 | --- | --- |
 | 2026-08-30 | plan adopted; M1–M7 planned; the Linux PoC (exec `ptrace` + `seccomp` filter, session memory, the 144-rule pack, replay, the threat catalogue) is the standing baseline |
 | 2026-08-30 | the ladder is tracked as rohrpost tickets under epic `[af]` (`rp tree`, `rp ready`); each `[af-N]` ticket carries its milestone's deliverables and exit gate |
+| 2026-08-31 | **M1 done.** The bypass matrix shipped (`research/bypass/`): 12 actions against the product posture — 1 held, 7 seen, 4 silent, each silent cell with its mechanism; the corpus ran with zero questions in all three modes. Two new findings: the input capture misses versioned interpreter names (python3.14), and a killed monitor erases its own evidence. Feeds M2, M4, M5 and the next threat-research run |

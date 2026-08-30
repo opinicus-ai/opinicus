@@ -9,6 +9,9 @@ members = [
     "crates/af-approval",
     "crates/af-cli",
 ]
+# The scratch trees of the demo, the tests and the bypass harness live under
+# tmp/. None of their crates may ever join this workspace.
+exclude = ["tmp"]
 
 [workspace.package]
 version = "0.1.0"

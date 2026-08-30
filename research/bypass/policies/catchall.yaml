@@ -1,0 +1,77 @@
+version: 1
+name: bypass.probe
+description: Capability probe for the bypass harness. It holds every action kind the sensors can deliver, so the harness can tell "an event no rule wants" from "no event at all". This is harness equipment, not product policy; it breaks the interruption budget on purpose.
+rules:
+  - id: probe.file-write
+    title: Any write-intent open
+    category: probe
+    risk: approval_required
+    decision: approval_required
+    reason: Probe rule. It holds every write so the harness can see whether the event was delivered to the engine.
+    match:
+      action: file_open
+      write: true
+    tests:
+      - name: a write matches
+        expect: approval_required
+        file_open: { path: /tmp/probe/x, write: true }
+      - name: a read stays quiet
+        expect: allow
+        file_open: { path: /tmp/probe/x, write: false }
+
+  - id: probe.connect
+    title: Any outgoing connection
+    category: probe
+    risk: approval_required
+    decision: approval_required
+    reason: Probe rule. It holds every connect so the harness can see whether the event was delivered to the engine.
+    match:
+      action: network_connect
+    tests:
+      - name: a connect matches
+        expect: approval_required
+        connect: { host: probe.example, addr: 127.0.0.1, port: 443 }
+
+  - id: probe.exec-scratch
+    title: Any exec from the harness scratch tree
+    category: probe
+    risk: approval_required
+    decision: approval_required
+    reason: Probe rule. It holds an exec from the harness scratch tree so the harness can see whether an exec inside the session tree was delivered.
+    match:
+      action: exec
+      exe_glob: ["**/tmp/bypass/**"]
+    tests:
+      - name: an exec from the scratch tree matches
+        expect: approval_required
+        process:
+          pid: 1
+          comm: payload.sh
+          exe: /home/dev/lab/tmp/bypass/run/payload.sh
+          argv: [payload.sh]
+          cwd: /home/dev/lab
+      - name: an exec elsewhere stays quiet
+        expect: allow
+        process:
+          pid: 2
+          comm: ls
+          exe: /usr/bin/ls
+          argv: [ls]
+          cwd: /home/dev/lab
+
+  - id: probe.input-drop
+    title: Any captured input that drops a database
+    category: probe
+    risk: approval_required
+    decision: approval_required
+    reason: Probe rule. It holds any captured script or stdin text that drops a database, so the harness can tell whether the input capture fired at all.
+    match:
+      action: input
+      input_matches: '(?i)\bdrop\s+database\b'
+    tests:
+      - name: a captured drop matches
+        expect: approval_required
+        input: { source: stdin, data: "DROP DATABASE probe;" }
+      - name: other input stays quiet
+        expect: allow
+        input: { source: stdin, data: "SELECT 1;" }
