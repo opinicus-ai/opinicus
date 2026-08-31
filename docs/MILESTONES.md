@@ -222,6 +222,273 @@ review.
 
 ---
 
+## Post-alpha remediation ladder
+
+**Adopted 2026-09-01 from the findings of
+[PROJECT-REVIEW.md](PROJECT-REVIEW.md).** This ladder turns every P0–P3
+finding in the review into measured work. The time horizons in the review are
+sequencing hypotheses, not delivery promises. The gates below decide whether
+the project proceeds, pivots or stops.
+
+The immediate product hypothesis is deliberately narrower than the direction
+of record:
+
+> **Unattended Agent Guardrail:** deterministic guardrails and evidence-grade
+> audit for coding agents running in CI, background jobs, overnight sessions
+> and managed Linux development environments.
+
+This is a hypothesis to test, not a replacement for DIRECTION.md. Until the
+boundary milestones prove otherwise, the product is for cooperative or
+accidental agents and is not protection against a hostile same-user process.
+
+### The remediation ladder
+
+| id | ticket | milestone | review findings | depends on | phase |
+| --- | --- | --- | --- | --- | --- |
+| M8 | `[af-9]` | Audit-trail and Rohrpost integrity | P0-8 | — | foundation |
+| M9 | `[af-10]` | Restore green gates and install CI | P0-1, P0-2, P0-3 | M8 | foundation |
+| M10 | `[af-11]` | Trust, privacy and release baseline | P0-4, P0-5, P3-3 | M9 | foundation |
+| M11 | `[af-12]` | Close or contract-name the boundary gaps | P0-6, P0-7, P1-6, P1-7, P1-8 | M9, M10 | boundary |
+| M12 | `[af-13]` | Headless CI guard and operational UX | P1-1, P1-9 | M11 | wedge |
+| M13 | `[af-14]` | Reproduce on real hosts, workloads and agents | P1-2, P1-3, P1-4, P1-5 | M11 | evidence |
+| M14 | `[af-15]` | Signed distribution and adopter documentation | P1-11, P3-1 | M10, M12, M13 | release |
+| M15 | `[af-16]` | Customer, business-model and naming evidence | P1-10, P1-12, P3-2 | M10 | market |
+| MG | `[af-gate]` | Go, pivot or stop decision | §15–§16 gates | M12, M13, M14, M15 | decision |
+| M16 | `[af-17]` | Control plane and signed policy channel | P2-1, P2-2 | MG | conditional product |
+| M17 | `[af-18]` | Privileged hostile-peer boundary | P2-3 | M11, MG | conditional security |
+| M18 | `[af-19]` | Linux coverage expansion | P2-4, P2-5, P2-6 | M11, M13, MG | conditional runtime |
+| M19 | `[af-20]` | Windows measured spike | P2-7 | MG | conditional platform |
+| M20 | `[af-21]` | Telemetry consent v2 | P2-8 | M10, MG | conditional privacy |
+
+M15 may run in parallel with M11–M14. M16–M20 remain blocked behind MG:
+they are not authorized by technical enthusiasm. MG closes as `done` only on
+a measured **go**. A pivot rewrites the affected milestones before unblocking
+them; a stop drops them and keeps the repository as an open-source research
+project.
+
+### M8 — Audit-trail and Rohrpost integrity (`[af-9]`)
+
+**Goal.** Restore the missing follow-up identified by the review and make the
+project's own evidence trail resistant to accidental erasure.
+
+**Deliverables.** Re-create the missing audit-trail-tamper ticket from the
+surviving workflow transcript; make trace paths and other firewall-owned
+evidence paths rule-visible B.5 facts; add measured scenarios for trace
+truncation, history erasure and transcript tampering; document the 2026-09-01
+Rohrpost incident without attributing an unknowable cause; add a pre-workflow
+hash/status snapshot procedure.
+
+**Exit gate.** Every seeded evidence-erasure technique is either prevented,
+sensed before evidence is lost, or explicitly named as an uncovered gap; the
+benign corpus raises zero new questions; `rp doctor` passes; folding the event
+log reproduces the ticket snapshot; a controlled read-only review preserves
+before/after hashes.
+
+### M9 — Restore green gates and install CI (`[af-10]`)
+
+**Goal.** Make every repository claim continuously enforceable again.
+
+**Deliverables.** Remove the `af-monitor` unit-test flake without sleep
+inflation; repair e2e T8/T11 deterministically; classify the three correlation
+rules in `count-rules.py`; reconcile generated rule counts and regenerate the
+benign summary; add required CI for fmt, clippy, workspace tests, e2e,
+quiet-check, policy tests, the Landlock count check and threat `check.py`.
+
+**Exit gate.** The complete gate passes 20 consecutive times; e2e is 54/54 in
+every run; `count-rules.py` exits zero; the benign corpus has no `FAIL`; a
+synthetic red change is rejected by CI.
+
+### M10 — Trust, privacy and release baseline (`[af-11]`)
+
+**Goal.** Make the project safe to hand to an external evaluator without
+claiming more protection than it provides.
+
+**Deliverables.** Publish the cooperative-agent threat model and forbidden
+marketing claims; add `SECURITY.md` and a disclosure path; mask credentials in
+`DATABASE_URL`; create traces, consent and outbox files with mode 0600; add
+`cargo-deny`/`cargo-audit` and enforce the telemetry crate's no-network
+contract; replace the placeholder repository metadata; define signed commits,
+signed artifacts, SBOM and release verification.
+
+**Exit gate.** Two independent adversarial reviewers find no claim beyond the
+measured matrix; a signed dry-run artifact verifies on a second machine;
+secret-negative tests and mode tests pass; dependency/advisory checks are
+green; no external distribution has happened before this gate.
+
+### M11 — Close or contract-name the boundary gaps (`[af-12]`)
+
+**Goal.** Decide the security contract with measurements rather than leaving
+known bypasses in prose.
+
+**Deliverables.** Measure default denial of `io_uring_setup`/`io_uring_enter`
+on the corpus and five real workloads; close inherited launch descriptors and
+measure `SCM_RIGHTS`; build a hostile same-UID harness for `ptrace`,
+`process_vm_writev`, `/proc/<pid>/mem`, pidfd routes and external monitor
+signals under Yama 0–3; publish the exact Landlock set contract and stress it
+with symlink, bind-mount, worktree and temporary-directory cases; encode the
+pointer-derived-path rule as a type-level invariant with race mutation tests.
+
+**Exit gate.** Every row is `held`, `sensed` or an explicitly accepted gap with
+a decision-log entry; the `io_uring` compatibility decision is recorded;
+pre-opened launch capabilities are closed or named; no advisory path can reach
+an allow decision; the benign corpus remains quiet.
+
+### M12 — Headless CI guard and operational UX (`[af-13]`)
+
+**Goal.** Build the narrow product wedge supported by the review evidence.
+
+**Deliverables.** Add a headless `guard --ci` mode with deterministic deny,
+report and exit-code semantics; emit a machine-readable session summary with
+rule IDs and evidence references; add durable local logging, incident guidance,
+a false-positive report path, timeout progress and a clear session-end answer
+to “what ran?”; keep interactive approval as a development and rule-authoring
+surface rather than the commercial core.
+
+**Exit gate.** A 30-day self-pilot on a real CI job records every decision,
+causes zero merge-blocking false denials and needs less than one hour of
+operator work per month; every deny maps to a tested rule and replayable
+evidence.
+
+### M13 — Reproduce on real hosts, workloads and agents (`[af-14]`)
+
+**Goal.** Replace the single-host synthetic evidence base with evidence that
+can support an external claim.
+
+**Deliverables.** Commit reproducible result summaries; run quiet and
+performance matrices on at least two distributions initially and five by the
+decision gate; benchmark real Cargo, npm and container builds against baseline
+and a relevant vendor sandbox; install and measure at least three real coding
+agents; run ten developers across at least ten real projects for two weeks;
+measure identity precision/recall and whether any identity/sensor rule can pass
+the interruption budget.
+
+**Exit gate.** Published p50/p95 overhead, question rate, floor-disable rate and
+identity precision/recall; target thresholds are p95 below 2×, median below two
+questions per day and floor disabled in fewer than 20% of sessions. A failed
+threshold is recorded and narrows or kills the daily-driver claim.
+
+### M14 — Signed distribution and adopter documentation (`[af-15]`)
+
+**Goal.** Let an external evaluator install, verify, understand and remove the
+alpha safely.
+
+**Deliverables.** Produce a signed versioned artifact and installation channel;
+add changelog, completions/man page, newcomer quickstart, rule-authoring guide,
+incident-response guide, uninstall instructions and release provenance; refresh
+or remove the stale generated architecture overview.
+
+**Exit gate.** Five external evaluators verify the signature and reach a first
+guarded session in under ten minutes without maintainer intervention; three
+new readers write and test a rule unaided; no release claim exceeds M11's
+contract.
+
+### M15 — Customer, business-model and naming evidence (`[af-16]`)
+
+**Goal.** Decide whether this is a company, a narrower product or an open-source
+research project.
+
+**Deliverables.** Interview 25 qualified platform/security engineers, including
+at least ten organizations with an agent incident; run the “3am unattended
+agent” demo and install-friction test; conduct five incumbent-gravity
+conversations; offer paid pilots at a stated price; document the buyer, budget
+and alternatives; decide whether detections remain open and the control plane
+is commercial; perform a name/trademark collision review.
+
+**Exit gate.** A decision memo records interview evidence, booking and install
+rates, willingness to pay, competitor losses and the chosen open/commercial
+boundary. Fewer than 8/25 naming an owner and budget, less than 1% qualified
+demo booking, or 0/30 accepting a paid pilot is a pivot/stop signal, not a
+reason to rewrite the threshold.
+
+### MG — Go, pivot or stop (`[af-gate]`)
+
+**Goal.** Prevent the enterprise roadmap from starting before technical,
+usability and demand evidence agree.
+
+**Exit gate.** **Go** requires all foundation gates green, defensible boundary
+contracts, replication on at least three of five distributions, the quiet and
+performance thresholds of M13, and at least three signed pilots worth at least
+$10k annualized within two quarters of the wedge MVP. A pivot records a new
+product hypothesis and rewrites dependencies. A stop preserves the research
+assets and drops M16–M20. The decision and raw measurements go in
+DECISIONS.md.
+
+### M16 — Control plane and signed policy channel (`[af-17]`, conditional)
+
+**Deliverables.** Central policy distribution, trace aggregation, audit/SIEM
+export and a signed semantic-versioned policy channel whose updates do not
+require a binary release. Keep detections open unless M15 records contrary
+customer evidence.
+
+**Exit gate.** Three pilots run centrally managed policy for 30 days; a valid
+pack updates independently; a modified or rolled-back pack fails verification;
+tenant boundaries and operator actions are audited.
+
+### M17 — Privileged hostile-peer boundary (`[af-18]`, conditional)
+
+**Deliverables.** Compare separate-UID supervision, eBPF/BPF-LSM, fanotify and
+other object-based brokers against the M11 hostile harness. Keep the developer
+edition's unprivileged contract separate from enterprise guarantees.
+
+**Exit gate.** A runnable prototype and FINDINGS matrix show each same-user,
+`io_uring` and live-descriptor route denied or explicitly costed; performance,
+privilege and deployment costs are measured; the decision log chooses or
+rejects the tier.
+
+### M18 — Linux coverage expansion (`[af-19]`, conditional)
+
+**Deliverables.** Measure live correlation before integrating it; add aarch64
+filter support and fail-closed ABI labeling; measure attach mode across Yama,
+PID reuse and multithreaded starts, or formally reject attach in DECISIONS.md.
+
+**Exit gate.** A live discrepancy can hold an action without a benign firing;
+aarch64 tests run on native hardware/CI; unsupported ABIs are always labeled
+exec-only; attach is either measured reliable within a named contract or
+removed from the product direction.
+
+### M19 — Windows measured spike (`[af-20]`, conditional)
+
+**Deliverables.** Run the eight questions from the M7 paper survey on a real
+Windows host: injection, `ntdll` coverage, debug-loop races, job containment,
+registry and handle semantics, path normalization, performance and evasion.
+
+**Exit gate.** Runnable code and measurements select a Windows product shape or
+record a Linux-only decision. No paper-only result may satisfy the gate.
+
+### M20 — Telemetry consent v2 (`[af-21]`, conditional)
+
+**Deliverables.** Design the backend-era consent model, redaction limits,
+retention, deletion, tenancy, incident response and inspect-before-send flow;
+review JWT, PEM, generic encoded content and adversarial samples; keep upload
+code out until privacy review passes.
+
+**Exit gate.** Two independent privacy reviewers approve the design; negative
+fixtures leak no credential; revocation and deletion are exercised end to end;
+the no-network dependency gate remains green until a separately approved
+backend client lands. Any credential in a sample ends the telemetry program.
+
+## Coverage of the project-review findings
+
+Every prioritized finding is assigned exactly once as primary work:
+
+| priority | findings | milestone |
+| --- | --- | --- |
+| P0 | P0-8 | M8 |
+| P0 | P0-1, P0-2, P0-3 | M9 |
+| P0/P3 | P0-4, P0-5, P3-3 | M10 |
+| P0/P1 | P0-6, P0-7, P1-6, P1-7, P1-8 | M11 |
+| P1 | P1-1, P1-9 | M12 |
+| P1 | P1-2, P1-3, P1-4, P1-5 | M13 |
+| P1/P3 | P1-11, P3-1 | M14 |
+| P1/P3 | P1-10, P1-12, P3-2 | M15 |
+| P2 | P2-1, P2-2 | M16 |
+| P2 | P2-3 | M17 |
+| P2 | P2-4, P2-5, P2-6 | M18 |
+| P2 | P2-7 | M19 |
+| P2 | P2-8 | M20 |
+
+---
+
 ## The rule that moves a milestone
 
 * A milestone is done when its exit-gate measurement is committed next to
@@ -239,9 +506,11 @@ review.
   New scenarios become rules only under the budget.
 * **The bench.** Every milestone re-measures, so the numbers of
   DETECTION-RESEARCH stay honest.
-* **The ledger.** `research/threats/check.py` stays green, and the blocked
-  count is a progress metric: 74 scenarios are blocked on observables today.
-  Each sensor that lands unblocks a counted set.
+* **The ledger.** `research/threats/check.py` stays green. The current ledger
+  no longer treats missing observables as the progress count; every catalogue
+  scenario's required observable is produced today. Progress is measured by
+  deterministic, interruption-budget-compliant coverage and by explicitly
+  named gaps.
 
 ## Not yet, on purpose
 
@@ -264,4 +533,5 @@ code.
 | 2026-08-31 | **M4 done.** Tamper sensing and the quarantine flow shipped. The B.5 facts are rule-visible (`SessionMeta` carries the monitor pid and the sensor facts; the matcher gained `signal_target`), the kernel filter now holds `kill`/`tkill`/`tgkill` against the monitor pid so the signal is judged **before it runs**, and four sensed shapes reach the engine as actions (`signal_send`, `tamper`) judged by the new 5-rule `policies/tamper.yaml`; a rule with `quarantine: true` suspends the whole tree (`SIGSTOP`, group stops held), shows the evidence and takes one ruling, all of it in the trace. The recorder writes every process event through, so a SIGKILLed monitor leaves the record (2 lines against M1's 1, filter and floor off). **The negative test decided one rule**: the detach first quarantined, and the corpus refused it — `git maintenance run --detach` raises the same fact on every commit — so detach and outlive report and never ask. Gate (`research/bypass/tamper.sh`, 3 runs, identical): kill-monitor 1/1/1, escape 3 facts/0 quarantines, respawn 2/2/2, strip-preload 1/1/1 — 4 of 4 seeded techniques; the benign corpus: zero questions, zero agent tags, **zero quarantines** in all three modes, with and without the sensor (M2 corpus gate re-run green); bench A/B pre/post M4: 1.00×–1.02×, inside noise. Evidence: `research/bypass/FINDINGS.md` (After M4), `tests/e2e.sh` T1–T18, `docs/ARCHITECTURE.md` §3d |
 | 2026-08-31 | **M5 done.** The correlation engine shipped (`agent-firewall correlate`, `crates/af-correlate`): it reads the monitor's trace against the sensor's trace and registration record and raises `discrepancy` events (4 kinds) that `policies/correlation.yaml` judges — the first post-hoc judge over recorded pairs. Gate (`research/bypass/correlate.sh`, 3 runs, identical): silent-subtree 1/0, unreported-spawn 2/0, contradicted connection 1/0 (bypass/benign) — two rules quarantine, one reports; the benign corpus fired **zero** in all three filter modes (zero questions, zero quarantines held). The gate refused the write-open comparison with numbers (30 firings on one normal session: mkstemp-class internals, reflog double-opens, failed `/dev/tty` probes) — demoted to `--compare-write-opens` research telemetry; `spawn_reported_unseen` measured 0/0 (the exec stop is a kernel guarantee) and ships no rule; the freeze technique measured a product defense (the monitor continues a self-stopped tracee). The monitor now reads the `dynamic_link` fact at the exec stop; e2e T19–T22 proves the emitted findings replay. Evidence: `research/bypass/FINDINGS.md` (After M5), `docs/ARCHITECTURE.md` §3e, `docs/DECISIONS.md` (2026-08-31) |
 | 2026-08-31 | **M6 done.** Telemetry and the alpha shipped: `crates/af-telemetry` with the `agent-firewall telemetry` family (status/on/off/sample/inspect/destroy) and `run --telemetry`. Consent is off by default, granular over five scopes (tree, actions, content, env, identity), revocable, kept in one local file that no other command reads — with telemetry off the product is complete. A sample centers on a trigger (quarantine, tamper, signal to the monitor, discrepancy, question, decision above allow) with a ±20-event window that merges on overlap; every field is scope-gated, secret-redacted (the monitor's env pattern of RESEARCH.md §4 generalized to every free text) and pseudonymized (session → `s-<hash>`, pids → `p1…`, home/login/host masked, time → ms offsets); environment values, the baseline and absolute time never travel in any scope. **Nothing is sent anywhere**: `cargo tree -p af-telemetry` names `af-core`, `serde`, `serde_json` only; the research backend does not exist, not as a stub. The alpha banner (*not a production security boundary*) prints before every `run` and in `doctor`, with the disclosure in README `The alpha` and the packaging spec in `docs/TELEMETRY.md`. Gate: fmt + clippy clean, **361 tests green** (26 suites), e2e **54/54**, the benign corpus **zero questions, zero agent tags, zero quarantines** in all three filter modes, `check.py` agrees (76 incidents, 200 scenarios); a sample generated, inspected and destroyed locally with the backend untouched (CLI test `a_sample_is_generated_inspected_and_destroyed_locally`, `run --telemetry` packages without a trace file; the crate test `no_secret_baseline_session_id_or_raw_pid_reaches_the_sample_text` proves the negative half on a session carrying a secret on the command line, in the environment, on stdin and in the baseline). No git tag, no version bump, nothing published. Evidence: `docs/TELEMETRY.md`, `docs/ARCHITECTURE.md` §3f, `crates/af-telemetry/tests/sample.rs`, `crates/af-cli/tests/cli.rs` |
-| 2026-08-31 | **M7 done.** The Windows survey shipped on paper (`research/spikes/windows-notes/`), and the gate is satisfied by two decisions: **the sensor candidate is a launch-injected DLL with Detours-style inline trampolines on the `ntdll` syscall stubs** — one chokepoint every process maps, where the Win32 layer is a per-module surface a native caller skips — and **the observer candidate for the no-admin edition is the launch loop** (`DEBUG_PROCESS` debug events, which suspend the whole process before it runs user-mode code, plus a job object with `KILL_ON_JOB_CLOSE` as the `EXITKILL` analogue), with ETW as the assurance tier and WFP/minifilter as the enterprise tier. The headline finding is a hole the plan must absorb: **Windows has no unprivileged equivalent of the shipped `seccomp`+Landlock pair** — every kernel-side observer is behind elevation — so the unprivileged product rests on a hook (a sensor, never a boundary), a detectable debug loop and a job object. The schema review says the M2 sensor contract ports field for field while the monitor half is where the Linux-isms live (`sid`, `dynamic_link`, signal numbers, the LSM floor), and names the gaps: registry (largest), handles and delete-on-close, the ETW provider as a fact, image hashes, token facts, path normalization. Eight measured questions for a Windows spike close the survey. Nothing was run (no Windows host), every Windows claim cites Microsoft documentation, no code, no schema commitment, nothing blocking
+| 2026-08-31 | **M7 done.** The Windows survey shipped on paper (`research/spikes/windows-notes/`), and the gate is satisfied by two decisions: **the sensor candidate is a launch-injected DLL with Detours-style inline trampolines on the `ntdll` syscall stubs** — one chokepoint every process maps, where the Win32 layer is a per-module surface a native caller skips — and **the observer candidate for the no-admin edition is the launch loop** (`DEBUG_PROCESS` debug events, which suspend the whole process before it runs user-mode code, plus a job object with `KILL_ON_JOB_CLOSE` as the `EXITKILL` analogue), with ETW as the assurance tier and WFP/minifilter as the enterprise tier. The headline finding is a hole the plan must absorb: **Windows has no unprivileged equivalent of the shipped `seccomp`+Landlock pair** — every kernel-side observer is behind elevation — so the unprivileged product rests on a hook (a sensor, never a boundary), a detectable debug loop and a job object. The schema review says the M2 sensor contract ports field for field while the monitor half is where the Linux-isms live (`sid`, `dynamic_link`, signal numbers, the LSM floor), and names the gaps: registry (largest), handles and delete-on-close, the ETW provider as a fact, image hashes, token facts, path normalization. Eight measured questions for a Windows spike close the survey. Nothing was run (no Windows host), every Windows claim cites Microsoft documentation, no code, no schema commitment, nothing blocking |
+| 2026-09-01 | **Post-alpha remediation adopted.** The complete review in `docs/PROJECT-REVIEW.md` is mapped into M8–M20 and decision gate MG. M8–M15 cover every P0/P1/P3 issue; MG prevents the conditional P2 roadmap from starting without technical, usability and paid-demand evidence. Rohrpost epic `AF-597bhj` and its 14 children carry the same exit gates; `rp ready` begins with `AF-xa01k3` (`[af-9]`). |
