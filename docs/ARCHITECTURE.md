@@ -851,7 +851,7 @@ rather than one interception mechanism.
 | correlation of expected vs observed | **measured engine** — `agent-firewall correlate` (§3e), post-hoc over the recorded pair, three rules shipped on a zero-benign gate; live judging is M6 | a discrepancy between the in-process view and this document's sensors is a high-severity signal on its own (DIRECTION.md §3.4) |
 | Landlock | **ships** (§3c) | in-kernel "always no" rules; removes the question ([DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4) |
 | `fanotify` / eBPF | enterprise tier | privileged observation, later (DIRECTION.md §10) |
-| Windows hooks (Win32/`ntdll`) | planned track | the Windows counterpart of the in-process sensor, under the same hook-visibility rule |
+| Windows hooks (Win32/`ntdll`) | surveyed, not built | the sensor candidate is chosen — `ntdll` trampolines in a launch-injected DLL (`research/spikes/windows-notes/`) — with the launch loop (debug events + job object) as the no-admin observer and ETW/WFP/minifilter as the privileged tiers; the unprivileged floor candidates are AppContainer and the experimental sandbox launch API. No Windows code exists
 
 Five additions land in this architecture without changing sections 1–7:
 
