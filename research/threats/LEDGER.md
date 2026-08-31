@@ -22,35 +22,36 @@ for how to run it again.
 | --- | ---: |
 | incident reports in `incidents/` | 76 |
 | scenarios in `scenarios/` | 200 |
-| scenarios the monitor can see today (`exec` or `input` only) | **126** |
-| scenarios that need an observable the monitor does not make | **74** |
+| scenarios whose only needed observable is `exec`/`input` | **126** |
+| scenarios that need `file_open` or `network_connect` — both shipped since the seccomp layer | **74** |
 
 ## Observable summary
 
 A scenario is only useful when the monitor can produce the event that its
-signal needs. This version makes two action kinds, `exec` and `input`. It does
-not make `file_open` or `network_connect`.
+signal needs. Refreshed 2026-08-31, after the `seccomp` filter and the
+M1–M7 ladder shipped: the monitor now emits `exec`, `input`, `file_open` and
+`network_connect`, the Landlock floor answers the always-no rules in the
+kernel, tamper and correlation events exist, and the research in-process
+sensor adds `file_read`, `file_delete`, `file_rename`, `library_load` and
+`env_change` when it is active. The split below is therefore no longer a
+blocker count — it says which shipped observable a scenario's signal needs.
 
 | the signal needs | scenarios | state |
 | --- | ---: | --- |
-| `exec` or `input` only | 126 | can become a rule now |
-| `file_open` or `network_connect` | 74 | blocked on the monitor |
+| `exec` or `input` only | 126 | visible since the first version |
+| `file_open` or `network_connect` | 74 | visible since the seccomp layer |
 
-**37 percent of the threat catalogue cannot be expressed today.** This is
-independent evidence for the layer 1 work that `docs/DETECTION-RESEARCH.md`
-recommends: `seccomp RET_TRACE` adds exactly these two observables for about
-1.2 times the cost.
-
-Seven rules in `policies/` were already written against the missing
-observables, so they can never fire. `agent-firewall policy list` marks them
-`(inactive)` and names them.
+Every catalogue scenario's needed observable is produced by the shipped
+monitor today. The actionable frontier is rules, not observables — the
+honest blind spots that remain are in "Known blind spots" below.
 
 ## Coverage summary
 
-`blocked` counts the scenarios of that pack that need an observable the
-monitor does not make.
+`file/net` counts the scenarios of that pack whose signal needs the
+`file_open`/`network_connect` observables. Both ship today, so the column is
+coverage-planning input, not a blocker count.
 
-| policy pack | gap | partial | blocked | actionable now |
+| policy pack | gap | partial | file/net | actionable now |
 | --- | ---: | ---: | ---: | ---: |
 | cross (spans packs) | 45 | 13 | 29 | 29 |
 | process | 47 | 5 | 13 | 39 |
@@ -109,7 +110,7 @@ facts, the sources and the lesson for the policy pack.
 example, a signal written only in observables the monitor has, a decision, a
 severity and a coverage state.
 
-| axis | scenarios | gap | partial | blocked on an observable |
+| axis | scenarios | gap | partial | needs file/net |
 | --- | ---: | ---: | ---: | ---: |
 | behavior | 20 | 14 | 6 | 5 |
 | cloud | 21 | 18 | 3 | 7 |
@@ -122,10 +123,10 @@ severity and a coverage state.
 | supply | 19 | 17 | 2 | 4 |
 | vcs | 21 | 13 | 7 | 8 |
 
-`exfil` and `secrets` are the most blocked axes: 12 of 20 scenarios in each
-need an observable that the monitor does not make. That is why the firewall
-today is strong on a destructive command and weak on data that leaves the
-machine.
+`exfil` and `secrets` are the axes that lean hardest on the file and network
+observables (12 of 20 scenarios in each). Those observables ship today, so
+these axes are now the natural home of new chain rules — the firewall no
+longer has to be weak on data that leaves the machine.
 
 ## Known blind spots
 
@@ -133,9 +134,9 @@ Behaviour that no observable of any planned layer reports.
 
 | behaviour | why it is invisible |
 | --- | --- |
-| `io_uring` batch input and output | The operations make no system call that a per-call monitor sees. Named in `scenarios/evade.md`. |
-| An action inside a running program | No new program starts, so no exec stop happens. Layer 1 closes the file and network part of this. |
+| `io_uring` batch input and output | The operations run inside one `io_uring_enter` call, so no per-operation system call happens and both boundaries and the sensor record nothing. Measured live: `research/bypass/FINDINGS.md` gap 1 (`evade-15`). |
 | Content in a pipe or a socket | Nothing is stored, so there is nothing to read. Measured in `docs/RESEARCH.md` section 6. |
+| Content capture keyed on interpreter names | `/usr/bin/python3` is a symlink to `python3.14`, which is in no interpreter list, so the script snapshot never fires for Python on this machine. The research sensor sees it (pydrop, `research/bypass/FINDINGS.md`); the shipped capture does not yet. |
 
 ## Run log
 

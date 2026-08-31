@@ -7,7 +7,9 @@
 //     "knownReports": [{ "f": "<file>.md", "t": "<title>" }, ...] }
 // knownReports lists incident reports already on disk (do not redo them).
 //
-// Current state model (matches the repo after the ledger rebuild):
+// Current state model (refreshed 2026-08-31 for the post-ladder monitor:
+// file_open and network_connect ship; the research sensor, identity, the
+// kernel floor, tamper and correlation events exist):
 // - incidents/<axis>-<slug>.md are the incident source of truth.
 // - scenarios/<axis>.md are the scenario source of truth; each scenario is a
 //   "### SC <axis>-NN <title>" section. Researchers APPEND new sections with
@@ -45,14 +47,22 @@ PROJECT: Agent Firewall. A local, deterministic security layer ("EDR for coding 
 that launches a coding agent (Claude Code, Codex, Pi, Gemini CLI, ...) under a ptrace
 monitor on Linux and applies policy to what the agent and ALL its descendant processes do.
 
-What the monitor of the CURRENT version can observe:
+What the monitor of the CURRENT version can observe (all shipped):
 - exec: program name, exe path, full argv, working directory, environment, process ancestry
 - input: script text or stdin text captured before it reaches a shell or interpreter
-- file_open and network_connect exist in the rule language but the current monitor does
-  not emit them yet; scenarios that need them are counted as "blocked on an observable".
+- file_open (write intent) and network_connect, held inside running programs by a
+  seccomp filter. These ship: classify a scenario by the observable its signal
+  fundamentally needs, not by availability.
+- the research in-process sensor (an LD_PRELOAD spike, not part of the shipped decision
+  path) additionally produces file_read, file_delete, file_rename, library_load and
+  env_change when it is active
+- the launcher tags AI-controlled sessions (agent identity), a Landlock floor enforces
+  the always-no rules in the kernel, and tamper and correlation events exist
+  (policies/tamper.yaml, policies/correlation.yaml)
 
-Policy decisions: allow | allow_once | allow_session | approval_required | deny | terminate.
-Builtin policy packs: filesystem, git, process, network, database, cloud (policies/*.yaml).
+Policy decisions: allow | allow_once | allow_session | approval_required | deny | terminate,
+plus quarantine (tamper rules). Builtin policy packs: filesystem, git, process, network,
+database, cloud, memory, tamper, correlation, allowlist (policies/*.yaml).
 `
 
 const AXES = [
@@ -135,7 +145,15 @@ shell builtins that never exec, double-fork/setsid daemons escaping ancestry tra
 killing or ptrace-attacking the monitor, interpreters as generic proxies, memfd_create
 and /proc/self/fd execution, LD_PRELOAD and linker tricks, symlink and hardlink relabeling,
 TOCTOU between check and action, self-compiled binaries from heredocs, base32/hex payload
-variants, tar/pipe smuggling, namespace and unshare tricks, io_uring batch I/O.`,
+variants, tar/pipe smuggling, namespace and unshare tricks, io_uring batch I/O.
+ This run also folds in locally measured findings from the bypass harness
+ (research/bypass/FINDINGS.md - cite it as a source): the script-snapshot content
+ capture keys on exact interpreter names, so /usr/bin/python3 (a symlink to python3.14)
+ escapes it and a Python script containing a destructive statement runs unseen - the
+ pydrop technique, measured in all three filter modes. Judge the newer evasion shapes
+ against what now exists: policies/tamper.yaml and policies/correlation.yaml sense
+ monitor-kill, escape, respawn and stripped-preload shapes, and io_uring already exists
+ as SC evade-15 - do not duplicate it.`,
   },
 ]
 
@@ -212,7 +230,7 @@ INCIDENT REPORTS ALREADY ON DISK (never rewrite or duplicate these; you may refe
 report by its filename without the .md as a source slug):
 ${KNOWN}
 
-PRIORITY THIS RUN: incident coverage is broad (57 reports). Find at most 1-2 genuinely
+PRIORITY THIS RUN: incident coverage is broad (76 reports). Find at most 1-2 genuinely
 NEW incidents for your axis; if nothing new is worth reporting, report zero and put all
 effort into scenarios that the existing catalogs do not have yet. A rerun that returns
 only a handful of high-quality new items is a success; re-deriving known scenarios is a
@@ -306,22 +324,23 @@ whole file), applying these rules:
 
 1. Count the new incidents (status new-report-written) and new scenarios from the digest.
 2. "Headline numbers" table: add the deltas. incident reports count += new incidents;
-   scenarios count += new scenarios; "scenarios the monitor can see today" += new
-   scenarios whose needs_observable is exec-input; "scenarios that need an observable
-   the monitor does not make" += the rest. Also update the percent line under the
-   Observable summary if the numbers moved (recompute from the table values).
+   scenarios count += new scenarios; "scenarios whose only needed observable is
+   exec/input" += new scenarios whose needs_observable is exec-input; "scenarios that
+   need file_open or network_connect (both shipped)" += the rest.
 3. "Observable summary" table: add the same deltas to its two rows.
-4. "Coverage summary" table (per policy pack, columns gap/partial/blocked/actionable):
+4. "Coverage summary" table (per policy pack, columns gap/partial/file-net/actionable):
    for each new scenario, add 1 to its pack row: gap or partial per its coverage value
-   (covered adds nothing and is not in the table); blocked += 1 if needs_observable is
-   not exec-input; actionable = previous actionable + (1 if exec-input and coverage is
-   gap or partial else 0). Recompute the total row.
+   (covered adds nothing and is not in the table); file-net += 1 if needs_observable is
+   not exec-input (that column means the signal needs the file/network observables,
+   which ship today - it is planning input, not a blocker); actionable = previous
+   actionable + (1 if exec-input and coverage is gap or partial else 0). Recompute the
+   total row.
 5. "Incident ledger" per-axis report-count table: recount or increment the axis rows and
    keep the table sorted as it is.
-6. "Scenario ledger" per-axis table (columns: scenarios | gap | partial | blocked on an
-   observable): increment the axis row of each new scenario the same way. Then refresh
-   the sentence under the table that names the most blocked axes, only if the leader
-   changed.
+6. "Scenario ledger" per-axis table (columns: scenarios | gap | partial | needs file/net):
+   increment the axis row of each new scenario the same way. Then refresh the sentence
+   under the table that names the axes leaning hardest on the file/net observables, only
+   if the leader changed.
 7. "Run log": append one row. Columns are: date | incidents | scenarios | notes. Get
    today's date with: date +%Y-%m. notes = one short line: how many new incidents and
    scenarios this rerun added, and which axes returned nothing new:
