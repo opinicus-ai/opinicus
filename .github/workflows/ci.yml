@@ -1,17 +1,21 @@
 # The complete gate, continuously enforced.
 #
 # [af-10] (M9): every claim the repository makes must be checked on every
-# push and pull request. The job runs scripts/gate.sh, the same script a
-# person runs locally: fmt, clippy, workspace tests, policy tests, e2e,
+# push and pull request. The gate job runs scripts/gate.sh, the same script
+# a person runs locally: fmt, clippy, workspace tests, policy tests, e2e,
 # quiet-check, the Landlock count-rules drift guard, and the threat-ledger
 # checker. No check may be skipped; the gate is red until all of them pass.
 #
-# Runners: Blacksmith (https://blacksmith.sh) — Firecracker microVMs with
-# the same image as GitHub's ubuntu-2404 runners, registered through the
-# Blacksmith GitHub app on the opinicus-ai organization (app.blacksmith.sh).
-# The ptrace/seccomp/Landlock kernel surface the tests need is available in
-# the VM. If the app is missing the job queues forever; that is the first
-# thing to check when this job does not start.
+# Runners: GitHub-hosted ubuntu-24.04 for now. The org's Blacksmith
+# installation (app: blacksmith-sh, all repositories) is waiting on their
+# support to allowlist the org, so blacksmith-* labels queue forever until
+# they unblock us. Migrating back is a three-line swap per job:
+#
+#   gate:   runs-on: blacksmith-4vcpu-ubuntu-2404
+#   docker: runs-on: blacksmith-2vcpu-ubuntu-2404
+#           useblacksmith/setup-docker-builder@v1   before buildx use
+#           useblacksmith/build-push-action@v2      instead of
+#           docker/build-push-action@v7             (colocated layer cache)
 #
 # Actions are pinned to their latest major versions; every bundled action
 # runs its node24 runtime. The repository itself needs no Node toolchain —
@@ -33,7 +37,7 @@ permissions:
 
 jobs:
   gate:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -68,13 +72,13 @@ jobs:
       - name: The complete gate
         run: scripts/gate.sh
 
-  # The container image, built through the Blacksmith docker builder so
-  # the layer cache sits next to the runners (40x faster cache restores;
-  # https://docs.blacksmith.sh/blacksmith-caching/docker-builds). The image
-  # is loaded and smoke-checked on every run; pushing to a registry is a
-  # release action (M14), not a CI action.
+  # The container image. Built with buildx and the GitHub Actions cache;
+  # on Blacksmith the same job switches to their colocated layer cache
+  # (40x faster restores) via the swap noted above. The image is loaded
+  # and smoke-checked on every run; pushing to a registry is a release
+  # action (M14), not a CI action.
   docker:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -83,11 +87,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Set up the Blacksmith docker builder
-        uses: useblacksmith/setup-docker-builder@v1
-
       - name: Build the image
-        uses: useblacksmith/build-push-action@v2
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
