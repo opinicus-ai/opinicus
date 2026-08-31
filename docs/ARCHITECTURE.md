@@ -666,6 +666,17 @@ The kernel floor is strong in its own way:
   The normalized schema has the event kinds (`file_delete`, `file_rename`);
   only the in-process research sensor produces them today
   (`research/spikes/inprocess/`), and no shipped rule can act on them.
+* **Batch input and output through `io_uring`.** The operations run inside
+  the kernel through one `io_uring_enter` call and make no per-operation
+  system call, so both boundaries and the in-process sensor record
+  nothing. Measured live with a write-intent ring open: zero events in
+  every filter mode, and no rule could ever act on them
+  (`research/bypass/FINDINGS.md`, gap 1; scenario `evade-15`). The known
+  mitigations are kernel-side — a gate on the setup and enter calls, or
+  ring-operation auditing — and whether such a gate may ask a question is
+  an interruption-budget decision, because some runtimes use io_uring for
+  ordinary file work. On a machine where the gap matters, check
+  `/proc/sys/kernel/io_uring_disabled`.
 * **A write to a credential store under the work tree or under `/tmp`.** The
   floor hides the stores of the home directory; a `.ssh` created inside the
   work tree is normal writable space, and the rule keeps its question there.

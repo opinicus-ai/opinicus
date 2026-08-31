@@ -286,6 +286,14 @@ Does not work yet:
 * No delete and no rename event. The schema has no shape for them yet, so a
   delete inside the work tree is still judged at the command that does it;
   a delete outside the granted trees is impossible in the kernel.
+* No visibility into `io_uring`. A program can submit file and network
+  operations to an io_uring instance, and the kernel performs them inside
+  one `io_uring_enter` call, so no per-operation system call happens and
+  neither the kernel filter nor the in-process sensor records anything.
+  Measured with a live technique: zero events in every filter mode
+  (`research/bypass/FINDINGS.md`, gap 1; scenario `evade-15`). The known
+  mitigations are kernel-side; on a machine where the gap matters, check
+  `/proc/sys/kernel/io_uring_disabled`.
 * The kernel floor cannot be relaxed and it carves the home directory: `ls ~`
   and `ls /` fail with `EACCES` under it, and the session explains every
   denial it causes. A session that must touch a path the floor denies starts
