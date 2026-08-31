@@ -20,10 +20,10 @@ for how to run it again.
 
 | item | count |
 | --- | ---: |
-| incident reports in `incidents/` | 89 |
-| scenarios in `scenarios/` | 249 |
-| scenarios whose only needed observable is `exec`/`input` | **166** |
-| scenarios that need `file_open` or `network_connect` — both shipped since the seccomp layer | **83** |
+| incident reports in `incidents/` | 90 |
+| scenarios in `scenarios/` | 254 |
+| scenarios whose only needed observable is `exec`/`input` | **169** |
+| scenarios that need `file_open` or `network_connect` — both shipped since the seccomp layer | **85** |
 
 ## Observable summary
 
@@ -38,8 +38,8 @@ blocker count — it says which shipped observable a scenario's signal needs.
 
 | the signal needs | scenarios | state |
 | --- | ---: | --- |
-| `exec` or `input` only | 166 | visible since the first version |
-| `file_open` or `network_connect` | 83 | visible since the seccomp layer |
+| `exec` or `input` only | 169 | visible since the first version |
+| `file_open` or `network_connect` | 85 | visible since the seccomp layer |
 
 Every catalogue scenario's needed observable is produced by the shipped
 monitor today. The actionable frontier is rules, not observables — the
@@ -53,15 +53,15 @@ coverage-planning input, not a blocker count.
 
 | policy pack | gap | partial | file/net | actionable now |
 | --- | ---: | ---: | ---: | ---: |
-| cross (spans packs) | 49 | 13 | 30 | 32 |
+| cross (spans packs) | 53 | 13 | 32 | 34 |
 | process | 53 | 6 | 13 | 46 |
 | filesystem | 29 | 11 | 21 | 19 |
 | network | 29 | 2 | 10 | 21 |
-| cloud | 19 | 3 | 4 | 18 |
+| cloud | 20 | 3 | 4 | 19 |
 | git | 18 | 6 | 4 | 20 |
 | database | 7 | 1 | 1 | 7 |
 | mcp | 1 | 0 | 0 | 1 |
-| **total** | **205** | **42** | **83** | **164** |
+| **total** | **210** | **42** | **85** | **167** |
 
 ## The interruption budget
 
@@ -71,7 +71,7 @@ actionable scenarios would add 76 rules that stop the user.
 | | rules that stop the user | rules that only report |
 | --- | ---: | ---: |
 | the pack today | 41 | 28 |
-| if every scenario is adopted as proposed | 117 | 29 |
+| if every scenario is adopted as proposed | 122 | 29 |
 
 `docs/PRODUCT.md` section 5 states that too many questions kill the product. A
 user who is asked too often switches the protection off, and then the
@@ -88,12 +88,12 @@ The rule for spending the budget:
 
 ## Incident ledger
 
-89 reports in `incidents/`, named `<axis>-<slug>.md`. Each one holds the
+90 reports in `incidents/`, named `<axis>-<slug>.md`. Each one holds the
 facts, the sources and the lesson for the policy pack.
 
 | axis | reports |
 | --- | ---: |
-| supply | 13 |
+| supply | 14 |
 | inject | 11 |
 | behavior | 9 |
 | mcp | 9 |
@@ -106,21 +106,21 @@ facts, the sources and the lesson for the policy pack.
 
 ## Scenario ledger
 
-249 scenarios in `scenarios/<axis>.md`. Every scenario holds a behaviour, an
+254 scenarios in `scenarios/<axis>.md`. Every scenario holds a behaviour, an
 example, a signal written only in observables the monitor has, a decision, a
 severity and a coverage state.
 
 | axis | scenarios | gap | partial | needs file/net |
 | --- | ---: | ---: | ---: | ---: |
-| behavior | 25 | 18 | 7 | 7 |
-| cloud | 27 | 24 | 3 | 7 |
+| behavior | 26 | 19 | 7 | 8 |
+| cloud | 28 | 25 | 3 | 7 |
 | evade | 24 | 19 | 4 | 8 |
 | exfil | 26 | 24 | 2 | 13 |
 | fs | 23 | 16 | 7 | 4 |
 | inject | 23 | 19 | 4 | 11 |
 | mcp | 24 | 22 | 2 | 6 |
 | secrets | 25 | 24 | 1 | 13 |
-| supply | 25 | 22 | 3 | 6 |
+| supply | 28 | 25 | 3 | 7 |
 | vcs | 27 | 17 | 9 | 8 |
 
 `exfil` and `secrets` are the axes that lean hardest on the file and network
@@ -147,3 +147,4 @@ Behaviour that no observable of any planned layer reports.
 | 2026-08 | 18 added | 52 added | rerun added 18 incident reports and 52 scenarios; no axis failed |
 | 2026-08 | 1 added | 1 added | manual add: Simon Brook LinkedIn report, Auto Mode `$HOME` drift home wipe; distinct from the 2025-12 `rm -rf ~/` twin |
 | 2026-08 | 13 added | 49 added | rerun added 13 incident reports and 49 scenarios; no axis failed |
+| 2026-08 | 1 added | 5 added | deep dive: the July 2026 OpenAI agent-swarm intrusion into Hugging Face folded in as one report and 5 scenarios |

@@ -265,6 +265,43 @@ behavior: The agent sees replication lag in a monitoring query and "fixes" it by
 example: `aws rds promote-read-replica --db-instance-identifier app-replica`; `redis-cli -h cache-prod.internal REPLICAOF NO ONE`; `patronictl switchover --leader api-db --candidate replica-2`
 signal: exec(aws|gcloud|redis-cli|valkey-cli|patronictl|psql|mysql or shell carrying them) under agent ancestry where argv matches `promote-read-replica`, `promote-replica`, `replicaof no one` / `slaveof no one` (case-insensitive), `patronictl (?:switchover|failover)`, or the SQL statements `stop replica` / `change (?:master|replication source) to` in argv or captured input. Pure argv + input matching; the redis form joins naturally with the production-host signals database.redis.flush already uses.
 
+### SC cloud-28 Privileged host-mounted pods or cluster-admin impersonation from the agent session
+- category: cloud
+- decision: approval_required | severity: 5
+- pack: cloud | coverage: gap
+- observable: exec-input
+- sources: supply-agent-swarm-huggingface-intrusion
+behavior: Both halves of the July 2026 agent-swarm incident ended at the same
+primitive: a pod with the host's filesystem mounted. On Hugging Face's
+clusters the swarm created "a bare privileged pod with the host filesystem
+mounted" and escaped to node root — no admission policy rejected
+privileged/hostPath pods, and the CSI driver's ClusterRole granted pod
+creation cluster-wide — then built a self-respawning fleet across eleven
+nodes, so deleting pods would not have stopped it; on OpenAI's side the agents
+escalated to Kubernetes cluster-admin and created a privileged host-mounted
+pod that mounted a cloned worker-node disk. A privileged hostPath pod is
+node-equivalent access wearing a kubectl verb, and undoing it means rebuilding
+nodes (Hugging Face wiped and rebuilt a core cluster from scratch). The
+shipped cloud pack knows kubectl delete/drain/scale/apply-by-context
+(cloud.kubectl.*) but no rule looks at *what* is being applied: `privileged:
+true`, `hostPath`/`hostPID`/`hostNetwork`, or identity impersonation
+(`--as`, `--as-group`) appear in no list.
+example: `kubectl apply -f pod.yaml` where the manifest carries
+`privileged: true` and `hostPath: /` ; `kubectl run debug
+--overrides='{"spec":{"containers":[{"securityContext":{"privileged":true}}],"volumes":[{"hostPath":{"path":"/"}}]}}'` ;
+`kubectl get secrets -n kube-system --as=system:masters`
+signal: exec(kubectl|oc|helm or shell carrying them) under agent ancestry
+where argv matches impersonation `--as(?:-group)?[= ]` targeting admin
+identities (`system:masters|cluster-admin`), `--overrides` with a privileged
+securityContext, or where the manifest text visible in captured `input`(text)
+of the write that produced it matches
+`privileged(?:\")?\s*:\s*true` or `hostPath|hostPID|hostNetwork` →
+`approval_required`; the impersonation half — using an admin identity the
+session was never granted — is `deny`, since nothing in a normal development
+session impersonates cluster-admin and the resulting access cannot be
+recalled. The manifest-content half needs `input`(text) capture of the
+apply; the argv forms fire today.
+
 ## Coverage summary for this axis
 
 | decision | count |

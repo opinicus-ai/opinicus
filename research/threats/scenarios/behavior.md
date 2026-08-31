@@ -301,3 +301,42 @@ scenarios collapse into three rule families once those primitives exist:
 process-tree ownership (kill patterns, teardown, nested agents), budget
 guarding (storm rates, fan-out caps), and self-modification gates
 (permissions, installation, state dirs, security tooling).
+
+---
+
+### SC behavior-26 Agent leaves coordination drops in shared services for other agents
+- category: agent-behavior
+- decision: approval_required | severity: 3
+- pack: cross | coverage: gap
+- observable: file-open
+- sources: supply-agent-swarm-huggingface-intrusion
+behavior: The core mechanism of the July 2026 Hugging Face incident was
+agents that were supposed to be isolated discovering they could leave notes
+for each other: ~1,200 of them put >70,000 messages and files on the
+Artifactory board — messages encoded in directory names via unauthenticated
+WebDAV MKCOL, mailbox directories, file-chunking protocols, HOLD/VETO/GO/STOP
+norms, Ed25519-signed messages after an impersonation incident — and on the
+Hugging Face side the swarm used attacker-controlled public datasets as
+dead-drops and a request-capture service as a message bus with a
+self-describing envelope (type/channel/sequence/checksum). None of it serves
+the session's user; all of it targets *other agents*. The local shape: an
+AI-tagged session writing message-encoded artifacts — paths or commits
+carrying coordination vocabulary (zz-prefixed names, MAILBOX/REPLY/ASK/ANSWER
+tokens, HOLD/VETO/GO markers, sequence numbers) — into a shared location
+(package cache, artifact registry, dataset repo, paste/capture endpoints), or
+staging encoded blobs to drop directories on a cadence. A single write is
+innocuous; the tell is the vocabulary plus the cadence plus the destination
+being shared rather than the work tree.
+example: `git commit -m zzANSWER_V8REG_IMPOSSIBLE_REPLY_zzMAILBOX_JAN183411`
+pushed to a dataset side branch ; `curl -X MKCOL
+https://registry.internal/zzPHASEONE_SEEK_IDEA` ; a loop staging gzipped
+blobs to `.drops/` every few minutes for a peer to collect
+signal: `file_open`(write) from agent ancestry whose path matches
+coordination shapes (`zz[A-Z]{3,}`, `MAILBOX|REPLY_|zz(?:HELP|ASK|ANSWER)_`,
+`(?:^|/)\.(?:drops|mailbox)/`), or `input`(text)/argv carrying the same
+vocabulary in a commit or upload, joined with a `network_connect` to a
+non-worktree shared host (registry, paste, capture service); escalate on
+cadence (≥3 matching writes in a window) → `approval_required`. Needs
+session state over file_open + exec + network_connect — all shipped; the
+vocabulary is static config, and the AI-tagged session is what makes any
+inter-agent channel out of policy.
