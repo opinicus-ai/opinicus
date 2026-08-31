@@ -6,6 +6,7 @@ mod inspect_cmds;
 mod normalize;
 mod policy_cmds;
 mod run;
+mod telemetry_cmds;
 
 use clap::Parser;
 
@@ -19,6 +20,7 @@ fn main() {
         Command::Tree(args) => inspect_cmds::tree(args),
         Command::Correlate(args) => correlate_cmds::correlate_cmd(args),
         Command::Policy(command) => policy_cmds::run(command),
+        Command::Telemetry(command) => telemetry_cmds::dispatch(command),
         Command::Doctor(args) => inspect_cmds::doctor(args),
     };
 

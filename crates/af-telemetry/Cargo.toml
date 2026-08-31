@@ -1,0 +1,16 @@
+[package]
+name = "af-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Redaction-first packaging of optional telemetry samples."
+
+[dependencies]
+af-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -952,3 +952,365 @@ fn the_kernel_floor_names_rules_that_the_pack_really_carries() {
         "a session with the floor switched off records no floor event"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Telemetry: consent, samples, inspection, destruction
+// ---------------------------------------------------------------------------
+
+/// Runs the firewall with owned arguments and returns the code and output.
+fn firewall_owned(args: &[String]) -> (i32, String, String) {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    firewall(&refs)
+}
+
+/// Grants every scope through a consent file in a temporary directory.
+fn grant_all(config: &Path) {
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "on".into(),
+        "--scope".into(),
+        "all".into(),
+        "--config".into(),
+        config.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "the grant must succeed:\n{out}\n{err}");
+}
+
+#[test]
+fn telemetry_defaults_to_off_and_names_the_promises() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let config = dir.path().join("telemetry.json");
+    let outbox = dir.path().join("outbox");
+
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "status".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--outbox".into(),
+        outbox.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("telemetry: off"), "off is the default:\n{out}");
+    assert!(
+        out.contains("the product is complete without it"),
+        "the disclosure must say that telemetry is never a condition:\n{out}"
+    );
+    assert!(
+        out.contains("nothing is sent anywhere"),
+        "the disclosure must say that samples stay local:\n{out}"
+    );
+}
+
+#[test]
+fn consent_is_granular_and_revocable_from_the_cli() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let config = dir.path().join("telemetry.json");
+    let flag = config.display().to_string();
+    let scope = |word: &str| vec!["--scope".to_string(), word.to_string()];
+
+    // Grant two of the five scopes; `content` and `env` stay off.
+    let (code, out, err) = firewall_owned(
+        &[
+            vec!["telemetry".into(), "on".into()],
+            scope("tree"),
+            scope("actions"),
+            vec!["--config".into(), flag.clone()],
+        ]
+        .concat(),
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("granted: tree"), "{out}");
+    assert!(out.contains("telemetry: on (tree, actions)"), "{out}");
+
+    // Revoke one: the other stays.
+    let (code, out, err) = firewall_owned(
+        &[
+            vec!["telemetry".into(), "off".into()],
+            scope("tree"),
+            vec!["--config".into(), flag.clone()],
+        ]
+        .concat(),
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("telemetry: on (actions)"), "{out}");
+
+    // Revoke everything: telemetry is off again.
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "off".into(),
+        "--config".into(),
+        flag.clone(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("telemetry: off"), "{out}");
+
+    // An unknown scope is refused with the list.
+    let (code, _out, err) = firewall_owned(
+        &[
+            vec!["telemetry".into(), "on".into()],
+            scope("warp-drive"),
+            vec!["--config".into(), flag],
+        ]
+        .concat(),
+    );
+    assert_ne!(code, 0, "the firewall must not guess a scope");
+    assert!(err.contains("tree"), "the error names the scopes:\n{err}");
+}
+
+/// Writes a fake `psql` that carries a credential on its command line.
+#[test]
+fn a_sample_is_generated_inspected_and_destroyed_locally() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let marker = dir.path().join("marker");
+    write_fake_psql(dir.path(), &marker);
+    let trace = dir.path().join("trace.jsonl");
+    let config = dir.path().join("telemetry.json");
+    let outbox = dir.path().join("outbox");
+
+    // A denied session with a credential on the command line.
+    let output = Command::new(binary())
+        .args([
+            "run",
+            "--approve",
+            "deny",
+            "--trace",
+            trace.to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            "psql --set=db_password=hunter2 -c 'DROP DATABASE customer_prod'",
+        ])
+        .env("PATH", path_with(dir.path()))
+        .current_dir(repo_root())
+        .output()
+        .expect("the binary must run");
+    assert_eq!(output.status.code(), Some(3));
+
+    // Without consent, no sample and no outbox.
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "sample".into(),
+        trace.display().to_string(),
+        "--config".into(),
+        config.display().to_string(),
+        "--outbox".into(),
+        outbox.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("telemetry is off"), "{out}");
+    assert!(!outbox.exists(), "no consent, no outbox");
+
+    // With consent, one sample that a text editor can read.
+    grant_all(&config);
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "sample".into(),
+        trace.display().to_string(),
+        "--config".into(),
+        config.display().to_string(),
+        "--outbox".into(),
+        outbox.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("1 sample(s) packaged"), "{out}");
+
+    let sample_path = outbox.join(
+        std::fs::read_dir(&outbox)
+            .expect("the outbox")
+            .next()
+            .expect("one sample")
+            .expect("an entry")
+            .file_name(),
+    );
+    let text = std::fs::read_to_string(&sample_path).expect("the sample file");
+    assert!(
+        text.contains("database.destructive.drop-database"),
+        "the sample names the rule that fired:\n{text}"
+    );
+    assert!(
+        !text.contains("hunter2"),
+        "the credential must never reach the sample:\n{text}"
+    );
+    assert!(
+        text.contains("db_password=<redacted>"),
+        "the command line keeps its shape with the value redacted:\n{text}"
+    );
+    assert!(
+        !text.contains(repo_root().display().to_string().trim_matches('/')),
+        "the machine's paths must not travel"
+    );
+
+    // The inspector prints the sample and its summary.
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "inspect".into(),
+        sample_path.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("# sample of session s-"), "{out}");
+    assert!(out.contains("DROP DATABASE customer_prod"), "{out}");
+
+    // The status counts what waits in the outbox.
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "status".into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--outbox".into(),
+        outbox.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("(1 sample(s))"), "{out}");
+
+    // Destruction empties the outbox.
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "destroy".into(),
+        "--all".into(),
+        "--outbox".into(),
+        outbox.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("destroyed 1 sample(s)"), "{out}");
+    assert!(
+        std::fs::read_dir(&outbox).expect("the outbox").count() == 0,
+        "the outbox is empty after destruction"
+    );
+}
+
+#[test]
+fn a_quiet_trace_makes_no_sample() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let trace = dir.path().join("trace.jsonl");
+    let config = dir.path().join("telemetry.json");
+    let outbox = dir.path().join("outbox");
+    let (code, _out, err) = firewall(&[
+        "run",
+        "--approve",
+        "deny",
+        "--trace",
+        trace.to_str().unwrap(),
+        "--",
+        "/bin/echo",
+        "hello",
+    ]);
+    assert_eq!(code, 0, "{err}");
+
+    grant_all(&config);
+    let (code, out, err) = firewall_owned(&[
+        "telemetry".into(),
+        "sample".into(),
+        trace.display().to_string(),
+        "--config".into(),
+        config.display().to_string(),
+        "--outbox".into(),
+        outbox.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("no suspicious event"),
+        "a session without a question makes no sample:\n{out}"
+    );
+    assert!(!outbox.exists(), "nothing was written");
+}
+
+#[test]
+fn run_with_telemetry_packages_samples_without_a_trace_file() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let marker = dir.path().join("marker");
+    write_fake_psql(dir.path(), &marker);
+    let config = dir.path().join("telemetry.json");
+    let outbox = dir.path().join("outbox");
+
+    // Without consent the session says so and writes nothing.
+    let output = Command::new(binary())
+        .args([
+            "run",
+            "--approve",
+            "deny",
+            "--telemetry",
+            "--telemetry-config",
+            config.to_str().unwrap(),
+            "--telemetry-outbox",
+            outbox.to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            "psql -c 'DROP DATABASE customer_prod'",
+        ])
+        .env("PATH", path_with(dir.path()))
+        .current_dir(repo_root())
+        .output()
+        .expect("the binary must run");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        stderr.contains("telemetry is off, so no sample was written"),
+        "the session must say that consent is missing:\n{stderr}"
+    );
+    assert!(!outbox.exists(), "no consent, no outbox");
+
+    // With consent the same session packages its own sample, with no
+    // `--trace` at all.
+    grant_all(&config);
+    let output = Command::new(binary())
+        .args([
+            "run",
+            "--approve",
+            "deny",
+            "--telemetry",
+            "--telemetry-config",
+            config.to_str().unwrap(),
+            "--telemetry-outbox",
+            outbox.to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            "psql -c 'DROP DATABASE customer_prod'",
+        ])
+        .env("PATH", path_with(dir.path()))
+        .current_dir(repo_root())
+        .output()
+        .expect("the binary must run");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        stderr.contains("1 sample(s) written"),
+        "the session must package its sample:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("nothing is sent anywhere"),
+        "the session must say where the sample stays:\n{stderr}"
+    );
+    let count = std::fs::read_dir(&outbox).expect("the outbox").count();
+    assert_eq!(count, 1, "one sample for one denied session");
+}
+
+#[test]
+fn every_session_prints_the_alpha_banner() {
+    let (code, out, err) = firewall(&["run", "--approve", "deny", "--", "/bin/echo", "hello"]);
+    assert_eq!(code, 0);
+    assert!(
+        err.contains("not a production security boundary"),
+        "the disclosure must precede every session:\n{err}"
+    );
+    assert!(
+        !out.contains("agent-firewall"),
+        "the banner stays on standard error, so the output of the agent stays clean:\n{out}"
+    );
+}
+
+#[test]
+fn doctor_carries_the_alpha_disclosure_and_the_telemetry_state() {
+    let (code, out, err) = firewall(&["doctor"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("not a production security boundary"),
+        "doctor must carry the disclosure:\n{out}"
+    );
+    assert!(
+        out.contains("telemetry: off"),
+        "doctor must report the default consent state:\n{out}"
+    );
+}

@@ -8,6 +8,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use af_approval::{ApprovalMode, TerminalApprover};
 use af_core::{
@@ -21,7 +22,7 @@ use af_monitor::{
     SyscallFilter, TreeControl,
 };
 use af_provenance::ProcessGraph;
-use af_recorder::{FanoutSink, Retention, StreamSink, TraceWriter};
+use af_recorder::{FanoutSink, MemorySink, Retention, StreamSink, TraceWriter};
 use anyhow::{bail, Context, Result};
 
 use crate::cli::RunArgs;
@@ -31,11 +32,45 @@ use crate::policy_cmds::load_policy;
 /// The exit code that the firewall returns when it stopped the session.
 pub const EXIT_BLOCKED: i32 = 3;
 
+/// Prints the alpha disclosure on standard error, before a session starts.
+///
+/// The first release is explicitly alpha security software
+/// ([DIRECTION.md §7]): false positives are expected, false negatives are
+/// possible, and it must not be the user's only protection. A user who runs
+/// the firewall sees that on every session, not only in the README.
+fn print_banner() {
+    eprintln!("agent-firewall: alpha release — not a production security boundary");
+    eprintln!("agent-firewall: false positives and false negatives are expected; never rely");
+    eprintln!("agent-firewall: on it as your only protection (README.md, `The alpha`)");
+}
+
+/// A memory sink behind a shared handle.
+///
+/// The fanout owns the writing end of a session that opted into telemetry,
+/// and the launcher reads the same events back after the session ended. A
+/// clone of [`MemorySink`] would share nothing, so the handle shares.
+#[derive(Clone, Default)]
+struct SharedMemory(Arc<Mutex<MemorySink>>);
+
+impl SharedMemory {
+    /// Returns the events that the sink collected.
+    fn events(&self) -> Vec<Event> {
+        self.0.lock().expect("the telemetry sink").events().to_vec()
+    }
+}
+
+impl EventSink for SharedMemory {
+    fn record(&mut self, event: &Event) -> af_core::Result<()> {
+        self.0.lock().expect("the telemetry sink").record(event)
+    }
+}
+
 /// Runs the `run` sub-command and returns the exit code of the process.
 pub fn run(args: RunArgs) -> Result<i32> {
     if args.command.is_empty() {
         bail!("no command given after `--`");
     }
+    print_banner();
 
     let cwd = match &args.cwd {
         Some(dir) => dir.clone(),
@@ -94,7 +129,11 @@ pub fn run(args: RunArgs) -> Result<i32> {
     let mode = approval_mode(&args)?;
     let approver = TerminalApprover::new(mode)
         .with_timeout(args.approval_timeout.map(std::time::Duration::from_secs));
-    let sink = build_sink(&args)?;
+    // A session that opts into telemetry keeps its own events in memory, so
+    // the packaging at the end of the run needs no trace file. The handle is
+    // shared with the fanout, which owns the writing end.
+    let telemetry_sink = args.telemetry.then(SharedMemory::default);
+    let sink = build_sink(&args, telemetry_sink.clone())?;
 
     let mut handler = FirewallHandler {
         memory: SessionMemory::with_baseline(session.baseline.clone()),
@@ -163,6 +202,18 @@ pub fn run(args: RunArgs) -> Result<i32> {
     let interventions = handler.interventions;
     handler.sink.flush().ok();
 
+    // The packaging runs after the session ended and after the trace is
+    // flushed, adds no question and sends nothing: it writes local samples
+    // when the consent file grants a scope, and says so when it does not.
+    if let Some(shared) = telemetry_sink {
+        let events = shared.events();
+        crate::telemetry_cmds::finish_session(
+            &args.telemetry_config,
+            &args.telemetry_outbox,
+            &events,
+        );
+    }
+
     if interventions > 0 {
         eprintln!(
             "agent-firewall: the session ended with {interventions} action(s) that needed a decision"
@@ -211,8 +262,14 @@ fn approval_mode(args: &RunArgs) -> Result<ApprovalMode> {
 }
 
 /// Makes the event sink from the command-line options.
-fn build_sink(args: &RunArgs) -> Result<Box<dyn EventSink>> {
+///
+/// `telemetry` is the shared memory sink of a session that opted in, or
+/// `None`.
+fn build_sink(args: &RunArgs, telemetry: Option<SharedMemory>) -> Result<Box<dyn EventSink>> {
     let mut sinks: Vec<Box<dyn EventSink>> = Vec::new();
+    if let Some(memory) = telemetry {
+        sinks.push(Box::new(memory));
+    }
     if let Some(path) = &args.trace {
         let retention = parse_retention(&args.retention)?;
         sinks.push(Box::new(

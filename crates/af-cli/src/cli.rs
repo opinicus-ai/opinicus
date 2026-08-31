@@ -30,6 +30,9 @@ pub enum Command {
     /// Works with policy files.
     #[command(subcommand)]
     Policy(PolicyCommand),
+    /// Works with optional telemetry: consent, samples, inspection.
+    #[command(subcommand)]
+    Telemetry(TelemetryCommand),
     /// Reports what the monitor can observe on this machine.
     Doctor(DoctorArgs),
 }
@@ -123,6 +126,25 @@ pub struct RunArgs {
     /// The program to run, after `--`.
     #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
     pub command: Vec<String>,
+
+    /// Packages redacted samples of this session into the telemetry outbox
+    /// at the end of the run.
+    ///
+    /// Telemetry is opt-in twice: this flag opts the session in, and the
+    /// consent file must grant at least one scope, or no sample is written.
+    /// Nothing is sent anywhere — the outbox is a local directory you
+    /// inspect and empty yourself. Without this flag the session never
+    /// reads the consent file at all.
+    #[arg(long)]
+    pub telemetry: bool,
+
+    /// Reads the telemetry consent here instead of the default file.
+    #[arg(long, value_name = "PATH")]
+    pub telemetry_config: Option<PathBuf>,
+
+    /// Writes the telemetry samples here instead of the default outbox.
+    #[arg(long, value_name = "PATH")]
+    pub telemetry_outbox: Option<PathBuf>,
 }
 
 /// Arguments of the `replay` sub-command.
@@ -192,6 +214,110 @@ pub struct CorrelateArgs {
     /// Prints the result as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// The sub-commands of `telemetry`.
+#[derive(Debug, Subcommand)]
+pub enum TelemetryCommand {
+    /// Shows the consent state, the outbox and the disclosure.
+    Status(TelemetryStatusArgs),
+    /// Grants consent for one or more scopes. Telemetry is off until you do.
+    ///
+    /// Consent is granular: each scope says what a sample may carry. It is
+    /// revocable at any time with `telemetry off`, and with telemetry off
+    /// the product is complete.
+    On(TelemetryOnArgs),
+    /// Revokes consent, for one scope or for all of them.
+    Off(TelemetryOffArgs),
+    /// Builds redacted samples from a recorded trace into the outbox.
+    ///
+    /// A sample centers on an event that made the firewall ask, quarantine,
+    /// refuse or sense an attack on its visibility, and carries a window of
+    /// surrounding events. Nothing is sent anywhere: the outbox is a local
+    /// directory that you inspect and empty yourself.
+    Sample(TelemetrySampleArgs),
+    /// Prints one or more sample files, with a summary line.
+    Inspect(TelemetryInspectArgs),
+    /// Deletes samples: the named files, or the whole outbox with `--all`.
+    Destroy(TelemetryDestroyArgs),
+}
+
+/// Arguments of `telemetry status`.
+#[derive(Debug, clap::Args)]
+pub struct TelemetryStatusArgs {
+    /// Reads the consent here instead of the default file
+    /// (`$XDG_CONFIG_HOME/agent-firewall/telemetry.json`).
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Names this outbox instead of the default one
+    /// (`$XDG_DATA_HOME/agent-firewall/outbox`).
+    #[arg(long, value_name = "PATH")]
+    pub outbox: Option<PathBuf>,
+}
+
+/// Arguments of `telemetry on`.
+#[derive(Debug, clap::Args)]
+pub struct TelemetryOnArgs {
+    /// Grants this scope. Repeat it for more. `all` grants every scope.
+    #[arg(long = "scope", value_name = "SCOPE", required = true)]
+    pub scope: Vec<String>,
+
+    /// Reads and writes the consent here instead of the default file.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// Arguments of `telemetry off`.
+#[derive(Debug, clap::Args)]
+pub struct TelemetryOffArgs {
+    /// Revokes this scope. Repeat it for more. No scope revokes everything.
+    #[arg(long = "scope", value_name = "SCOPE")]
+    pub scope: Vec<String>,
+
+    /// Reads and writes the consent here instead of the default file.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// Arguments of `telemetry sample`.
+#[derive(Debug, clap::Args)]
+pub struct TelemetrySampleArgs {
+    /// The trace file to read.
+    #[arg(value_name = "TRACE")]
+    pub trace: PathBuf,
+
+    /// Reads the consent here instead of the default file.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Writes the samples here instead of the default outbox.
+    #[arg(long, value_name = "PATH")]
+    pub outbox: Option<PathBuf>,
+}
+
+/// Arguments of `telemetry inspect`.
+#[derive(Debug, clap::Args)]
+pub struct TelemetryInspectArgs {
+    /// The sample files to print.
+    #[arg(value_name = "SAMPLE", required = true)]
+    pub sample: Vec<PathBuf>,
+}
+
+/// Arguments of `telemetry destroy`.
+#[derive(Debug, clap::Args)]
+pub struct TelemetryDestroyArgs {
+    /// The sample files to delete.
+    #[arg(value_name = "SAMPLE")]
+    pub sample: Vec<PathBuf>,
+
+    /// Deletes every sample of the outbox instead of the named files.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Names this outbox instead of the default one.
+    #[arg(long, value_name = "PATH")]
+    pub outbox: Option<PathBuf>,
 }
 
 /// The sub-commands of `policy`.

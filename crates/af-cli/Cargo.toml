@@ -18,6 +18,7 @@ af-policy = { workspace = true }
 af-provenance = { workspace = true }
 af-recorder = { workspace = true }
 af-approval = { workspace = true }
+af-telemetry = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

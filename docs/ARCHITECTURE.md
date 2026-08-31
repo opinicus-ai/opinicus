@@ -556,6 +556,63 @@ is `research/bypass/correlate.sh` and the M5 section of
   such program; the caveat is recorded here so the first report of one is
   read as the known limit and not as a surprise.
 
+## 3f. The path of one telemetry sample
+
+The recorder of §5 already writes the normalized schema; telemetry is a
+redacting packaging step in front of it, not a second event format. The
+specification is [TELEMETRY.md](TELEMETRY.md); this section states what
+ships. The crate is `af-telemetry`, the command family is
+`agent-firewall telemetry`, and the crate links no network library —
+`cargo tree -p af-telemetry` names `af-core`, `serde`, `serde_json` and
+nothing else.
+
+1. **Consent comes first, and nothing else reads it.** The consent state
+   is one local file
+   (`$XDG_CONFIG_HOME/agent-firewall/telemetry.json`), off by default,
+   granular over five scopes (`tree`, `actions`, `content`, `env`,
+   `identity`), revocable at any time. No other command reads it: `run`
+   reads it only for a session that passed `--telemetry`, and a session
+   without the flag never touches the file. With telemetry off the
+   product is complete.
+
+2. **A trigger centers the sample.** A quarantine, a tamper fact, a
+   signal to the monitor, a discrepancy, a question to the user, or a
+   policy decision above `allow` starts one sample; 20 events before and
+   20 after form the window, and windows that touch merge. A quiet
+   session makes no sample.
+
+3. **Every field is chosen by scope, then redacted, then pseudonymized.**
+   The environment-value redaction of the monitor (RESEARCH.md §4) is
+   generalized to every free text: an assignment whose name holds a
+   secret marker keeps the name and loses the value, a credential with a
+   known prefix is swallowed whole, and the matcher errs toward
+   redaction. Environment values never travel in any scope; observed
+   content travels only under `content`, secret-redacted and cut to 2000
+   characters; the session baseline never travels; time travels as
+   milliseconds after the session start; the session identifier becomes a
+   truncated SHA-256 reference; process identifiers become `p1`, `p2`, …;
+   the home directory, any login under `/home`, and the host name become
+   `<home>`, `<user>` and `<host>`.
+
+4. **A sample is a local file that the user rules.** It is written to the
+   outbox (`$XDG_DATA_HOME/agent-firewall/outbox`, by default under
+   `~/.local/share`) as pretty JSON, one file per sample, inspectable with
+   a text editor or `telemetry inspect`, and destroyed with
+   `telemetry destroy`. The research backend of DIRECTION.md §8 does not
+   exist — not a client, not a stub — and the sample's life is generated →
+   inspected → destroyed on the machine that made it.
+
+### What the telemetry layer does not do
+
+* It never decides anything and never interrupts anything: the packaging
+  runs after the session ended, and no rule, no verdict and no boundary
+  reads a sample.
+* It sends nothing and prepares nothing to be sent. The pipeline's front
+  end stays the manual workflow of `research/threats/`.
+* It is not a reporting channel for the user: the session's own
+  explanations (§3a's `kernel_denied`, the approval chain) are the
+  product surface; the sample is research packaging.
+
 ## 4. The enforcement boundary
 
 **The firewall has two decision boundaries — the entry of the `execve`
@@ -817,9 +874,12 @@ Five additions land in this architecture without changing sections 1–7:
   record instead of erasing it. The interruption budget governs every rule
   of the pack: two facts report instead of asking, because normal tooling
   makes their shape.
-* **Event provenance for research.** The recorder of §5 already writes the
-  normalized schema; the telemetry pipeline (DIRECTION.md §7) is a redacting
-  packaging step in front of it, not a second event format.
+* **Event provenance for research — shipped (§3f).** The recorder of §5
+  already writes the normalized schema; the telemetry pipeline
+  ([TELEMETRY.md](TELEMETRY.md), DIRECTION.md §7) is a redacting packaging
+  step in front of it, not a second event format: consent-gated by scope,
+  redacted and pseudonymized by design, written to a local outbox, sent
+  nowhere — the backend is future work.
 
 The soundness rule of §3a binds every new sensor: **decide on an object,
 never on a pointer into the memory of the program you are judging.** An

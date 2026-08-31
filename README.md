@@ -119,6 +119,11 @@ stays clean on standard output.
 | `policy list` | Lists every loaded rule. |
 | `policy check <PATH>...` | Validates policy files. |
 | `policy test` | Runs the tests inside the policy files. |
+| `telemetry status` | Shows the consent state and the local outbox. |
+| `telemetry on/off --scope …` | Grants or revokes consent, one scope at a time. |
+| `telemetry sample <TRACE>` | Builds redacted samples of a trace into the outbox. |
+| `telemetry inspect <SAMPLE>` | Prints a sample file. |
+| `telemetry destroy [--all]` | Deletes samples from the outbox. |
 | `doctor` | Reports what the monitor can observe on this machine. |
 
 Options of `run`:
@@ -132,6 +137,9 @@ Options of `run`:
 | `--approval-timeout <S>` | Denies when nobody answers in this many seconds. |
 | `--syscall-filter <MODE>` | `write-only` (the default), `all-opens` or `off`. See below. |
 | `--print-tree` | Prints the process tree when the session ends. |
+| `--telemetry` | Packages redacted samples of this session into the local outbox at the end of the run. Telemetry is opt-in twice: this flag opts the session in, and the consent file must grant a scope. Nothing is sent anywhere. |
+| `--telemetry-config <PATH>` | Reads the telemetry consent here instead of the default file. |
+| `--telemetry-outbox <PATH>` | Writes the telemetry samples here instead of the default outbox. |
 | `--json` | Prints every event as JSON on standard output. |
 | `-v`, `--verbose` | Prints every normalized event as text. |
 
@@ -188,10 +196,42 @@ no database can change. Both scripts make a throwaway git repository in
 
 ## State of the project
 
-This repository holds a proof of concept. It answers one question: can a
-program in user space stop a dangerous action inside a deep process chain,
-without a kernel module and without root? The answer on Linux is yes, at the
-exec boundary and at a small set of system calls.
+This repository ships the **alpha release** of the Agent Firewall: the
+Linux launcher, the sensors that passed their gates (the exec boundary,
+the system-call filter, the Landlock kernel floor), agent identity, tamper
+sensing with the quarantine flow, the deterministic rule engine, local
+traces with replay, and optional telemetry samples.
+
+### The alpha
+
+> **Alpha release — not a production security boundary.** False positives
+> and false negatives are expected; never rely on it as your only
+> protection.
+
+Every `run` prints that disclosure before the session starts, and `doctor`
+carries it too. The firewall holds dangerous actions at real boundaries
+([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §4), and the alpha label is
+not modesty: the rule pack is young, the sensor stack is measured but not
+exhaustive, and the [limits](#what-works-and-what-does-not) below are part
+of the product, not a footnote.
+
+### Telemetry: off, granular, local
+
+Telemetry is opt-in and never a condition: with telemetry off the product
+is complete. A user grants single scopes (`tree`, `actions`, `content`,
+`env`, `identity`), revokes them at any time, and every sample is a
+redacted, pseudonymized JSON file in a **local outbox** that the user
+inspects and destroys. **Nothing is sent anywhere** — no upload code
+exists. The full packaging spec, with what a sample may contain, what is
+dropped by default and what is pseudonymized, is
+[docs/TELEMETRY.md](docs/TELEMETRY.md).
+
+```console
+$ agent-firewall telemetry on --scope tree --scope actions
+$ agent-firewall run --telemetry --trace session.jsonl -- claude
+$ agent-firewall telemetry inspect ~/.local/share/agent-firewall/outbox/sample-…-001.json
+$ agent-firewall telemetry destroy --all
+```
 
 The [direction of record](docs/DIRECTION.md), adopted 2026-08-30, sets the
 work that follows: several sensors instead of one mechanism, in-process
@@ -224,8 +264,11 @@ Works today:
 * the recorder writes a trace, and `replay` evaluates the trace again,
   including the file and the network actions. The default trace keeps every
   file and network action that a rule matched, so a chain that the live
-  session found is found again in the replay; an action that no rule matched
-  is dropped, and it could not change a verdict.
+  session found is found again in the replay; an action that no rule
+  matched is dropped, and it could not change a verdict;
+* optional telemetry samples package a suspicious session into redacted,
+  pseudonymized local JSON — off by default, granular by scope, revocable,
+  inspectable, and never sent anywhere.
 
 Does not work yet:
 
@@ -274,6 +317,8 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 | `crates/af-policy` | The deterministic policy engine, the rule format and the rule pack inside the binary. |
 | `crates/af-approval` | The approval layer. It asks the user on the terminal and remembers a session decision. |
 | `crates/af-recorder` | The trace writer and the trace reader for JSON Lines. |
+| `crates/af-correlate` | The correlation engine: expected view versus observed view. |
+| `crates/af-telemetry` | Redaction-first packaging of optional telemetry samples: consent, scopes, the local outbox. No network code. |
 | `crates/af-cli` | The `agent-firewall` command. It connects all layers. |
 | `policies/` | Policy files in the readable source format. |
 | `research/` | The research areas: mechanism spikes, the shared benchmark, and the threat catalogue with its ledger. Read [research/README.md](research/README.md). |
@@ -296,6 +341,9 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 * [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the layers, the path of one
   exec and the enforcement boundary.
 * [docs/POLICY.md](docs/POLICY.md) — the rule format and the rule pack.
+* [docs/TELEMETRY.md](docs/TELEMETRY.md) — the telemetry packaging spec:
+  what a sample may contain, what is dropped, what is pseudonymized, and
+  the consent flow that governs it.
 * [docs/RESEARCH.md](docs/RESEARCH.md) — the Linux research questions of
   PROJECT.md section 10 with measured answers, and the limits they show.
 * [docs/DETECTION-RESEARCH.md](docs/DETECTION-RESEARCH.md) — which mechanism

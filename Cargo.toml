@@ -7,6 +7,7 @@ members = [
     "crates/af-provenance",
     "crates/af-recorder",
     "crates/af-correlate",
+    "crates/af-telemetry",
     "crates/af-approval",
     "crates/af-cli",
 ]
@@ -28,6 +29,7 @@ af-policy = { path = "crates/af-policy" }
 af-provenance = { path = "crates/af-provenance" }
 af-recorder = { path = "crates/af-recorder" }
 af-correlate = { path = "crates/af-correlate" }
+af-telemetry = { path = "crates/af-telemetry" }
 af-approval = { path = "crates/af-approval" }
 
 anyhow = "1"

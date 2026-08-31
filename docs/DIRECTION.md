@@ -508,7 +508,7 @@ The ten questions, with the evidence already in the repository:
 | 7 | How reliably can tampering be detected? | **answered in part, launch sessions** — tamper facts sensed and quarantined (M4), expected-versus-observed discrepancies measured (M5): the silent-sensor and unreported-spawn rules ship quiet on the benign corpus, the write-open comparison was refused by the budget (30 firings on one normal session), the contradicted connection reports, and the reported-unseen spawn measured zero — the exec stop is a kernel guarantee | [ARCHITECTURE.md](ARCHITECTURE.md) §3d, §3e, `research/bypass/FINDINGS.md`; attach mode stays open |
 | 8 | Which events provide useful security semantics versus noise? | **partly** — interruption budget, filter cost curves, 99.7% read share | [PRODUCT.md](PRODUCT.md) §5, [DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) |
 | 9 | How much context distinguishes legitimate coding from dangerous behavior? | **partly** — session memory proves half a chain is normal and a chain is not; identity/liveness context missing | [DETECTION-REQUIREMENTS.md](DETECTION-REQUIREMENTS.md) §3 |
-| 10 | What telemetry can safely become reusable detection intelligence? | **open** — redaction exists per-feature; pipeline unbuilt | W7 |
+| 10 | What telemetry can safely become reusable detection intelligence? | **the packaging half shipped with the alpha** — redaction-first samples, granular revocable consent, a local inspectable outbox, nothing sent ([TELEMETRY.md](TELEMETRY.md)); the backend and the loop stay future work | [TELEMETRY.md](TELEMETRY.md), [ARCHITECTURE.md](ARCHITECTURE.md) §3f; W7 |
 
 The workstreams, and what each one is for:
 
@@ -559,6 +559,7 @@ another sandbox around a coding agent.
 | [DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) | measured comparison of interception mechanisms; the four-layer recommendation |
 | [DETECTION-REQUIREMENTS.md](DETECTION-REQUIREMENTS.md) | observables and memory the threat catalogue demands |
 | [POLICY.md](POLICY.md) | the rule format and the built-in pack |
+| [TELEMETRY.md](TELEMETRY.md) | the telemetry packaging spec: scopes, redaction, the consent flow, the local outbox |
 | [DECISIONS.md](DECISIONS.md) | dated decisions; the newest entry wins |
 | [MILESTONES.md](MILESTONES.md) | the execution plan: the milestone ladder, the exit gates, the current status |
 | `research/` (see `research/README.md`) | spikes, the benchmark, the threat catalogue and ledger |

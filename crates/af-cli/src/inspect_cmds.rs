@@ -305,6 +305,8 @@ fn actor(pid: af_core::Pid, graph: &ProcessGraph) -> ProcessInfo {
 pub fn doctor(args: DoctorArgs) -> Result<i32> {
     let filter = crate::run::parse_syscall_filter(&args.syscall_filter)?;
     println!("agent-firewall doctor\n");
+    println!("  alpha release: not a production security boundary; false positives and");
+    println!("  false negatives are expected (README.md, `The alpha`)\n");
     println!("  system-call filter: {}\n", filter.label());
     let capabilities = af_monitor::Monitor::capabilities(filter);
     let width = capabilities
@@ -343,6 +345,17 @@ pub fn doctor(args: DoctorArgs) -> Result<i32> {
             }
         }
         Err(error) => println!("\n  built-in rules: cannot load them ({error})"),
+    }
+
+    match af_telemetry::Consent::load(&af_telemetry::Consent::default_path()) {
+        Ok(consent) if consent.is_off() => {
+            println!("\n  telemetry: off (opt-in, granular; `agent-firewall telemetry status`)");
+        }
+        Ok(consent) => {
+            let granted: Vec<&str> = consent.granted().iter().map(|s| s.label()).collect();
+            println!("\n  telemetry: on ({})", granted.join(", "));
+        }
+        Err(error) => println!("\n  telemetry: the consent file cannot be read ({error})"),
     }
 
     if missing_critical {
