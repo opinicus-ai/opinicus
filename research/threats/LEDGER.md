@@ -20,10 +20,10 @@ for how to run it again.
 
 | item | count |
 | --- | ---: |
-| incident reports in `incidents/` | 76 |
-| scenarios in `scenarios/` | 200 |
-| scenarios whose only needed observable is `exec`/`input` | **126** |
-| scenarios that need `file_open` or `network_connect` — both shipped since the seccomp layer | **74** |
+| incident reports in `incidents/` | 89 |
+| scenarios in `scenarios/` | 249 |
+| scenarios whose only needed observable is `exec`/`input` | **166** |
+| scenarios that need `file_open` or `network_connect` — both shipped since the seccomp layer | **83** |
 
 ## Observable summary
 
@@ -38,8 +38,8 @@ blocker count — it says which shipped observable a scenario's signal needs.
 
 | the signal needs | scenarios | state |
 | --- | ---: | --- |
-| `exec` or `input` only | 126 | visible since the first version |
-| `file_open` or `network_connect` | 74 | visible since the seccomp layer |
+| `exec` or `input` only | 166 | visible since the first version |
+| `file_open` or `network_connect` | 83 | visible since the seccomp layer |
 
 Every catalogue scenario's needed observable is produced by the shipped
 monitor today. The actionable frontier is rules, not observables — the
@@ -53,15 +53,15 @@ coverage-planning input, not a blocker count.
 
 | policy pack | gap | partial | file/net | actionable now |
 | --- | ---: | ---: | ---: | ---: |
-| cross (spans packs) | 45 | 13 | 29 | 29 |
-| process | 47 | 5 | 13 | 39 |
-| filesystem | 22 | 9 | 16 | 15 |
-| network | 21 | 2 | 8 | 15 |
-| cloud | 15 | 2 | 4 | 13 |
-| git | 9 | 4 | 3 | 10 |
-| database | 3 | 1 | 1 | 3 |
+| cross (spans packs) | 49 | 13 | 30 | 32 |
+| process | 53 | 6 | 13 | 46 |
+| filesystem | 29 | 11 | 21 | 19 |
+| network | 29 | 2 | 10 | 21 |
+| cloud | 19 | 3 | 4 | 18 |
+| git | 18 | 6 | 4 | 20 |
+| database | 7 | 1 | 1 | 7 |
 | mcp | 1 | 0 | 0 | 1 |
-| **total** | **163** | **36** | **74** | **125** |
+| **total** | **205** | **42** | **83** | **164** |
 
 ## The interruption budget
 
@@ -88,43 +88,43 @@ The rule for spending the budget:
 
 ## Incident ledger
 
-75 reports in `incidents/`, named `<axis>-<slug>.md`. Each one holds the
+89 reports in `incidents/`, named `<axis>-<slug>.md`. Each one holds the
 facts, the sources and the lesson for the policy pack.
 
 | axis | reports |
 | --- | ---: |
-| supply | 11 |
-| inject | 9 |
+| supply | 13 |
+| inject | 11 |
 | behavior | 9 |
-| mcp | 8 |
-| evade | 7 |
-| exfil | 7 |
-| secrets | 7 |
-| vcs | 7 |
-| cloud | 6 |
-| fs | 5 |
+| mcp | 9 |
+| exfil | 9 |
+| secrets | 9 |
+| evade | 8 |
+| vcs | 8 |
+| cloud | 7 |
+| fs | 6 |
 
 ## Scenario ledger
 
-199 scenarios in `scenarios/<axis>.md`. Every scenario holds a behaviour, an
+249 scenarios in `scenarios/<axis>.md`. Every scenario holds a behaviour, an
 example, a signal written only in observables the monitor has, a decision, a
 severity and a coverage state.
 
 | axis | scenarios | gap | partial | needs file/net |
 | --- | ---: | ---: | ---: | ---: |
-| behavior | 20 | 14 | 6 | 5 |
-| cloud | 21 | 18 | 3 | 7 |
-| evade | 21 | 17 | 4 | 7 |
-| exfil | 20 | 18 | 2 | 12 |
-| fs | 19 | 13 | 6 | 4 |
-| inject | 19 | 16 | 3 | 10 |
-| mcp | 20 | 18 | 2 | 5 |
-| secrets | 20 | 19 | 1 | 12 |
-| supply | 19 | 17 | 2 | 4 |
-| vcs | 21 | 13 | 7 | 8 |
+| behavior | 25 | 18 | 7 | 7 |
+| cloud | 27 | 24 | 3 | 7 |
+| evade | 24 | 19 | 4 | 8 |
+| exfil | 26 | 24 | 2 | 13 |
+| fs | 23 | 16 | 7 | 4 |
+| inject | 23 | 19 | 4 | 11 |
+| mcp | 24 | 22 | 2 | 6 |
+| secrets | 25 | 24 | 1 | 13 |
+| supply | 25 | 22 | 3 | 6 |
+| vcs | 27 | 17 | 9 | 8 |
 
 `exfil` and `secrets` are the axes that lean hardest on the file and network
-observables (12 of 20 scenarios in each). Those observables ship today, so
+observables (13 of 26 scenarios in exfil, 13 of 25 in secrets). Those observables ship today, so
 these axes are now the natural home of new chain rules — the firewall no
 longer has to be weak on data that leaves the machine.
 
@@ -146,3 +146,4 @@ Behaviour that no observable of any planned layer reports.
 | 2026-08 | — | — | ledger rebuilt from the files on disk; observable and interruption-budget analysis added |
 | 2026-08 | 18 added | 52 added | rerun added 18 incident reports and 52 scenarios; no axis failed |
 | 2026-08 | 1 added | 1 added | manual add: Simon Brook LinkedIn report, Auto Mode `$HOME` drift home wipe; distinct from the 2025-12 `rm -rf ~/` twin |
+| 2026-08 | 13 added | 49 added | rerun added 13 incident reports and 49 scenarios; no axis failed |

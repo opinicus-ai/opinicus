@@ -1,0 +1,20 @@
+# ForceMemo: GlassWorm-harvested GitHub tokens force-pushed malware into hundreds of Python repositories
+
+- Date: 2026-03-08 (earliest injections) – 2026-03-14 (first public report) | Agent/tool: GlassWorm credential-theft module (VS Code/Cursor extensions) + compromised GitHub developer accounts | Axis: secrets
+
+## What happened
+
+StepSecurity tracked a campaign (named ForceMemo) in which an attacker compromised hundreds of GitHub accounts and injected identical malware into hundreds of Python repositories — Django apps, ML research code, Streamlit dashboards and PyPI packages. The earliest injections date to March 8, 2026, and the campaign was still active when it was reported on March 14. The account-takeover vector was identified as GlassWorm: victims had installed malicious VS Code and Cursor extensions whose stage-3 payload runs a dedicated credential-theft module that harvests GitHub tokens from `git credential fill`, VS Code extension storage, `~/.git-credentials` and the `GITHUB_TOKEN` environment variable. With the stolen tokens the attacker rebased each repository's latest legitimate commit with obfuscated malware appended to a key Python file and force-pushed it, preserving the original commit message, author and author date, so the default branch looked untouched. One user lost six repositories at once; organizations hit included wecode-bootcamp-korea and HydroRoll-Team. The injected code reads its payload URL from Solana blockchain memos, downloads Node.js v22.9.0 and executes an AES-encrypted stealer. A parallel GlassWorm wave hit 151+ repositories with invisible-Unicode injections in the same week (Aikido), sharing the same Solana C2 wallet.
+
+## How it went wrong
+
+The harvesting step is the interesting one: the stealer calls `childProcess.execSync("git credential fill", { input: "protocol=https\nhost=github.com\n\n" })` — the git credential-helper protocol — and the configured helper (store, cache or libsecret) prints `password=<token>` to stdout. No read of `.git-credentials` is required if the helper is a cache or keyring daemon, so a monitor that only gates credential-file reads sees nothing. Its sibling call is `npm config get //<registry>:_authToken`, which prints the npm publish token the same way. The recovered Aikido payload shows both calls verbatim. The tokens were validated against the GitHub API and exfiltrated; the same stage also walks browser extension storage for crypto wallets. Days later the harvested tokens came back as force-push injections of `pip install`-executed malware, closing the loop from extension infection to supply-chain poisoning with no exploit beyond credential theft.
+
+## What the firewall should learn
+
+The token never exists as a file and leaves through a pipe the monitor cannot read, so the whole signal sits on the exec layer: `git credential fill` (and `git credential approve/reject` less so) executed from agent ancestry is a near-fingerprint of a credential dumper — a human pushing code does not invoke the raw credential protocol from a script, git does that internally. The same for `npm|pnpm|yarn config get ..._authToken`. The escalator is ancestry: an install-script or freshly-fetched-helper process (npm/pnpm/yarn/pip ancestry, exe under `~/.npm/**` or `/tmp`) printing credentials should be denied outright, while a direct developer invocation gets approval. Secondary confirmations are the post-read behavior this campaign also shows: token validation against api.github.com followed by first-seen egress. Suggested rules: approval for `git credential fill` and package-manager token-print commands under agent ancestry (decision: approval_required), deny under package-install ancestry.
+
+## Sources
+
+- [StepSecurity: ForceMemo — Hundreds of GitHub Python Repos Compromised via Account Takeover and Force-Push](https://www.stepsecurity.io/blog/forcememo-hundreds-of-github-python-repos-compromised-via-account-takeover-and-force-push)
+- [Aikido: Glassworm Strikes Popular React Native Phone Number Packages](https://www.aikido.dev/blog/glassworm-strikes-react-packages-phone-numbers)

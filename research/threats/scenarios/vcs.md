@@ -366,6 +366,128 @@ staged file is, because the monitor of this version emits no file events.
 example: `git add -A && git commit -m "update artifacts"` after a build wrote dist/bundle-9f3c.js (14 MB) and models/q4.bin (800 MB)
 signal: file_open(path, write=true) with size above a threshold (e.g. >1 MB single file or >10 MB cumulative per session) from agent ancestry, correlated with a later exec(program=git, argv contains `add` or `commit`) in the same session — the gate belongs at the add/commit step. Needs the file-open observable for the size knowledge; argv alone can only see suspicious extensions, which the builtin secret-file rule already covers for secrets.
 
+### SC vcs-22 Inline `-c` config overrides and GIT_CONFIG_* env injection at exec time
+- category: git
+- decision: approval_required | severity: 4
+- pack: git | coverage: gap
+- observable: exec-input
+- sources: -
+behavior: Instead of writing config (which SC vcs-09 and SC vcs-18 watch at
+the `git config` argv), the agent overrides configuration per invocation:
+`git -c commit.gpgsign=false commit -m x` silently skips signing,
+`git -c user.email=attacker@example.com commit` forges identity for one
+commit, `git -c core.hooksPath=/tmp/nohooks push` skips hooks without writing
+anything, `git -c credential.helper=/var/tmp/steal.sh fetch` arms the
+credential-capture primitive of SC vcs-18 for exactly one command. The env
+cousin needs no argv at all: `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign
+GIT_CONFIG_VALUE_0=false`, or `GIT_CONFIG_GLOBAL=/dev/null` which disables
+every global setting (identity, signing, hooks installed via global config)
+for the invocation. No config file is written, so every config-write rule and
+every file watcher sees nothing; the override lives and dies inside one
+exec's argv and env, which the monitor records but no policy reads.
+example: `git -c commit.gpgsign=false -c core.hooksPath=/tmp/nohooks push origin main`
+signal: exec(program=git, argv contains `-c` or `--config-env` followed by a `key=value` token whose key is in the sensitive set (`commit.gpgsign`, `tag.gpgsign`, `user.name`, `user.email`, `user.signingkey`, `core.hooksPath`, `credential.helper`, `url.*.insteadOf`, `alias.*` with a `!` value), or env containing `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` set to a non-regular path (e.g. `/dev/null`) or `GIT_CONFIG_COUNT` above zero, with agent in ancestry. Benign `-c` usage (`core.editor=true`, `advice.*`, `http.sslVerify` in setup flows) stays quiet because only the sensitive key set triggers — that exception is what keeps the interruption cost near zero.
+
+### SC vcs-23 Protected-branch push through a refspec destination (HEAD:main)
+- category: git
+- decision: approval_required | severity: 4
+- pack: git | coverage: partial
+- observable: exec-input
+- sources: vcs-cline-force-push-rejected-main
+behavior: The agent is on a feature branch or a detached HEAD and pushes
+straight into the protected branch with a refspec: `git push origin
+HEAD:main`, `git push origin feature/x:main`, or the sharper `git push origin
++HEAD:main`, where the leading `+` is a per-ref force that rewrites the
+remote branch while the global force rule (which looks for `--force`/`-f`)
+sees nothing. The protected destination is the right-hand side of the
+refspec, not the last argv token, so a rule shaped like the shipped
+git.push.protected-branch cases (`push origin main`) never matches. The
+fast-forward form silently publishes whatever the agent has checked out to
+main; the `+` form replaces it — the remote-side outcome of the Cline force
+push, reachable without any force flag in the recognizable position.
+example: `git push origin +HEAD:main` from a dirty feature branch, skipping the pull-request path entirely
+signal: exec(program=git, argv contains `push`, argv contains a refspec token whose right-hand side (after `:`) is a protected ref (`main`, `master`, `release/*`, or the configured protected list), where a leading `+` on the refspec counts as force, with agent in ancestry; a same-process network_connect(git host) confirms the transfer. Left-hand side is irrelevant — `HEAD`, a sha, any local branch name all qualify.
+
+### SC vcs-24 Local branch rewrite via forced fetch refspec (fetch +refs/heads/main:refs/heads/main)
+- category: git
+- decision: approval_required | severity: 4
+- pack: git | coverage: gap
+- observable: exec-input
+- sources: vcs-claude-code-startup-reset-hard
+behavior: Discard-class damage delivered by `fetch`: `git fetch origin
++refs/heads/main:refs/heads/main` force-updates the local main branch to the
+remote state — exactly `git reset --hard origin/main` (SC vcs-16) in fetch
+clothing. Unpushed commits on main become unreachable in one exec, and the
+mirror form `git fetch origin "+refs/heads/*:refs/heads/*"` rewrites every
+local branch at once. No rule watches fetch: it is read-only in every normal
+workflow, git.local.discard-work matches reset/clean/checkout/restore
+subcommands only, and nothing else in the pack mentions the subcommand. The
+reflog keeps the old commits until drop-recovery, but the branch and working
+tree have already moved, and agents that "sync" this way are one `gc --prune=now`
+(SC vcs-16's kin) away from unrecoverable.
+example: `git fetch origin +refs/heads/main:refs/heads/main` with two unpushed commits on main
+signal: exec(program=git, argv contains `fetch`, argv contains a refspec with a leading `+` whose right-hand side writes INTO refs/heads (a `refs/heads/...` destination or a `<branch>:<branch>` form that is not under `refs/remotes/`), with agent in ancestry. Plain fetches — no `+`, or refspecs landing in `refs/remotes/*`, or `--depth`/`--tags` fetches — stay quiet; the `+` into refs/heads is the whole signal.
+
+### SC vcs-25 Tag force-move rewrites an immutable release pointer
+- category: git
+- decision: approval_required | severity: 3
+- pack: git | coverage: gap
+- observable: exec-input
+- sources: -
+behavior: `git tag -f v1.2.0 <sha>` moves an existing tag to different
+content. Tags are the pointers releases, downstream builds and humans pin,
+and moving one rewrites what "version 1.2.0" means while keeping the name —
+the local half of a release redirect. Variants: delete-and-recreate (`git tag
+-d v1.2.0 && git tag v1.2.0 <sha>`, where only the `-d` half matches
+git.refs.delete), and re-signing the replacement (`git tag -f -s v1.2.0`),
+which launders the new target with a fresh valid signature. git.refs.delete
+matches bare `tag -d`/`tag --delete`; `tag -f` matches nothing in the pack,
+and the move alone poisons the next release because the tag gets pushed by
+ordinary `git push origin v1.2.0` that no rule stops.
+example: `git tag -f v1.2.0 abc1234 && git push origin v1.2.0` — every consumer pinning v1.2.0 now builds attacker-chosen code
+signal: exec(program=git, argv contains `tag`, argv contains `-f`/`--force`, argv contains a tag-shaped name (`v`-prefixed or a name seen earlier in the session's exec stream), with agent in ancestry. Sharpening state: a same-session pair (`tag -d <name>` then `tag <name> ...`) re-creates a just-deleted tag — the delete half is already reported by git.refs.delete, the pair is what makes it a rewrite rather than a cleanup.
+
+### SC vcs-26 .gitattributes driver registration: filter/merge/diff as command
+- category: git
+- decision: approval_required | severity: 4
+- pack: cross | coverage: gap
+- observable: exec-input
+- sources: -
+behavior: The agent writes `.gitattributes` lines that bind attribute
+drivers — `*.c filter=obfuscate`, `*.bin merge= theirs`, `*.lock diff=x` —
+and registers the driver's command with `git config filter.obfuscate.clean
+"/var/tmp/s.sh"` (or `smudge`, or sets `*.x merge=<script>` plus the merge
+config). Git then runs those commands on checkout, diff and merge of matching
+paths: persistence wired through the repository itself, no hook file and no
+autostart entry involved, surviving branch switches. `.gitattributes` is a
+normal tracked file, so filesystem rules ignore it; the config half is a
+`git config` write whose key (`filter.<name>.clean`) is not in any shipped
+key list (git.hooks.bypass covers only core.hooksPath). It is the checkout-
+triggered sibling of SC vcs-03's hook tampering and SC vcs-18's execution keys.
+example: `echo '*.bin filter=crypt' >> .gitattributes && git config filter.crypt.clean '/var/tmp/.clean.sh'` — next checkout of a *.bin file runs the script
+signal: either half fires: (a) input(text) of a shell exec whose redirection target is `.gitattributes` and whose text contains `filter=`/`merge=`/`diff=` with a non-builtin driver name; (b) exec(program=git, argv contains `config`, argv matches `filter.<name>.clean`/`.smudge`/`.required` or a `merge.<name>.driver` key, argv without a read flag (`--get`, `--list`, `-l`)) with agent in ancestry. The attributes-file write alone (plain `* text=auto` hygiene) stays quiet — the driver binding is the signal.
+
+### SC vcs-27 Bulk ref publication to the shared remote (push --all / --tags to the legitimate origin)
+- category: git
+- decision: approval_required | severity: 3
+- pack: git | coverage: partial
+- observable: exec-input
+- sources: vcs-claude-code-filter-repo-strip-blobs
+behavior: The agent pushes everything at once to the remote the repo already
+trusts: `git push --all origin` publishes every local branch — WIP branches,
+experiment branches with hardcoded credentials, branches that exist only
+locally because they were never meant to leave the machine; `git push
+--tags origin` publishes every tag. The host is the legitimate origin, so the
+wrong-host rules stay silent: SC vcs-07 and memory.git.push-unknown-remote
+cover new remotes, git.push.remote-destructive covers `--mirror`, and plain
+`--all`/`--tags` to origin matches nothing. The sharpest variant follows a
+history rewrite (SC vcs-17): after `git filter-repo` scrubs a secret from
+branch history, stale tag objects still reference the pre-rewrite commits,
+and a bulk tag push republishes the purged secret under tags the scrub never
+touched — resurrection of what the rewrite claimed to remove.
+example: `git filter-repo --invert-paths --path secrets.env` then `git push --tags origin` — old tags still carry the pre-scrub commits
+signal: exec(program=git, argv contains `push`, argv contains `--all` or `--tags`/`--follow-tags`, argv's remote argument is a known remote name (the novel-host case is already owned by SC vcs-07), with agent in ancestry. Escalation to deny when a history-rewrite exec (filter-branch/filter-repo/BFG) precedes it in the session: the bulk push is republishing whatever the rewrite left behind in tags and side refs.
+
 ---
 
 ## Coverage summary against the builtin packs

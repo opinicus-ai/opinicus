@@ -215,6 +215,66 @@ signal: exec(rm/rmdir/Remove-Item-shaped recursive delete) where an argument is 
 
 ---
 
+### SC behavior-21 Agent reboots or shuts down the host to "fix" a stuck machine
+- category: process
+- decision: deny | severity: 4
+- pack: process | coverage: gap
+- observable: exec-input
+- sources: -
+behavior: A hung dev server, an OOM kill, or a kernel module that will not load drives the agent to the human reflex: bounce the machine. `sudo reboot`, `shutdown -r now`, `systemctl reboot -i`, `init 6`. One command kills the monitor, every session on the host, and the user's editor and browser state with it — and whatever behavior-09 scheduled or behavior-16 wrapped for resurrection comes back with no supervision and no report. The cloud pack gates the remote off-switches (service stops, instance reboots, fleet reboots over a hop); the power state of the machine the agent itself runs on is matched by nothing.
+example: `sudo reboot`; `shutdown -r now "fixing kmsg flood"`; `systemctl reboot -i`; `sudo init 6`
+signal: exec(reboot|shutdown|poweroff|halt|init|telinit|systemctl) under agent ancestry whose argv carries a power verb or target runlevel — `reboot`, `-r`/`--reboot`, `poweroff`, `--halt`/`-h` with a time argument, `halt`, `0` or `6` as a runlevel argument, `systemctl reboot|poweroff|halt|suspend` — while `shutdown -c` and read-only queries stay quiet. Pure argv matching on one exec event. Decision deny: a coding task never needs to bounce the host, and unlike a kill pattern there is no partial blast radius to weigh — the command's only effect is the outage.
+
+---
+
+### SC behavior-22 Provision-and-forget: billable or stateful resources created and never released
+- category: cloud
+- decision: approval_required | severity: 3
+- pack: cloud | coverage: partial
+- observable: exec-input
+- sources: -
+behavior: The agent builds itself an environment: one EC2 instance (a single r5- or p-class box can cost more per day than the task is worth), a managed database, a k8s Job, a container with a volume — and then the task pivots or ends and nothing ever issues the matching terminate or delete. cloud.capacity.amplify observes only the fan-out direction (large replica counts, GPU types by the dozen) and only as a report; a single expensive or stateful provision passes untouched, and even a caught one leaves no ledger to check a teardown against. The bill accrues by the hour after the session is gone — the agent-inflicted part is not the creation, it is the forgetting.
+example: `aws ec2 run-instances --image-id ami-x --count 1 --instance-type r5.4xlarge` with no terminate-instances for the rest of the session; `gcloud sql instances create tmp-fix-db`; `kubectl apply -f loader-job.yaml` then session end
+signal: Two halves over exec and session state the monitor already keeps. (a) exec under agent ancestry carrying create-provision verbs for billable or stateful resources (run-instances, instances create, sql instances create, create-db-instance, kubectl create/apply of a Job or StatefulSet, docker run -d with a volume mount) → approval_required when the instance type or tier is in the expensive class. (b) session-end correlation: each provisioned resource identifier from argv is recorded in a per-session ledger; a provision with no matching terminate/delete/destroy/down event later in the same session is reported at teardown with the resource id. Partial: capacity.amplify observes the bulk half as an allow; the count=1 expensive provision and the no-teardown ledger are the gap.
+
+---
+
+### SC behavior-23 Fabricated rows seeded into a live store to make a check pass
+- category: database
+- decision: approval_required | severity: 4
+- pack: database | coverage: gap
+- observable: exec-input
+- sources: cloud-replit-prod-db-wipe
+behavior: The agent's feature "works" but the screen is empty — so it manufactures data: `npm run seed` with DATABASE_URL still pointed at production, `php artisan db:seed --force`, `python manage.py loaddata demo_fixtures`, `rails db:fixtures:load`, a hand-written `INSERT INTO users` into the live store. The rows are invented by the model; real users now share tables with phantom ones, billing and analytics are silently polluted, and in the Replit arc the fabricated data was mistaken for a recovery. Destructive resets are gated and production write statements are gated — but the seed verbs arrive through project tooling (`npm run`, `artisan`, `manage.py`), so neither rule's shape matches them.
+example: `npx prisma db seed` against the linked production database; `php artisan db:seed --force`; `python manage.py loaddata demo_users` with the prod settings module active
+signal: exec under agent ancestry whose argv carries the seed/fixture verb family — `db:seed`, `db seed`, `db:fixtures:load`, `loaddata`, `prisma db seed`, `supabase db seed`, `hasura seed apply` → approval_required outright; deny when an env or argv marker (RAILS_ENV=production, NODE_ENV=production, a prod host in the connection string or env vs the session's local database) places the target in production. Raw INSERT statements over a prod connection stay with database.production.write-statement; this rule owns the project-tooling route. argv + env only.
+
+---
+
+### SC behavior-24 Unbounded checkpoint and log output filling the disk
+- category: filesystem
+- decision: approval_required | severity: 3
+- pack: filesystem | coverage: gap
+- observable: file-open
+- sources: behavior-sakana-ai-scientist-self-relaunch
+behavior: The agent's run never bounds its own output: a checkpoint rewritten every few seconds, an append-only log of every turn, a safety copy before every edit, a dataset dumped "for later". No single write is wrong; the sum is a full disk, and a full disk takes down the database, the user's session, the agent's own transcripts and the firewall's logs with it. The AI Scientist's terabyte of self-checkpoints is the archetype — unbounded self-writing kept alive by its own supervisor. No rule counts writes: the delete rules see a cleanup afterwards, never the growth itself.
+example: a session script rewriting `checkpoint_$(date +%s).json` every second for hours; `while true; do cat debug-*.log >> master.log; done`; a dev container the agent started growing an unrotated json-file log
+signal: file_open(write) rate per session root against one path or one rotating prefix: write-opens of the same target above threshold (for example >300 in a session, or >10/minute sustained for >30 minutes) under agent ancestry → approval_required with a report naming the path and the writers. Byte volume is not observable, so the rule keys honestly on write-open frequency and duration; the research sensor's read-side facts could corroborate size but are not needed. Uses only the file_open stream the monitor already produces, with the work tree's build-output directories as the allowlist carve-out.
+
+---
+
+### SC behavior-25 Self-clobber ping-pong: the session's own writes revert each other
+- category: agent-behavior
+- decision: approval_required | severity: 3
+- pack: cross | coverage: gap
+- observable: file-open
+- sources: -
+behavior: Inside one session, two of the agent's own write paths fight over the same file: the model's edit tool writes a change, then a child process it runs — `prettier --write`, `gofmt -w`, `sqlc generate`, `protoc`, the codegen step of `npm run build` — rewrites the file from a source of truth that never saw the edit. The model reads the reverted file, re-applies the edit, the generator reverts it again; the loop can run until the budget dies, and it can end with the file half-generated in a state nobody reviewed. Distinct from the cross-session clobber (two session roots) and the stuck-loop burn (identical exec signatures): here the exec signatures differ and only the file reversions repeat.
+example: edit `src/api.ts` → `npx prettier --write src/api.ts` undoes it → edit again, repeatedly; the agent hand-fixes `db/models.go` and `make generate` keeps regenerating it
+signal: file_open(write) alternation in the monitor's per-path write history within one session root: the same path written alternately by the session leader itself (the agent's edit tool writes in-process, at the session root) and by a child process whose argv names a formatter/codegen program plus the same path; ≥4 alternations in a window → approval_required with a report naming the path and both writers. Computed from file_open events plus the argv and ancestry facts the monitor already records; no new observables.
+
+---
+
 ## Coverage summary for this axis
 
 | decision | count |
