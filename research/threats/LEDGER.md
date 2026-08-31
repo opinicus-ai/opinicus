@@ -21,9 +21,9 @@ for how to run it again.
 | item | count |
 | --- | ---: |
 | incident reports in `incidents/` | 90 |
-| scenarios in `scenarios/` | 254 |
+| scenarios in `scenarios/` | 255 |
 | scenarios whose only needed observable is `exec`/`input` | **169** |
-| scenarios that need `file_open` or `network_connect` — both shipped since the seccomp layer | **85** |
+| scenarios that need `file_open` or `network_connect` — both shipped since the seccomp layer | **86** |
 
 ## Observable summary
 
@@ -39,7 +39,7 @@ blocker count — it says which shipped observable a scenario's signal needs.
 | the signal needs | scenarios | state |
 | --- | ---: | --- |
 | `exec` or `input` only | 169 | visible since the first version |
-| `file_open` or `network_connect` | 85 | visible since the seccomp layer |
+| `file_open` or `network_connect` | 86 | visible since the seccomp layer |
 
 Every catalogue scenario's needed observable is produced by the shipped
 monitor today. The actionable frontier is rules, not observables — the
@@ -53,7 +53,7 @@ coverage-planning input, not a blocker count.
 
 | policy pack | gap | partial | file/net | actionable now |
 | --- | ---: | ---: | ---: | ---: |
-| cross (spans packs) | 53 | 13 | 32 | 34 |
+| cross (spans packs) | 54 | 13 | 33 | 34 |
 | process | 53 | 6 | 13 | 46 |
 | filesystem | 29 | 11 | 21 | 19 |
 | network | 29 | 2 | 10 | 21 |
@@ -61,7 +61,7 @@ coverage-planning input, not a blocker count.
 | git | 18 | 6 | 4 | 20 |
 | database | 7 | 1 | 1 | 7 |
 | mcp | 1 | 0 | 0 | 1 |
-| **total** | **210** | **42** | **85** | **167** |
+| **total** | **211** | **42** | **86** | **167** |
 
 ## The interruption budget
 
@@ -114,7 +114,7 @@ severity and a coverage state.
 | --- | ---: | ---: | ---: | ---: |
 | behavior | 26 | 19 | 7 | 8 |
 | cloud | 28 | 25 | 3 | 7 |
-| evade | 24 | 19 | 4 | 8 |
+| evade | 25 | 20 | 4 | 9 |
 | exfil | 26 | 24 | 2 | 13 |
 | fs | 23 | 16 | 7 | 4 |
 | inject | 23 | 19 | 4 | 11 |
@@ -147,4 +147,5 @@ Behaviour that no observable of any planned layer reports.
 | 2026-08 | 18 added | 52 added | rerun added 18 incident reports and 52 scenarios; no axis failed |
 | 2026-08 | 1 added | 1 added | manual add: Simon Brook LinkedIn report, Auto Mode `$HOME` drift home wipe; distinct from the 2025-12 `rm -rf ~/` twin |
 | 2026-08 | 13 added | 49 added | rerun added 13 incident reports and 49 scenarios; no axis failed |
+| 2026-08 | 1 added | 1 added | manual add: evade-25 evidence erasure (the session rewrites its own transcript, the shell history, and the firewall's trace); follow-up to the bypass-harness and deep-dive findings |
 | 2026-08 | 1 added | 5 added | deep dive: the July 2026 OpenAI agent-swarm intrusion into Hugging Face folded in as one report and 5 scenarios |
