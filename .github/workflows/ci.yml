@@ -67,3 +67,34 @@ jobs:
 
       - name: The complete gate
         run: scripts/gate.sh
+
+  # The container image, built through the Blacksmith docker builder so
+  # the layer cache sits next to the runners (40x faster cache restores;
+  # https://docs.blacksmith.sh/blacksmith-caching/docker-builds). The image
+  # is loaded and smoke-checked on every run; pushing to a registry is a
+  # release action (M14), not a CI action.
+  docker:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Set up the Blacksmith docker builder
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Build the image
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          load: true
+          tags: agent-firewall:ci
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-check the image
+        run: docker run --rm agent-firewall:ci --help

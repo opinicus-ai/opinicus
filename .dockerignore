@@ -1,0 +1,23 @@
+# Keep the build context to the files the image needs: manifests, crates,
+# policies. Everything else in the repository is evidence, research or
+# local state, and none of it may enter the image.
+.git
+.github
+.claude
+.lavish
+.pi
+.rohrpost
+target
+tmp
+demo
+docs
+research
+tests
+Dockerfile
+.dockerignore
+.gitattributes
+.gitignore
+AGENTS.md
+LICENSE
+PROJECT.md
+README.md
