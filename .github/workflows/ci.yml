@@ -1,0 +1,69 @@
+# The complete gate, continuously enforced.
+#
+# [af-10] (M9): every claim the repository makes must be checked on every
+# push and pull request. The job runs scripts/gate.sh, the same script a
+# person runs locally: fmt, clippy, workspace tests, policy tests, e2e,
+# quiet-check, the Landlock count-rules drift guard, and the threat-ledger
+# checker. No check may be skipped; the gate is red until all of them pass.
+#
+# Runners: Blacksmith (https://blacksmith.sh) — Firecracker microVMs with
+# the same image as GitHub's ubuntu-2404 runners, registered through the
+# Blacksmith GitHub app on the opinicus-ai organization (app.blacksmith.sh).
+# The ptrace/seccomp/Landlock kernel surface the tests need is available in
+# the VM. If the app is missing the job queues forever; that is the first
+# thing to check when this job does not start.
+#
+# Actions are pinned to their latest major versions; every bundled action
+# runs its node24 runtime. The repository itself needs no Node toolchain —
+# the gate is Rust and Python only.
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust (stable, with fmt and clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Install the C compiler for the e2e techniques
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+
+      - name: The complete gate
+        run: scripts/gate.sh
