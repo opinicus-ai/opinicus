@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     decision::Verdict,
+    identity::{AgentTag, SessionDetach},
     process::{Action, ProcessInfo},
     session::{SessionId, SessionMeta},
     traits::ApprovalOutcome,
@@ -64,7 +65,7 @@ impl MonitorCapability {
 }
 
 /// One normalized event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     /// Position of the event in the session. The first event has number 1.
     pub seq: u64,
@@ -74,6 +75,16 @@ pub struct Event {
     pub session_id: SessionId,
     /// Process that the event belongs to.
     pub pid: Pid,
+    /// Agent identity of the process, when the session tagged one.
+    ///
+    /// The tag is `None` while the session carries no identified agent, which
+    /// is the normal case of a plain shell. The tag says that the detectors
+    /// identified the session root as an agent, and that the identity
+    /// propagated to this process through the provenance graph. A process the
+    /// graph flagged as unlinked keeps the tag and names the flag in
+    /// [`AgentTag::link`] — unlinked, never foreign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentTag>,
     /// The event itself.
     #[serde(flatten)]
     pub kind: EventKind,
@@ -87,6 +98,7 @@ impl Event {
             ts: crate::now_nanos(),
             session_id,
             pid,
+            agent: None,
             kind,
         }
     }
@@ -98,7 +110,7 @@ impl Event {
 }
 
 /// All event kinds of the normalized schema.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
     /// The launcher started a session.
@@ -130,6 +142,33 @@ pub enum EventKind {
         /// Signal that ended the process, when a signal ended it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signal: Option<i32>,
+        /// Session identifier of the process at its end, when the monitor
+        /// could read it.
+        ///
+        /// A daemon that calls `setsid` and never runs another program
+        /// carries no exec event, so its detachment becomes visible only
+        /// here. The graph compares this value with the session root's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sid: Option<Pid>,
+    },
+    /// The provenance graph flagged a process as detached from the tree of
+    /// the session root.
+    ///
+    /// This is the B.6 liveness fact: the process called `setsid` (or a
+    /// process above it did), so it can outlive the session and its later
+    /// actions can arrive with no link back. The trace stop itself keeps
+    /// following the process — a launch session cannot escape its tracer —
+    /// which is exactly why the flag reports detachment and never claims the
+    /// process went unseen.
+    ///
+    /// The flag never says that the process is foreign. The process keeps its
+    /// recorded ancestry and its agent identity; an event of an unlinked
+    /// process carries the agent tag with [`crate::AgentLink::Unlinked`].
+    ProcessUnlinked {
+        /// Facts about the process at the moment the graph flagged it.
+        process: Box<ProcessInfo>,
+        /// The measured session identifiers that differ.
+        detach: SessionDetach,
     },
     /// A process opened a file.
     FileOpen {
@@ -251,6 +290,7 @@ impl EventKind {
             EventKind::ProcessFork { .. } => "process_fork",
             EventKind::ProcessExec { .. } => "process_exec",
             EventKind::ProcessExit { .. } => "process_exit",
+            EventKind::ProcessUnlinked { .. } => "process_unlinked",
             EventKind::FileOpen { .. } => "file_open",
             EventKind::NetworkConnect { .. } => "network_connect",
             EventKind::FileRead { .. } => "file_read",
@@ -269,8 +309,9 @@ impl EventKind {
 
     /// Returns true when the event must always stay in storage.
     ///
-    /// Retention depends on risk. A decision, a question, an answer and the
-    /// start and end of a session are always evidence.
+    /// Retention depends on risk. A decision, a question, an answer, the
+    /// start and end of a session, and a process that detached from the tree
+    /// are always evidence.
     pub fn is_evidence(&self) -> bool {
         matches!(
             self,
@@ -278,6 +319,7 @@ impl EventKind {
                 | EventKind::SessionEnd { .. }
                 | EventKind::ApprovalRequested { .. }
                 | EventKind::ApprovalResolved { .. }
+                | EventKind::ProcessUnlinked { .. }
         ) || matches!(
             self,
             EventKind::PolicyDecision { verdict, .. } if verdict.decision != crate::Decision::Allow
@@ -355,5 +397,50 @@ mod tests {
             assert_eq!(back, event);
             assert!(text.contains(&format!("\"type\":\"{}\"", event.kind.label())));
         }
+    }
+
+    #[test]
+    fn an_agent_tag_and_an_unlink_flag_round_trip_through_json() {
+        let mut event = Event::new(
+            SessionId::from("afw-identity"),
+            42,
+            EventKind::ProcessUnlinked {
+                process: Box::new(ProcessInfo::from_pid(42)),
+                detach: crate::SessionDetach {
+                    sid: 4752,
+                    root_sid: 4701,
+                },
+            },
+        );
+        event.agent = Some(crate::AgentTag {
+            name: "claude-code".to_string(),
+            confidence: 0.95,
+            link: crate::AgentLink::Unlinked,
+        });
+        let text = serde_json::to_string(&event).expect("encode");
+        assert!(text.contains("\"type\":\"process_unlinked\""));
+        assert!(text.contains("\"sid\":4752"));
+        assert!(text.contains("\"link\":\"unlinked\""));
+        let back: Event = serde_json::from_str(&text).expect("decode");
+        assert_eq!(back, event);
+        assert!(back.kind.is_evidence());
+    }
+
+    #[test]
+    fn an_event_without_a_tag_stays_without_one_in_the_trace() {
+        // A normal session carries no tag, and the trace must not carry an
+        // empty field for it.
+        let event = Event::new(
+            SessionId::from("afw-plain"),
+            7,
+            EventKind::FileOpen {
+                path: "/tmp/x".to_string(),
+                write: false,
+            },
+        );
+        let text = serde_json::to_string(&event).expect("encode");
+        assert!(!text.contains("\"agent\""));
+        let back: Event = serde_json::from_str(&text).expect("decode");
+        assert_eq!(back.agent, None);
     }
 }

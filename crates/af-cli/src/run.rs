@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use af_approval::{ApprovalMode, TerminalApprover};
 use af_core::{
-    display, Action, ApprovalOutcome, ApprovalRequest, EvalContext, Event, EventKind, EventSink,
-    MemoryEffect, MonitorCapability, Pid, PolicyEngine, ProcessInfo, SessionMemory, SessionMeta,
-    TimestampNanos, Verdict,
+    display, Action, AgentKind, AgentLink, ApprovalOutcome, ApprovalRequest, DetectionInput,
+    DetectorRegistry, EvalContext, Event, EventKind, EventSink, MemoryEffect, MonitorCapability,
+    Pid, PolicyEngine, ProcessInfo, SessionMemory, SessionMeta, TimestampNanos, Verdict,
 };
 use af_monitor::{InputSnapshot, Intercept, Monitor, MonitorConfig, MonitorHandler, SyscallFilter};
 use af_provenance::ProcessGraph;
@@ -41,6 +41,26 @@ pub fn run(args: RunArgs) -> Result<i32> {
     session
         .baseline
         .insert("git_remotes".to_string(), git_remotes(&cwd));
+    // The launcher knows the root command before anything runs, so the
+    // detection of the agent root happens here, one time, from facts that
+    // the session carries from now on: the resolved program, the command
+    // line, the working directory, the inherited environment and the
+    // dependency manifests of the working directory. The assessment travels
+    // inside the session metadata, so a replay reads it from the trace and
+    // never detects again.
+    //
+    // Quiet is the feature. A session the detectors cannot identify carries
+    // no tag, and everything downstream stays exactly as it was.
+    session.detection = detect_agent_root(&args.command, &cwd);
+    if let Some(agent) = &session.detection {
+        session.agent.kind = AgentKind::from_agent_name(&agent.name);
+        eprintln!(
+            "agent-firewall: agent session: {} (confidence {:.2}, {} signal(s))",
+            agent.name,
+            agent.confidence,
+            agent.signals.len()
+        );
+    }
 
     let policy = load_policy(&args.policy).context("cannot load the rules")?;
     // A rule with a `threshold` block fires again on every action that
@@ -269,15 +289,50 @@ struct FirewallHandler {
 }
 
 impl FirewallHandler {
-    /// Sends one event to the graph and to storage.
+    /// Sends one event to the graph, to storage and to the identity ledger.
+    ///
+    /// The graph applies the event first, so the agent tag that the event
+    /// carries reflects the state of the graph **after** the event: a
+    /// descendant that detached from the tree keeps its tag and carries the
+    /// unlinked flag on the very event that revealed the detachment.
     fn emit(&mut self, event: Event) {
         self.last_event_ts = event.ts;
+        let pid = event.pid;
         if let EventKind::ProcessExec { process } = &event.kind {
             self.exec_ts = Some((process.pid, event.ts));
         }
         self.graph.apply(&event);
+        let mut event = event;
+        event.agent = self.graph.agent_tag(pid);
+        if matches!(event.kind, EventKind::ProcessUnlinked { .. })
+            && event
+                .agent
+                .as_ref()
+                .is_some_and(|tag| tag.link == AgentLink::Unlinked)
+        {
+            eprintln!(
+                "agent-firewall: process {pid} detached from the session tree; flagged unlinked"
+            );
+        }
         if let Err(error) = self.sink.record(&event) {
             eprintln!("agent-firewall: cannot record an event: {error}");
+        }
+        // The graph raises its unlink flags while it applies an event. Each
+        // flag becomes one event of its own, which the same path records —
+        // with the agent tag and the unlinked link state on it.
+        for (unlinked_pid, detach) in self.graph.take_unlinked() {
+            let process = self
+                .graph
+                .process(unlinked_pid)
+                .unwrap_or_else(|| ProcessInfo::from_pid(unlinked_pid));
+            self.emit(Event::new(
+                self.session.session_id.clone(),
+                unlinked_pid,
+                EventKind::ProcessUnlinked {
+                    process: Box::new(process),
+                    detach,
+                },
+            ));
         }
     }
 
@@ -708,6 +763,98 @@ impl MonitorHandler for FirewallHandler {
             true,
         )
     }
+}
+
+/// Assesses the root command of the session with the built-in detectors.
+///
+/// Returns the identified agent when the combined confidence crossed the
+/// tagging threshold, and `None` otherwise. The function reads the facts one
+/// time, at launch: the resolved program, the command line, the working
+/// directory, the environment the root inherits, and the dependency
+/// manifests of the working directory. Nothing it reads reaches the trace
+/// except the signals that matched.
+fn detect_agent_root(command: &[String], cwd: &Path) -> Option<af_core::IdentifiedAgent> {
+    let registry = DetectorRegistry::with_builtin_detectors();
+    let input = DetectionInput {
+        exe: command
+            .first()
+            .and_then(|program| resolve_program(program, cwd)),
+        argv: command.to_vec(),
+        cwd: cwd.display().to_string(),
+        env: std::env::vars().collect(),
+        manifest_dependencies: manifest_dependencies(cwd),
+    };
+    registry.assess(&input).agent
+}
+
+/// Resolves a program name of the command line to its full path.
+///
+/// A name with a slash resolves against the working directory. A bare name
+/// walks the `PATH` of the launcher, and the first executable match wins.
+/// The resolved path carries the installation metadata that the install
+/// detector reads — an executable under `node_modules/@anthropic-ai/
+/// claude-code` names its package whatever its program name is.
+fn resolve_program(program: &str, cwd: &Path) -> Option<String> {
+    let candidate = Path::new(program);
+    let direct = if candidate.is_absolute() {
+        Some(candidate.to_path_buf())
+    } else if program.contains('/') {
+        Some(cwd.join(candidate))
+    } else {
+        None
+    };
+    if let Some(path) = direct {
+        return path
+            .canonicalize()
+            .ok()
+            .map(|resolved| resolved.display().to_string());
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let full = dir.join(program);
+        if is_executable_file(&full) {
+            return full
+                .canonicalize()
+                .ok()
+                .map(|resolved| resolved.display().to_string());
+        }
+    }
+    None
+}
+
+/// Returns true when this path is a file the launcher may execute.
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
+/// Reads the dependency names that the `package.json` of the working
+/// directory carries.
+///
+/// A dependency manifest is supporting evidence and never a tag on its own:
+/// a project that develops with an agent depends on its package, and a build
+/// in that project is a normal dev session. The function reads the one
+/// manifest that npm-shaped toolchains leave at the root of a work tree, and
+/// nothing else, and it runs one time for each session.
+fn manifest_dependencies(cwd: &Path) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let Ok(text) = std::fs::read_to_string(cwd.join("package.json")) else {
+        return names;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return names;
+    };
+    for section in ["dependencies", "devDependencies", "optionalDependencies"] {
+        if let Some(entries) = manifest.get(section).and_then(|value| value.as_object()) {
+            for name in entries.keys() {
+                names.insert(name.clone());
+            }
+        }
+    }
+    names
 }
 
 /// Reads the git remotes of a directory, as names and as addresses.

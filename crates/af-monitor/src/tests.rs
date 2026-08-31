@@ -241,11 +241,15 @@ fn simple_session_reports_exec_and_exit() {
 
     let exits = handler.of_kind("process_exit");
     assert_eq!(exits.len(), 1);
+    // The exit event carries the session identifier of the process at its
+    // end; a process that never ran another program carries its detachment
+    // nowhere else.
     assert!(matches!(
         exits[0].kind,
         EventKind::ProcessExit {
             code: Some(0),
-            signal: None
+            signal: None,
+            sid: Some(_),
         }
     ));
 }
@@ -373,7 +377,8 @@ fn ending_signal_is_reported() {
         event.kind,
         EventKind::ProcessExit {
             code: None,
-            signal: Some(15)
+            signal: Some(15),
+            ..
         }
     )));
 }

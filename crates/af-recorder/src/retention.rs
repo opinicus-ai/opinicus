@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 /// | `ProcessFork` | keep | keep | drop |
 /// | `ProcessExec` | keep | keep | only when a kept decision names the process |
 /// | `ProcessExit` | keep | keep | drop |
+/// | `ProcessUnlinked` | keep | keep | keep |
 /// | `FileOpen` | keep | only when a rule matched it | drop |
 /// | `NetworkConnect` | keep | only when a rule matched it | drop |
 /// | `StdinWrite` | keep | drop | drop |

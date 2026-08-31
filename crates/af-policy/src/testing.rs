@@ -275,6 +275,7 @@ fn test_session(
         },
         schema_version: af_core::EVENT_SCHEMA_VERSION,
         baseline: sets,
+        detection: None,
     }
 }
 
@@ -302,6 +303,7 @@ fn to_process(source: &TestProcess, default_pid: i32) -> ProcessInfo {
         argv,
         cwd: source.cwd.clone(),
         env: source.env.clone(),
+        sid: None,
     }
 }
 

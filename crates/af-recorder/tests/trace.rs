@@ -151,6 +151,7 @@ fn one_of_every_kind() -> Vec<Event> {
             EventKind::ProcessExit {
                 code: Some(3),
                 signal: None,
+                sid: None,
             },
             1001,
         ),
@@ -249,6 +250,7 @@ fn demo_session() -> (SessionMeta, Vec<Event>) {
             EventKind::ProcessExit {
                 code: Some(0),
                 signal: None,
+                sid: None,
             },
             1004,
         ),
@@ -401,6 +403,7 @@ fn balanced_keeps_evidence_and_process_activity() {
         EventKind::ProcessExit {
             code: Some(0),
             signal: None,
+            sid: None,
         },
         EventKind::MonitorWarning {
             message: "no ptrace".to_string(),

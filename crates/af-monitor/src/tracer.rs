@@ -572,13 +572,21 @@ impl Tracer<'_> {
     }
 
     /// Reports the end of a process exactly one time.
+    ///
+    /// The stop before the real end is the last chance to read the session
+    /// identifier of the process from `/proc`. A daemon that called `setsid`
+    /// and never ran another program carries its detachment nowhere else, so
+    /// the exit event carries the value for the graph to compare.
     fn note_exit(&mut self, pid: Pid, code: Option<i32>, signal: Option<i32>) {
         if pid == self.root {
             self.root_code = code;
             self.root_signal = signal;
         }
         if self.exited.insert(pid) {
-            self.emit(pid, EventKind::ProcessExit { code, signal });
+            let sid = procfs::read_stat(pid)
+                .map(|stat| stat.sid)
+                .filter(|sid| *sid > 0);
+            self.emit(pid, EventKind::ProcessExit { code, signal, sid });
         }
     }
 

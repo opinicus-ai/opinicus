@@ -1,6 +1,6 @@
 //! One process in the graph.
 
-use af_core::{ProcessInfo, ProcessKey, Verdict};
+use af_core::{ProcessInfo, ProcessKey, SessionDetach, Verdict};
 use serde::{Deserialize, Serialize};
 
 /// How many earlier program names one process keeps.
@@ -42,6 +42,12 @@ pub(crate) struct Node {
     pub history: Vec<String>,
     /// Strongest verdict that the session recorded for this process.
     pub verdict: Option<Verdict>,
+    /// The measured detachment of this process from the session of the
+    /// session root, when the graph flagged one.
+    ///
+    /// The flag is the B.6 liveness fact: the process detached from the tree
+    /// of the session root. It never means that the process is foreign.
+    pub unlink: Option<SessionDetach>,
 }
 
 impl Node {
@@ -57,6 +63,7 @@ impl Node {
             exit: None,
             history: Vec::new(),
             verdict: None,
+            unlink: None,
         }
     }
 

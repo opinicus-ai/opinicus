@@ -33,3 +33,6 @@ research/spikes/**/scratch/
 # Bypass harness build output and raw runs.
 research/bypass/bin/
 research/bypass/results/
+
+# Agent-identity gate runs (regenerable).
+research/detection/results/

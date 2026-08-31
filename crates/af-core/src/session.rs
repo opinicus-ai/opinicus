@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity::IdentifiedAgent;
 use crate::{Pid, TimestampNanos};
 
 /// Identifier of one monitored session.
@@ -77,6 +78,24 @@ impl AgentKind {
         }
     }
 
+    /// Maps the agent name of a detection onto a kind.
+    ///
+    /// The detectors name agents by string (`claude-code`, `gemini-cli`),
+    /// because a new agent is a table entry and not a new variant here. An
+    /// agent with no variant of its own is [`AgentKind::Unknown`] with its
+    /// name, which the user interface shows unchanged.
+    pub fn from_agent_name(name: &str) -> Self {
+        match name {
+            "claude-code" => AgentKind::ClaudeCode,
+            "codex" => AgentKind::Codex,
+            "copilot-cli" => AgentKind::CopilotCli,
+            "gemini-cli" => AgentKind::GeminiCli,
+            "opencode" => AgentKind::OpenCode,
+            "pi" => AgentKind::Pi,
+            other => AgentKind::Unknown(other.to_string()),
+        }
+    }
+
     /// Returns a label for the user interface.
     pub fn label(&self) -> &str {
         match self {
@@ -121,7 +140,7 @@ impl AgentMeta {
 }
 
 /// Metadata of one monitored session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     /// Identifier of the session.
     pub session_id: SessionId,
@@ -147,6 +166,14 @@ pub struct SessionMeta {
     /// again.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub baseline: BTreeMap<String, BTreeSet<String>>,
+    /// The agent the detectors identified in the root command, when they did.
+    ///
+    /// The launcher assesses the root command once, at session start, with
+    /// the built-in detector registry of [`crate::identity`]. The assessment
+    /// travels inside the `SessionStart` event, so a replay reads the same
+    /// identity from the trace and never detects again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detection: Option<IdentifiedAgent>,
 }
 
 fn default_schema_version() -> u32 {
@@ -169,6 +196,7 @@ impl SessionMeta {
             agent: AgentMeta::from_program(&program),
             schema_version: crate::EVENT_SCHEMA_VERSION,
             baseline: BTreeMap::new(),
+            detection: None,
         }
     }
 }

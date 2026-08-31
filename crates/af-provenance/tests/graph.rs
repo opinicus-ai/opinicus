@@ -77,6 +77,7 @@ fn exit(meta: &SessionMeta, pid: Pid, code: i32) -> Event {
         EventKind::ProcessExit {
             code: Some(code),
             signal: None,
+            sid: None,
         },
     )
 }
@@ -616,4 +617,166 @@ fn a_session_end_closes_every_process() {
     assert!(graph.has_ended(1000));
     assert!(graph.has_ended(1003));
     assert_eq!(graph.len(), 4);
+}
+
+/// Makes session metadata whose root the detectors identified as an agent.
+fn agent_session(id: &str, root_pid: Pid) -> SessionMeta {
+    let mut meta = session(id, root_pid);
+    meta.detection = Some(af_core::IdentifiedAgent {
+        name: "claude-code".to_string(),
+        confidence: 0.95,
+        signals: Vec::new(),
+    });
+    meta
+}
+
+/// Makes a process whose session identifier is known.
+fn in_session(mut info: ProcessInfo, sid: Pid) -> ProcessInfo {
+    info.sid = Some(sid);
+    info
+}
+
+/// The identity of the root is a fact of the graph, and it reaches every
+/// descendant.
+#[test]
+fn the_agent_identity_propagates_to_every_descendant() {
+    let meta = agent_session("afw-identity", 1000);
+    let events = vec![
+        start(&meta),
+        exec(
+            &meta,
+            in_session(
+                process(1000, 1, "/usr/local/bin/claude", &["claude"], 1),
+                4701,
+            ),
+        ),
+        fork(&meta, 1000, 1001),
+        exec(
+            &meta,
+            in_session(process(1001, 1000, "/usr/bin/bash", &["bash"], 2), 4701),
+        ),
+        fork(&meta, 1001, 1002),
+        exec(
+            &meta,
+            in_session(process(1002, 1001, "/usr/bin/psql", &["psql"], 3), 4701),
+        ),
+    ];
+    let graph = build(&events, &meta);
+
+    for pid in [1000, 1001, 1002] {
+        let tag = graph
+            .agent_tag(pid)
+            .unwrap_or_else(|| panic!("pid {pid} must carry the tag"));
+        assert_eq!(tag.name, "claude-code");
+        assert_eq!(tag.link, af_core::AgentLink::Linked);
+    }
+    // The tree names the agent on the root line.
+    assert!(graph.render_tree().contains("claude [pid 1000]"));
+}
+
+/// A session without an identified root carries no tag at all.
+#[test]
+fn a_plain_session_carries_no_tag() {
+    let meta = session("afw-plain", 1000);
+    let events = vec![
+        start(&meta),
+        exec(
+            &meta,
+            in_session(process(1000, 1, "/usr/bin/bash", &["bash"], 1), 4701),
+        ),
+        fork(&meta, 1000, 1001),
+        exec(
+            &meta,
+            in_session(process(1001, 1000, "/usr/bin/cargo", &["cargo"], 2), 4701),
+        ),
+    ];
+    let mut graph = build(&events, &meta);
+    assert!(graph.agent_tag(1000).is_none());
+    assert!(graph.agent_tag(1001).is_none());
+    assert!(graph.take_unlinked().is_empty());
+}
+
+/// A descendant that called `setsid` — or a process above it did — is flagged
+/// as unlinked, keeps its agent identity, and is never foreign.
+///
+/// This is the double-fork shape of `research/bypass/techniques/escape-setsid.c`:
+/// the middle process calls `setsid`, the leaf inherits the new session, and
+/// the leaf re-executes itself, which is the exec event that reveals the
+/// session identifiers.
+#[test]
+fn a_setsid_descendant_is_flagged_unlinked_and_keeps_the_tag() {
+    let meta = agent_session("afw-escape", 1000);
+    let events = vec![
+        start(&meta),
+        // The root sits in session 4701.
+        exec(
+            &meta,
+            in_session(
+                process(1000, 1, "/tmp/escape-setsid", &["escape-setsid"], 1),
+                4701,
+            ),
+        ),
+        fork(&meta, 1000, 1001),
+        // The middle process calls setsid() and forks the leaf.
+        fork(&meta, 1001, 1002),
+        // The leaf re-executes itself. It sits in the new session 4752.
+        exec(
+            &meta,
+            in_session(
+                process(1002, 1001, "/tmp/escape-setsid", &["escape-setsid"], 2),
+                4752,
+            ),
+        ),
+    ];
+    let mut graph = build(&events, &meta);
+
+    let unlinked = graph.take_unlinked();
+    assert_eq!(
+        unlinked,
+        vec![(
+            1002,
+            af_core::SessionDetach {
+                sid: 4752,
+                root_sid: 4701
+            }
+        )],
+        "the leaf that inherited the setsid session must be flagged, and nothing else"
+    );
+    assert!(graph.take_unlinked().is_empty(), "the flag fires once");
+
+    // The ancestry still reaches the root, and the identity stays on the
+    // process. Unlinked, never foreign.
+    let chain: Vec<Pid> = graph.ancestry(1002).iter().map(|p| p.pid).collect();
+    assert_eq!(chain, vec![1001, 1000]);
+    let tag = graph.agent_tag(1002).expect("the tag stays");
+    assert_eq!(tag.name, "claude-code");
+    assert_eq!(tag.link, af_core::AgentLink::Unlinked);
+    assert!(
+        graph.render_tree().contains("unlinked"),
+        "the tree shows the flag"
+    );
+}
+
+/// A trace with no session facts makes no claim at all.
+#[test]
+fn processes_without_session_facts_stay_quiet() {
+    let meta = agent_session("afw-quiet", 1000);
+    let events = vec![
+        start(&meta),
+        exec(
+            &meta,
+            process(1000, 1, "/usr/local/bin/claude", &["claude"], 1),
+        ),
+        fork(&meta, 1000, 1001),
+        exec(
+            &meta,
+            process(1001, 1000, "/usr/bin/cargo", &["cargo", "build"], 2),
+        ),
+    ];
+    let mut graph = build(&events, &meta);
+    assert!(graph.take_unlinked().is_empty());
+    assert_eq!(
+        graph.agent_tag(1001).unwrap().link,
+        af_core::AgentLink::Linked
+    );
 }

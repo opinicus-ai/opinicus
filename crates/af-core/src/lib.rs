@@ -16,6 +16,7 @@ pub mod decision;
 pub mod display;
 pub mod error;
 pub mod event;
+pub mod identity;
 pub mod memory;
 pub mod process;
 pub mod session;
@@ -24,6 +25,10 @@ pub mod traits;
 pub use decision::{Decision, RiskLevel, RuleInfo, RuleMatch, Verdict};
 pub use error::{Error, Result};
 pub use event::{Event, EventKind, InputStream, MonitorCapability};
+pub use identity::{
+    AgentLink, AgentTag, Assessment, DetectionInput, DetectionSignal, Detector, DetectorRegistry,
+    IdentifiedAgent, SessionDetach, TAG_THRESHOLD,
+};
 pub use memory::{MarkScope, MemoryEffect, SessionMemory};
 pub use process::{Action, InputSource, ProcessInfo, ProcessKey};
 pub use session::{AgentKind, AgentMeta, SessionId, SessionMeta};

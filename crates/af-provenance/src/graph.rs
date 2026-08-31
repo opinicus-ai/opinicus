@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use af_core::{
-    Decision, Event, EventKind, Pid, ProcessInfo, ProcessKey, ProvenanceView, SessionId,
-    SessionMeta, Verdict,
+    AgentLink, AgentTag, Decision, Event, EventKind, Pid, ProcessInfo, ProcessKey, ProvenanceView,
+    SessionDetach, SessionId, SessionMeta, Verdict,
 };
 
 use crate::node::{ExitStatus, Node};
@@ -63,6 +63,18 @@ pub struct ProcessGraph {
     latest: BTreeMap<Pid, usize>,
     /// How many times the graph did not know the parent of a process.
     gaps: usize,
+    /// Session identifier of the session root, when the graph learned it.
+    ///
+    /// The root's own `ProcessInfo` carries it, which arrives with the first
+    /// exec event of the root.
+    root_sid: Option<Pid>,
+    /// Processes the graph flagged as unlinked, in flag order.
+    ///
+    /// The graph pushes a process here one time. The caller drains the queue
+    /// with [`ProcessGraph::take_unlinked`] and reports each flag as an
+    /// event, so a replay of the trace re-derives the same flags from the
+    /// same events and never reads the queue.
+    pending_unlinked: Vec<(Pid, SessionDetach)>,
 }
 
 impl ProcessGraph {
@@ -75,6 +87,8 @@ impl ProcessGraph {
             live: BTreeMap::new(),
             latest: BTreeMap::new(),
             gaps: 0,
+            root_sid: None,
+            pending_unlinked: Vec::new(),
         }
     }
 
@@ -114,8 +128,8 @@ impl ProcessGraph {
             EventKind::ProcessExec { process } => {
                 self.on_exec(event.pid, (**process).clone());
             }
-            EventKind::ProcessExit { code, signal } => {
-                self.on_exit(event.pid, *code, *signal);
+            EventKind::ProcessExit { code, signal, sid } => {
+                self.on_exit(event.pid, *code, *signal, *sid)
             }
             EventKind::PolicyDecision {
                 verdict, ancestry, ..
@@ -124,6 +138,11 @@ impl ProcessGraph {
                 self.record_verdict(index, verdict);
             }
             EventKind::SessionEnd { .. } => self.end_all(),
+            EventKind::ProcessUnlinked { .. } => {
+                // The event reports a flag that `apply` itself derived, so a
+                // replay of a trace re-derives the flag from the process
+                // facts and must not count the report twice.
+            }
             EventKind::FileOpen { .. }
             | EventKind::NetworkConnect { .. }
             | EventKind::FileRead { .. }
@@ -264,6 +283,46 @@ impl ProcessGraph {
             .and_then(|index| self.nodes[index].verdict.as_ref())
     }
 
+    /// Returns the agent identity that the session carries, when it carries
+    /// one.
+    ///
+    /// The identity is a fact of the root of the session: the launcher
+    /// assessed the root command once, and the assessment travels inside the
+    /// session metadata. A process that the graph cannot link to the root
+    /// keeps the identity and says so in its [`AgentTag::link`] — unlinked,
+    /// never foreign.
+    pub fn agent_tag(&self, pid: Pid) -> Option<AgentTag> {
+        let detection = self.session.detection.as_ref()?;
+        Some(AgentTag {
+            name: detection.name.clone(),
+            confidence: detection.confidence,
+            link: self.link_of(pid),
+        })
+    }
+
+    /// Returns whether the graph links a process to the session root.
+    ///
+    /// A process the graph never saw is `Linked`, because the absence of a
+    /// node is no claim at all. A session whose metadata carries no root —
+    /// every trace an older version wrote — can prove nothing, so it stays
+    /// `Linked` as well.
+    pub fn link_of(&self, pid: Pid) -> AgentLink {
+        match self.index_of(pid) {
+            Some(index) if self.nodes[index].unlink.is_some() => AgentLink::Unlinked,
+            _ => AgentLink::Linked,
+        }
+    }
+
+    /// Returns the processes the graph flagged as unlinked since the last
+    /// call, with the fact that flagged each one.
+    ///
+    /// The caller reports each flag as one event. The graph raised the flag
+    /// from the facts of an event it already applied, so the queue adds no
+    /// new information that a replay could not derive.
+    pub fn take_unlinked(&mut self) -> Vec<(Pid, SessionDetach)> {
+        std::mem::take(&mut self.pending_unlinked)
+    }
+
     /// Returns the program names that a process used before the current one.
     ///
     /// A shell script that runs `exec` keeps its identifier. The history
@@ -362,7 +421,8 @@ impl ProcessGraph {
             cwd: Some(self.session.cwd.clone()),
             ..Default::default()
         };
-        self.insert(info, None);
+        let index = self.insert(info, None);
+        self.check_link(index);
     }
 
     /// Handles a fork event.
@@ -377,7 +437,8 @@ impl ProcessGraph {
             ppid: Some(parent_pid),
             ..Default::default()
         };
-        self.insert(info, parent);
+        let index = self.insert(info, parent);
+        self.check_link(index);
     }
 
     /// Handles an exec event.
@@ -394,20 +455,31 @@ impl ProcessGraph {
                 // The operating system gave the identifier to a new process.
                 self.retire_index(index, pid);
                 let parent = self.resolve_parent(info.ppid, pid);
-                self.insert(info, parent);
+                let index = self.insert(info, parent);
+                self.check_link(index);
             }
             None => {
                 let parent = self.resolve_parent(info.ppid, pid);
-                self.insert(info, parent);
+                let index = self.insert(info, parent);
+                self.check_link(index);
             }
         }
     }
 
     /// Handles an exit event.
-    fn on_exit(&mut self, pid: Pid, code: Option<i32>, signal: Option<i32>) {
+    ///
+    /// The event can carry the session identifier of the process at its end.
+    /// A daemon that called `setsid` and never ran another program carries
+    /// its detachment nowhere else, so the graph compares the value here,
+    /// after the fact of the exit and before it lets the process go.
+    fn on_exit(&mut self, pid: Pid, code: Option<i32>, signal: Option<i32>, sid: Option<Pid>) {
         let Some(index) = self.live.remove(&pid) else {
             return;
         };
+        if sid.is_some() {
+            self.nodes[index].info.sid = sid;
+        }
+        self.check_link(index);
         self.nodes[index].ended = true;
         self.nodes[index].exit = Some(ExitStatus { code, signal });
     }
@@ -465,7 +537,9 @@ impl ProcessGraph {
             ppid: parent.map(|index| self.nodes[index].info.pid),
             ..Default::default()
         };
-        self.insert(info, parent)
+        let index = self.insert(info, parent);
+        self.check_link(index);
+        index
     }
 
     /// Updates a node after the process replaced its program.
@@ -495,6 +569,7 @@ impl ProcessGraph {
         if self.nodes[index].parent.is_none() {
             self.attach_late(index);
         }
+        self.check_link(index);
     }
 
     /// Attaches a node to its parent when the graph learns the parent later.
@@ -528,6 +603,47 @@ impl ProcessGraph {
             next = self.nodes[index].parent;
         }
         false
+    }
+
+    /// Assesses whether a process still sits in the session of the session
+    /// root, and flags it when it does not.
+    ///
+    /// Every process of a session shares the session identifier of the root
+    /// until one of them calls `setsid`. A process whose identifier differs
+    /// from the root's therefore detached from the session — it called
+    /// `setsid` or a process above it did — which is the B.6 liveness fact:
+    /// such a process can outlive the session.
+    ///
+    /// The comparison is quiet by construction. A process whose session
+    /// identifier the monitor could not read makes no claim, a session whose
+    /// root identifier is still unknown makes no claim, and the root itself
+    /// defines the reference. A gap in the parent chain is **not** this
+    /// flag: the graph counts gaps, attaches the process under the session
+    /// root and reports too much rather than too little, as it always did.
+    fn check_link(&mut self, index: usize) {
+        if self.nodes[index].unlink.is_some() {
+            return;
+        }
+        let pid = self.nodes[index].info.pid;
+        let sid = self.nodes[index].info.sid;
+        if pid == self.session.root_pid {
+            if let Some(sid) = sid {
+                self.root_sid = Some(sid);
+            }
+            return;
+        }
+        if let (Some(root_sid), Some(sid)) = (self.root_sid, sid) {
+            if sid != root_sid {
+                self.flag(index, SessionDetach { sid, root_sid });
+            }
+        }
+    }
+
+    /// Flags a process as unlinked and queues the flag for the caller.
+    fn flag(&mut self, index: usize, detach: SessionDetach) {
+        self.nodes[index].unlink = Some(detach);
+        self.pending_unlinked
+            .push((self.nodes[index].info.pid, detach));
     }
 
     /// Returns the node of the parent process, or `None` for the session root.
@@ -618,6 +734,7 @@ fn empty_session(session_id: SessionId) -> SessionMeta {
         agent: af_core::AgentMeta::from_program(""),
         schema_version: af_core::EVENT_SCHEMA_VERSION,
         baseline: Default::default(),
+        detection: None,
     }
 }
 

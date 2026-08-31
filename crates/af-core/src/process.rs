@@ -72,6 +72,15 @@ pub struct ProcessInfo {
     /// value that looks like a secret.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Session identifier of the process, when the monitor could read it.
+    ///
+    /// The value comes from `/proc/<pid>/stat`. Every process of a session
+    /// shares the identifier until one of them calls `setsid`, so a value
+    /// that differs from the session root says that the process — or a
+    /// process above it — detached from the session. That is the B.6
+    /// liveness fact, not an accusation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<Pid>,
 }
 
 impl ProcessInfo {

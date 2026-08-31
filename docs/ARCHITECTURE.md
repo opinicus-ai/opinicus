@@ -18,7 +18,7 @@ The system has seven layers and one shared contract.
 | Session launcher | `af-cli`, `af-monitor` | Makes the session, starts the command and keeps the root of the process tree. |
 | OS event collector | `af-monitor` | Reads process events from the kernel with `ptrace`, holds a chosen system call with a `seccomp` filter, and reads facts from `/proc`. |
 | Event normalization | `af-core`, `af-monitor` | Converts every platform event into one `Event` value. |
-| Provenance engine | `af-provenance` | Builds the causal graph of the processes and answers ancestry questions. |
+| Provenance engine | `af-provenance` | Builds the causal graph of the processes, answers ancestry questions, and carries the agent identity of the session through the graph. |
 | Policy engine | `af-policy` | Matches deterministic rules against an action and returns a verdict, and what the session must remember. |
 | Approval layer | `af-approval` | Asks the user, and remembers an answer for the session. |
 | Recorder | `af-recorder` | Writes the events as JSON Lines and reads a trace again. |
@@ -36,6 +36,8 @@ The most important types are:
 * `Verdict`, `Decision` and `RiskLevel` — the answer of the policy engine.
 * `SessionMemory` and `MemoryEffect` — what the session remembers, and what
   a rule asks it to write down. See section 6.
+* `Detector`, `DetectorRegistry`, `IdentifiedAgent` and `AgentTag` — the
+  agent detection subsystem and the identity it produces. See section 3b.
 * `EventSink`, `PolicyEngine`, `ProvenanceView` and `Approver` — the traits
   that connect the layers.
 
@@ -244,6 +246,65 @@ rule is advisory.** It makes a normal program quiet. It does not hold against
 a program that wants to defeat it. An exception that must hold has to name
 something that cannot be rewritten — the call itself, a scalar argument, or a
 fact of the process from the exec boundary.
+
+## 3b. The path of one identity
+
+The firewall tags a session whose root command an agent detector identifies.
+The tag is a fact of the session and of the provenance graph, and every event
+carries it. The measurement behind this section is
+`research/detection/FINDINGS.md`.
+
+1. **The launcher assesses the root command, one time, at launch.** It
+   resolves the program through `PATH`, reads the `package.json` of the
+   working directory, and hands the facts — program, command line, working
+   directory, inherited environment, manifest names — to the detector
+   registry of `af-core::identity`.
+
+2. **Five built-in detectors report weighted signals**: known executables
+   (0.95; 0.60 for the ambiguous name `pi`), command-line patterns (runners
+   and interpreters naming an agent package, 0.90), install layouts on the
+   resolved executable path (0.85), dependency manifests (0.35 — supporting
+   only, a project that develops *with* an agent depends on its package), and
+   characteristic environment variables (0.90 for `CLAUDECODE=1`, 0.70 for a
+   presence-only marker; an API key is never a marker).
+
+3. **The registry combines, the threshold decides.** The combination is a
+   noisy OR over the detectors — each detector contributes its strongest
+   signal once, so a manifest naming five agent packages still cannot tag a
+   build. At a combined confidence of 0.75 or more the session is tagged; the
+   name, the confidence and every signal travel inside the `SessionStart`
+   event, so a replay reads the identity from the trace and never detects
+   again. Measured on the fixture corpus: precision 1.000, recall 0.957
+   (23 agent and 30 non-agent fixtures; the one miss is the bare name `pi`).
+
+4. **Every event of a tagged session carries the tag.** The handler of the
+   launcher stamps `agent` on each event it records: the name, the confidence,
+   and whether the process still links to the root.
+
+5. **A descendant that detaches is flagged unlinked, never foreign.** Every
+   process of a session shares the session identifier of the root until one
+   of them calls `setsid`. The monitor reads that identifier from
+   `/proc/<pid>/stat` at the exec stop and at the exit stop, the graph
+   compares it with the root's, and a differing process is flagged with one
+   `process_unlinked` event that carries the measured identifiers. The
+   process keeps its recorded ancestry and its tag — the flag reports
+   detachment, and never claims the process went unseen or belongs to
+   somebody else. Measured: the setsid/double-fork fixture raises it at the
+   re-exec and at the exit of the detaching parent, and the daemon that
+   detaches and never runs another program raises it at its exit.
+
+6. **No rule consumes the identity yet.** The scopes, the rules and the
+   approval flow behave exactly as before; a rule that reads the tag is new
+   rule work under the interruption budget. Detection itself never decides an
+   allow: it reports, and the boundaries of sections 3 and 3a decide.
+
+The detection runs at launch, from launcher facts. It does not watch a
+process the firewall did not start — attach-style observation of a running
+agent is future work, measured before it is trusted. A false agent tag is
+worse than no tag, so every tie goes to quiet: a lone supporting signal — a
+manifest, a presence-only marker — stays below the line. Measured on the
+benign corpus of M1: zero questions and zero agent tags in all three filter
+modes.
 
 ## 4. The enforcement boundary
 
@@ -466,11 +527,11 @@ rather than one interception mechanism.
 
 Three additions land in this architecture without changing sections 1–7:
 
-* **Agent detection and identity.** A detector/plugin subsystem tags the
-  session root as AI-controlled, and the identity propagates through the
-  provenance graph that already exists (DIRECTION.md §4, §5). The graph keys
-  processes on pid plus start time; the agent identity becomes one more fact
-  the graph carries.
+* **Agent detection and identity — shipped (§3b).** A detector subsystem
+  tags the session root at launch, the tag propagates through the provenance
+  graph that already exists, every event carries it, and a descendant that
+  detaches is flagged `unlinked` — the B.6 liveness fact — and never as
+  foreign (DIRECTION.md §4, §5).
 * **Tamper detection and quarantine.** The fail-closed behaviors that already
   exist — `PTRACE_O_EXITKILL`, the `ENOSYS` a traced call gets when no
   monitor answers — become sensed states with their own high-severity events,

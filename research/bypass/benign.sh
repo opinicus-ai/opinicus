@@ -3,7 +3,12 @@
 # trigger a question. Usage: benign.sh <mode>   (write-only | all-opens | off)
 #
 # PASS requires: the firewall returns the exit code of the session (0), no
-# policy decision of a level above allow fired, and the corpus ran to the end.
+# policy decision of a level above allow fired, the corpus ran to the end,
+# and — since [af-3] — the session received zero agent tags. A normal dev
+# session is not an agent session, and a false agent tag is worse than no
+# tag. The corpus runs with the agent markers of the ambient environment as
+# they are: a lone marker below the tagging line stays quiet, which is the
+# quiet rule of identity, not a scrubbed environment.
 set -euo pipefail
 DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd -- "$DIR/../.." && pwd)"
@@ -44,14 +49,29 @@ for line in open(sys.argv[1]):
 print(n)
 PY
 )
+AGENT_TAGS=$(python3 - "$OUT/trace.jsonl" <<'PY'
+import json, sys
+n = 0
+for line in open(sys.argv[1]):
+    try:
+        e = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if e.get("agent") is not None:
+        n += 1
+    if e.get("type") == "session_start" and e.get("meta", {}).get("detection") is not None:
+        n += 1
+print(n)
+PY
+)
 NOTES=$(grep -c '"type": *"policy_decision"' "$OUT/trace.jsonl" || true)
 
-echo "mode=$MODE fw_exit=$FW_EXIT session_exit=$SESSION_EXIT questions=$QUESTIONS decision_events=$NOTES"
-if [ "$FW_EXIT" = "0" ] && [ "$QUESTIONS" = "0" ]; then
-    echo "PASS: the corpus ran clean with zero questions"
-    echo "mode=$MODE questions=$QUESTIONS fw_exit=$FW_EXIT" >> "$DIR/results/benign-summary.txt"
+echo "mode=$MODE fw_exit=$FW_EXIT session_exit=$SESSION_EXIT questions=$QUESTIONS agent_tags=$AGENT_TAGS decision_events=$NOTES"
+if [ "$FW_EXIT" = "0" ] && [ "$QUESTIONS" = "0" ] && [ "$AGENT_TAGS" = "0" ]; then
+    echo "PASS: the corpus ran clean with zero questions and zero agent tags"
+    echo "mode=$MODE questions=$QUESTIONS agent_tags=$AGENT_TAGS fw_exit=$FW_EXIT" >> "$DIR/results/benign-summary.txt"
 else
     echo "FAIL: the corpus triggered something; look in $OUT"
-    echo "mode=$MODE questions=$QUESTIONS fw_exit=$FW_EXIT FAIL" >> "$DIR/results/benign-summary.txt"
+    echo "mode=$MODE questions=$QUESTIONS agent_tags=$AGENT_TAGS fw_exit=$FW_EXIT FAIL" >> "$DIR/results/benign-summary.txt"
     exit 1
 fi

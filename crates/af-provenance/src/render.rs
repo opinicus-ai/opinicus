@@ -97,6 +97,9 @@ impl ProcessGraph {
             text.push_str(&truncate(&args.join(" "), MAX_ARGS));
         }
         let mut line = format!("{} [pid {}]", sanitize(&text), node.info.pid);
+        if node.unlink.is_some() {
+            line.push_str("  ⚠ unlinked");
+        }
         if let Some(verdict) = &node.verdict {
             if let Some(mark) = decision_mark(verdict.decision) {
                 line.push_str("  ");

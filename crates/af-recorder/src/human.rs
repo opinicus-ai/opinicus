@@ -14,12 +14,18 @@ const MAX_TEXT: usize = 120;
 /// character, so a monitored program cannot write escape sequences into the
 /// screen of the user.
 pub(crate) fn line(event: &Event) -> String {
+    let agent = event
+        .agent
+        .as_ref()
+        .map(|tag| format!(" [{} {:.2} {}]", tag.name, tag.confidence, tag.link.label()))
+        .unwrap_or_default();
     format!(
-        "[{:>5}] {:<17} pid {:<7} {}",
+        "[{:>5}] {:<17} pid {:<7} {}{}",
         event.seq,
         event.kind_label(),
         event.pid,
-        summary(event)
+        summary(event),
+        agent
     )
 }
 
@@ -93,11 +99,17 @@ fn summary(event: &Event) -> String {
             }
         }
         EventKind::ProcessExec { process } => process.command_line(),
-        EventKind::ProcessExit { code, signal } => match (code, signal) {
+        EventKind::ProcessExit { code, signal, .. } => match (code, signal) {
             (_, Some(signal)) => format!("killed by signal {signal}"),
             (Some(code), _) => format!("exit code {code}"),
             _ => "ended".to_string(),
         },
+        EventKind::ProcessUnlinked { process, detach } => format!(
+            "{} sits in session {}; the session root sits in {}",
+            process.program_name(),
+            detach.sid,
+            detach.root_sid
+        ),
         EventKind::FileOpen { path, write } => {
             let mode = if *write { "write" } else { "read" };
             format!("{mode} {path}")

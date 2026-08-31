@@ -71,6 +71,7 @@ fn session(root_pid: Pid) -> SessionMeta {
             tool_call_id: None,
         },
         schema_version: EVENT_SCHEMA_VERSION,
+        detection: None,
         baseline: BTreeMap::new(),
     }
 }

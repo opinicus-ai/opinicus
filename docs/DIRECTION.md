@@ -231,7 +231,7 @@ How much of this the schema carries today:
 | provenance | state |
 | --- | --- |
 | session, process, parent, ancestry, executable, argv, cwd, filtered environment, timestamp, policy decision | carried today ([ARCHITECTURE.md](ARCHITECTURE.md) §1) |
-| agent identity from a detector (section 5) | to add |
+| agent identity from a detector (section 5) | carried today — tagged at launch, propagated through the graph, stamped on every event ([ARCHITECTURE.md](ARCHITECTURE.md) §3b) |
 | stdin/context beyond the exec-time snapshot | partial — script and stdin snapshots exist at exec ([RESEARCH.md](RESEARCH.md) §6) |
 | file operations beyond open, network beyond connect | partial — no delete/rename, no connection content |
 
@@ -499,8 +499,8 @@ The ten questions, with the evidence already in the repository:
 
 | # | question | status | where |
 | --- | --- | --- | --- |
-| 1 | How reliably can we identify AI-agent root processes? | **open** — launcher-only today; detection subsystem is new work | W3 |
-| 2 | How reliably can AI provenance propagate through process trees? | **answered for launch sessions** — no gap, no race | [RESEARCH.md](RESEARCH.md) §2; attach-mode propagation = open |
+| 1 | How reliably can we identify AI-agent root processes? | **answered at launch** — detector registry with 5 built-in detectors; precision 1.000, recall 0.957 on a synthetic fixture corpus (no real agent installed); attach-style observation stays open | [ARCHITECTURE.md](ARCHITECTURE.md) §3b, [research/detection/FINDINGS.md](../research/detection/FINDINGS.md); W3 |
+| 2 | How reliably can AI provenance propagate through process trees? | **answered for launch sessions** — no gap, no race; the agent tag now propagates through the same graph, and a detached descendant is flagged `unlinked` (B.6) | [RESEARCH.md](RESEARCH.md) §2, [ARCHITECTURE.md](ARCHITECTURE.md) §3b; attach-mode propagation = open |
 | 3 | What can `LD_PRELOAD` provide? | **answered as a sensor** — 11 of 14 gap cells moved to seen, 98 % semantic gain, ×1.13–×1.29 over the product, quiet and silent-free on the corpus; kept, never a boundary | [research/spikes/inprocess/FINDINGS.md](../research/spikes/inprocess/FINDINGS.md); W1 |
 | 4 | What common execution paths bypass it? | **partly** — `env -u`, static binaries, raw `syscall()` known; full matrix missing | W2 |
 | 5 | What complementary mechanisms work without root? | **answered** — exec ptrace, seccomp `RET_TRACE`, Landlock; all user-space | [DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) |

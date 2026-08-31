@@ -60,6 +60,12 @@ pub struct Stat {
     pub comm: String,
     /// Identifier of the parent process.
     pub ppid: Pid,
+    /// Session identifier of the process.
+    ///
+    /// Every process of a session shares it until one of them calls `setsid`,
+    /// so a value that differs from the session root marks a process that
+    /// detached from the session.
+    pub sid: Pid,
     /// Start time of the process in clock ticks after boot.
     pub start_ticks: u64,
 }
@@ -85,6 +91,10 @@ pub fn read_stat(pid: Pid) -> Option<Stat> {
     let rest: Vec<&str> = text.get(close + 1..)?.split_whitespace().collect();
     // The first word after the name is field 3, so field N is at index N - 3.
     let ppid = rest.get(1)?.parse::<Pid>().ok()?;
+    let sid = rest
+        .get(3)
+        .and_then(|value| value.parse::<Pid>().ok())
+        .unwrap_or(0);
     let start_ticks = rest
         .get(19)
         .and_then(|value| value.parse::<u64>().ok())
@@ -92,6 +102,7 @@ pub fn read_stat(pid: Pid) -> Option<Stat> {
     Some(Stat {
         comm,
         ppid,
+        sid,
         start_ticks,
     })
 }
@@ -242,5 +253,6 @@ pub fn read_process(pid: Pid, extra_allowlist: &[String]) -> Option<ProcessInfo>
         argv,
         cwd: read_cwd(pid),
         env: read_environ(pid, extra_allowlist),
+        sid: (stat.sid > 0).then_some(stat.sid),
     })
 }
