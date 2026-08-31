@@ -138,13 +138,14 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&hits)?);
     } else {
         println!(
-            "\n{} exec, {} file, {} network, {} signal and {} tamper event(s) evaluated, \
-             {} rule match(es)",
+            "\n{} exec, {} file, {} network, {} signal, {} tamper and {} discrepancy \
+             event(s) evaluated, {} rule match(es)",
             counted.exec,
             counted.file,
             counted.network,
             counted.signal,
             counted.tamper,
+            counted.discrepancy,
             hits.len()
         );
     }
@@ -159,6 +160,7 @@ struct Counts {
     network: usize,
     signal: usize,
     tamper: usize,
+    discrepancy: usize,
 }
 
 impl Counts {
@@ -169,6 +171,7 @@ impl Counts {
             Action::NetworkConnect { .. } => self.network += 1,
             Action::SignalSend { .. } => self.signal += 1,
             Action::Tamper { .. } => self.tamper += 1,
+            Action::Discrepancy { .. } => self.discrepancy += 1,
             _ => self.exec += 1,
         }
     }
@@ -269,6 +272,16 @@ fn action_of(event: &Event, graph: &ProcessGraph) -> Option<(ProcessInfo, Action
             Some((
                 process,
                 Action::Tamper {
+                    kind: *kind,
+                    detail: detail.clone(),
+                },
+            ))
+        }
+        EventKind::Discrepancy { kind, detail } => {
+            let process = actor(event.pid, graph);
+            Some((
+                process,
+                Action::Discrepancy {
                     kind: *kind,
                     detail: detail.clone(),
                 },

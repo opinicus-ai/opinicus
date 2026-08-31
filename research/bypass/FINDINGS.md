@@ -223,6 +223,100 @@ What moved, measured on the same machine as the matrix above:
   syscall of a normal session, and the four extra BPF blocks cost a few
   instructions per call.
 
+## After M5 — the correlation gate (2026-08-31)
+
+M5 made the two views of one session comparable. The engine is
+`agent-firewall correlate` (`crates/af-correlate`): it reads the monitor's
+trace (the observed view), the sensor's trace and registration record (the
+expected view), raises every disagreement as a `discrepancy` event, and the
+rules of `policies/correlation.yaml` judge it. The gate script is
+`./correlate.sh` (run it after `cargo build --release`); the negative side
+is the benign corpus under the sensor, in all three filter modes. Three
+runs of the gate gave the same table every time.
+
+| rule | bypass firings | benign firings | where | verdict |
+| --- | ---: | ---: | --- | --- |
+| `correlation.sensor.silent-subtree` | 1 | **0** | sensor-blind: 1 | ships, quarantines |
+| `correlation.action.contradicted` | 1 | **0** | rawsys: 1 (the connect) | ships, reports |
+| `correlation.spawn.unreported` | 2 | **0** | sensor-unlink: 2 | ships, quarantines |
+| `spawn_reported_unseen` (no rule) | 0 | 0 | — | unreachable: no rule |
+
+Bypass rows, one seeded technique per kind: `sensor-blind` closes the
+sensor's own descriptors mid-run (fd sweep to 1024 — the M2 spike moved
+them near 900 with close-on-exec, so the old 3..63 sweep blinds nothing),
+and raises the silent subtree (5999 ms quiet while the external view shows
+the process alive); `sensor-unlink` deletes the sensor's library from
+under the live session and spawns two dynamic children whose environment
+still names the preload — both execs are unreported spawns; `rawsys` holds
+its raw-`syscall()` connect while its registered instance reports nothing
+(the contradicted connection); `strip-preload` is the control and stays
+quiet for correlation, because the child's environment names no sensor to
+contradict — M4's live `preload_stripped` fact owns that case.
+
+The benign corpus under the sensor ran with zero questions, zero agent
+tags, zero quarantines and **zero correlation firings** in all three
+filter modes (458 / 3511 / 260 product events against 4650 / 7680 / 4408
+sensor events and 159 / 160 / 159 registration lines).
+
+Three results the gate forced, all recorded in `docs/DECISIONS.md`:
+
+* **The write-open comparison is refused, with numbers.** Comparing every
+  held write open against the sensor's reports fired **30 times on one
+  corpus session** (write-only; 49 with all-opens): git writes its loose
+  objects through `mkstemp`, which glibc opens with internal calls the
+  preload cannot see; gcc's temp files and rustc's codegen outputs take
+  the same road; git reflogs open twice in the product view against once
+  in the sensor's; and bash probes `/dev/tty` with a write open that fails
+  under a pipe (the sensor reports successes only). A rule on that
+  comparison fires on shapes normal tools make. It stays measurable as
+  research telemetry behind `correlate --compare-write-opens`, and the
+  product compares connections only — which the corpus exercises through
+  libc or not at all, so the contradicted-connection rule reports instead
+  of quarantining until sessions with real network traffic prove its
+  negative.
+* **A frozen tracee is the monitor's own defense.** `sensor-freeze` execs a
+  fresh image (so its constructor arms a real heartbeat thread — a plain
+  fork inherits a thread that never restarts), proves it talks, and
+  SIGSTOPs itself. The monitor's wait loop **continues a tracee that
+  stopped itself**, so the child runs through its freeze instantly
+  (measured: it exits at the freeze instant; the marker proves the run;
+  zero findings). The silence fact stays reachable through the blinded
+  shape, which raises the silence and the contradiction together.
+* **`spawn_reported_unseen` is unreachable in a launch session.** The exec
+  stop is a kernel guarantee for the whole tree (the M1 escape row
+  measured that nothing of the tree escapes the tracer), so a reported
+  exec that the external view never saw cannot exist here. The check
+  stays in the engine and measured zero on both corpora; no rule ships
+  for it. A future attach mode does not carry the guarantee.
+
+The cost of the one live-path change — the monitor reads the program file
+at the exec stop to learn whether it needs the dynamic linker — is not
+measurable: the shared benchmark gives W1 351 / W2 148 / W3 251 ms against
+M4's 352 / 145 / 253 (`research/bench/bench.sh`, medians of 7).
+
+What keyed the quiet: a healthy instance is dense — the heartbeat thread
+fills every idle second at about 1 Hz, so a 3-second quiet gap in an
+instance that proved it carries the thread is a signal, not a pace; every
+dynamic child of the corpus registered after its exec (`posix_spawn`
+registers without an intent, measured in M2, and the engine asks for the
+registration **at or after** the exec stop, because a preloaded fork
+registers just before it); static children are excluded by the
+`dynamic_link` fact the monitor now reads from the program file at the
+exec stop; and a call the kernel floor refused or the policy rejected
+never ran, so the sensor is honest when it reports nothing for it.
+
+## Method (M5)
+
+* The gate builds the techniques and the sensor, runs each seeded
+  technique under the product posture (`--approve deny`, write-only) with
+  the sensor active, correlates the recorded pair, and counts rule
+  firings from the correlate JSON; the benign side wraps
+  `research/bypass/benign.sh` in the sensor environment for all three
+  filter modes and correlates each pair.
+* The findings of every run are also written as schema-valid traces
+  (`--emit`); `tests/e2e.sh` T19–T22 proves the emitted findings read
+  back, stay quiet where they must, and replay with the current rules.
+
 ## Method
 
 * `orchestrate.py` runs every cell: fresh scratch directory, local listener

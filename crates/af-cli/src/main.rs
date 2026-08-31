@@ -1,6 +1,7 @@
 //! The command-line entry point of the Agent Firewall.
 
 mod cli;
+mod correlate_cmds;
 mod inspect_cmds;
 mod normalize;
 mod policy_cmds;
@@ -16,6 +17,7 @@ fn main() {
         Command::Run(args) => run::run(args),
         Command::Replay(args) => inspect_cmds::replay(args),
         Command::Tree(args) => inspect_cmds::tree(args),
+        Command::Correlate(args) => correlate_cmds::correlate_cmd(args),
         Command::Policy(command) => policy_cmds::run(command),
         Command::Doctor(args) => inspect_cmds::doctor(args),
     };

@@ -1340,6 +1340,58 @@ fn write_elf_header(path: &Path, class: u8) {
     std::fs::write(path, header).expect("write the header");
 }
 
+/// Writes a minimal 64-bit ELF file with one program header entry of the
+/// given type.
+fn write_elf_with_phdr(path: &Path, entry_type: u32) {
+    let phoff: u64 = 64;
+    let phentsize: u16 = 56;
+    let phnum: u16 = 1;
+    let mut bytes = vec![0u8; 64 + phentsize as usize];
+    bytes[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+    bytes[4] = 2; // 64-bit
+    bytes[5] = 1; // little endian
+    bytes[6] = 1; // current version
+    bytes[0x20..0x28].copy_from_slice(&phoff.to_le_bytes());
+    bytes[0x36..0x38].copy_from_slice(&phentsize.to_le_bytes());
+    bytes[0x38..0x3a].copy_from_slice(&phnum.to_le_bytes());
+    bytes[64..68].copy_from_slice(&entry_type.to_le_bytes());
+    std::fs::write(path, bytes).expect("write the program");
+}
+
+/// The monitor must know a program that needs the dynamic linker from one
+/// that does not.
+///
+/// Correlation keys on this fact: a dynamic child of a session that carries
+/// the sensor preload must load it, and a static child never can. The
+/// presence of `PT_INTERP` in the program header table is the whole answer,
+/// and a file that is not a readable ELF program gives `None`, because the
+/// monitor never guesses.
+#[test]
+fn the_monitor_reads_whether_a_program_needs_the_linker() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+
+    let dynamic = dir.path().join("dynamic");
+    write_elf_with_phdr(&dynamic, 3 /* PT_INTERP */);
+    assert_eq!(procfs::is_dynamic_elf(&dynamic), Some(true));
+
+    let statik = dir.path().join("static");
+    write_elf_with_phdr(&statik, 1 /* PT_LOAD */);
+    assert_eq!(procfs::is_dynamic_elf(&statik), Some(false));
+
+    let script = dir.path().join("script.sh");
+    std::fs::write(&script, "#!/bin/sh\ntrue\n").expect("write the script");
+    assert_eq!(procfs::is_dynamic_elf(&script), None);
+    assert_eq!(
+        procfs::is_dynamic_elf(&dir.path().join("nothing-here")),
+        None
+    );
+
+    // The program of this test itself is dynamic, and a static helper of the
+    // repository proves the other side on a real file.
+    let own = std::env::current_exe().expect("the path of this test");
+    assert_eq!(procfs::is_dynamic_elf(&own), Some(true));
+}
+
 /// The monitor must know a 32-bit program from a 64-bit one.
 ///
 /// The kernel filter holds the call numbers of one architecture. A 32-bit

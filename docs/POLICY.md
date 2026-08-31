@@ -89,6 +89,7 @@ implicit **and**.
 | `action` | `input` | The monitor captured a script, a standard input stream or another text. |
 | `action` | `signal_send` | A process sends a signal to a process of the firewall. |
 | `action` | `tamper` | The firewall sensed a state of its own visibility. |
+| `action` | `discrepancy` | The expected view and the observed view of the session disagree. |
 
 Some fields only work with one action kind. The lint reports a rule that mixes
 them, because such a rule can never match.
@@ -167,6 +168,22 @@ rules as an action.
 Every kind is keyed to what the firewall itself did or installed: a kill
 the firewall made, a preload the firewall carried, a session tree the
 firewall launched. A rule of this shape cannot fire on a foreign process.
+
+### Discrepancy (`discrepancy`)
+
+The correlation engine compares what the in-process sensor said with what
+the monitor observed, and hands the disagreement to the rules as an action.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `discrepancy` | list | The disagreement: `sensor_silent_subtree`, `spawn_reported_unseen`, `spawn_seen_unreported` or `action_contradicted`. One of the list must be the kind. |
+
+Every kind is keyed to the sensor instances the firewall itself installed in
+this session, never to the absence of instrumentation on a foreign process:
+a static binary and a raw `syscall()` of a normal toolchain never raise one,
+a child that stripped the preload raises the tamper fact instead, and a
+child that registered — `posix_spawn` does, without an intent — is quiet.
+The engine is `agent-firewall correlate`; see `docs/ARCHITECTURE.md` §3e.
 
 ### The quarantine
 
@@ -564,6 +581,7 @@ only**, so another rule cannot hide a mistake.
 | `input` | `{ source: stdin, data: "..." }` makes a captured content action. |
 | `signal_send` | `{ target: 900, signal: 9 }` makes a signal action. The target compares with the B.5 facts of the test session. |
 | `tamper` | `{ kind: detached_descendant }` makes a sensed fact action. |
+| `discrepancy` | `{ kind: sensor_silent_subtree }` makes a sensed disagreement action. |
 | `monitor_pid` | The process identifier of the monitor, for `signal_target: monitor`. |
 | `sensor_instances` | The sensor instances of the session, for `signal_target: sensor_instance`. |
 | `history` | The steps that happened before. See below. |
@@ -697,18 +715,23 @@ those programs in `program` and asks for the real command with `argv_matches`:
 | `policies/memory.yaml` | 7 | Chains, bursts, sweeps and a remote that the session did not know. |
 | `policies/allowlist.yaml` | 5 | Known safe forms of commands that look dangerous. |
 | `policies/tamper.yaml` | 5 | Attempts on the firewall itself: a signal to the monitor, a detached descendant, a killed program that came back, a stripped sensor preload, a process that outlived the session. |
-| **Total** | **152** | |
+| `policies/correlation.yaml` | 3 | The two views of the session disagree: a sensor gone quiet inside a living process, an action that crossed the process without crossing the sensor, a child that inherited the sensor but never loaded it. |
+| **Total** | **155** | |
 
-Of the 152 rules, 9 answer `deny`, 64 answer `approval_required` and 79 stay
+Of the 155 rules, 9 answer `deny`, 66 answer `approval_required` and 80 stay
 quiet with `allow`. The rules that stop an action only look at commands that
 destroy data. A normal development session — `git status`, `cargo build`,
 `npm test`, `psql -c "SELECT ..."`, `kubectl get pods` — matches no rule at
 all and produces no note.
 
-Three of the 64 questions are quarantines, and two of the five tamper rules
-report instead of asking.
+Five of the 66 questions are quarantines, and two of the five tamper rules
+report instead of asking. Of the three correlation rules, two quarantine —
+the silent sensor and the unreported spawn, whose negatives the benign
+corpus exercised — and one reports: the contradicted connection, because
+the corpus is offline and its negative has no evidence yet
+(`research/bypass/correlate.sh`).
 
-Six of the 64 questions are answered by the kernel instead of the user. When
+Six of the 66 questions are answered by the kernel instead of the user. When
 the Landlock floor of the monitor is active (the default), the session does
 not ask `filesystem.etc.write`, `filesystem.delete.system-path`,
 `filesystem.delete.mount-root`, `filesystem.device.truncate`,

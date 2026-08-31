@@ -147,6 +147,7 @@ impl ProcessGraph {
             | EventKind::NetworkConnect { .. }
             | EventKind::SignalSend { .. }
             | EventKind::Tamper { .. }
+            | EventKind::Discrepancy { .. }
             | EventKind::FileRead { .. }
             | EventKind::FileDelete { .. }
             | EventKind::FileRename { .. }

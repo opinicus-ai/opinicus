@@ -1,0 +1,88 @@
+version: 1
+name: builtin.correlation
+description: >
+  The expected view and the observed view of one session disagree. The
+  correlation engine compares the record of the in-process sensor — the
+  instances the firewall itself installed — with the external view of the
+  monitor, and raises the disagreement as a fact. Every rule of this pack
+  keys on those installed instances and on acts that only an attack on the
+  sensor's visibility produces: a static binary and a raw `syscall()` of a
+  foreign process never raise one, and a child that stripped the preload
+  from its environment belongs to the tamper pack instead. Each rule carries
+  its negative test: a normal session stays quiet.
+
+rules:
+  - id: correlation.sensor.silent-subtree
+    title: A sensor instance went quiet while its process lived on
+    category: correlation
+    risk: approval_required
+    decision: approval_required
+    quarantine: true
+    reason: A sensor instance the firewall installed proved it talks, then stopped talking while the external view shows its process still running. The instrument was frozen, blinded or wiped out of a living process, which is exactly the visibility the firewall depends on for its semantics.
+    match:
+      action: discrepancy
+      discrepancy: [sensor_silent_subtree]
+    tests:
+      - name: a sensor that froze inside a living process quarantines the session
+        expect: approval_required
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        discrepancy: { kind: sensor_silent_subtree, detail: "instance i-9-1500 pid 1500 last word 5400 ms ago, process alive in the external view" }
+      - name: a contradicted action is not a silent sensor
+        expect: allow
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a plain program start stays quiet
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+
+  - id: correlation.action.contradicted
+    title: A connection crossed the process without crossing the sensor
+    category: correlation
+    risk: suspicious
+    decision: allow
+    reason: The kernel filter held a connection of a process that carries a registered sensor instance, and the sensor reported nothing for it. The call crossed the process without crossing libc, which is the shape of a sensor whose hooks were removed or whose output was cut. It reports instead of asking, because the benign corpus is offline and cannot prove the negative for a connection; the quarantine waits for sessions with real network traffic.
+    match:
+      action: discrepancy
+      discrepancy: [action_contradicted]
+    tests:
+      - name: a connection the sensor never reported is a finding
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        discrepancy: { kind: action_contradicted, detail: "external view held connect to 127.0.0.1:9000, pid 1500; its registered sensor instance reported no such connect" }
+      - name: a silent sensor is not a contradicted action
+        expect: allow
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a plain program start stays quiet
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+
+  - id: correlation.spawn.unreported
+    title: A child inherited the sensor but never loaded it
+    category: correlation
+    risk: approval_required
+    decision: approval_required
+    quarantine: true
+    reason: The external view saw a child start whose environment carries this session's sensor preload and whose program needs the dynamic linker, and no sensor instance ever registered for it. The sensor library was removed or made unloadable for exactly that child, so its whole subtree runs with the semantic view taken away while the environment still claims otherwise.
+    match:
+      action: discrepancy
+      discrepancy: [spawn_seen_unreported]
+    tests:
+      - name: a dynamic child with the preload that never registered quarantines the session
+        expect: approval_required
+        process: { pid: 1600, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        discrepancy: { kind: spawn_seen_unreported, detail: "exec of /tmp/payload pid 1600 carries LD_PRELOAD of this session and needs the linker; no sensor instance registered" }
+      - name: an exec the external view never saw is a different fact
+        expect: allow
+        process: { pid: 1600, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a plain program start stays quiet
+        expect: allow
+        process: { pid: 1600, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]

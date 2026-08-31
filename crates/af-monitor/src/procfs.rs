@@ -162,6 +162,57 @@ pub fn is_elf32(path: &std::path::Path) -> bool {
     header[..4] == [0x7f, b'E', b'L', b'F'] && header[4] == 1
 }
 
+/// Returns whether this file is an ELF program that needs the dynamic
+/// linker.
+///
+/// The answer is `Some(true)` when the program header table holds a
+/// `PT_INTERP` entry: the kernel then loads the interpreter named there, and
+/// the interpreter loads every `LD_PRELOAD` library of the environment. The
+/// answer is `Some(false)` for a static program, which no preload can reach.
+/// A file that is not an ELF program, and a file that the monitor cannot
+/// read, both give `None`, because the monitor never guesses.
+///
+/// This is the fact correlation keys on when it asks why a child of a
+/// session that carries the sensor preload never reported: a dynamic child
+/// must load the sensor, a static child never can.
+pub fn is_dynamic_elf(path: &std::path::Path) -> Option<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut header = [0u8; 64];
+    file.read_exact(&mut header).ok()?;
+    // The first four bytes of every ELF file are 0x7f and "ELF".
+    if header[..4] != [0x7f, b'E', b'L', b'F'] {
+        return None;
+    }
+    let is_64 = header[4] == 2;
+    let (phoff, phentsize, phnum): (u64, usize, usize) = if is_64 {
+        (
+            u64::from_le_bytes(header[0x20..0x28].try_into().ok()?),
+            u16::from_le_bytes(header[0x36..0x38].try_into().ok()?) as usize,
+            u16::from_le_bytes(header[0x38..0x3a].try_into().ok()?) as usize,
+        )
+    } else {
+        (
+            u32::from_le_bytes(header[0x1c..0x20].try_into().ok()?) as u64,
+            u16::from_le_bytes(header[0x2a..0x2c].try_into().ok()?) as usize,
+            u16::from_le_bytes(header[0x2c..0x2e].try_into().ok()?) as usize,
+        )
+    };
+    if phnum == 0 || phentsize < 4 || phnum > 256 || phoff > (1 << 30) {
+        return Some(false);
+    }
+    let mut table = vec![0u8; phnum * phentsize];
+    file.seek(SeekFrom::Start(phoff)).ok()?;
+    file.read_exact(&mut table).ok()?;
+    // The first word of every program header entry is its type. `PT_INTERP`
+    // names the interpreter, and an interpreter is what a preload needs.
+    Some((0..phnum).any(|i| {
+        let at = i * phentsize;
+        u32::from_le_bytes(table[at..at + 4].try_into().expect("four bytes")) == 3
+    }))
+}
+
 /// Reads the working directory of a process.
 pub fn read_cwd(pid: Pid) -> Option<String> {
     fs::read_link(proc_path(pid, "cwd"))
@@ -258,5 +309,6 @@ pub fn read_process(pid: Pid, extra_allowlist: &[String]) -> Option<ProcessInfo>
         cwd: read_cwd(pid),
         env: read_environ(pid, extra_allowlist),
         sid: (stat.sid > 0).then_some(stat.sid),
+        dynamic_link: None,
     })
 }

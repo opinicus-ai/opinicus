@@ -628,7 +628,9 @@ fn the_replay_summary_counts_every_kind_of_event() {
     let (code, out, err) = firewall(&["replay", trace.to_str().unwrap()]);
     assert_eq!(code, 0, "{err}");
     assert!(
-        out.contains("1 exec, 4 file, 2 network, 0 signal and 0 tamper event(s) evaluated"),
+        out.contains(
+            "1 exec, 4 file, 2 network, 0 signal, 0 tamper and 0 discrepancy event(s) evaluated"
+        ),
         "the summary must count what it judged:\n{out}"
     );
 }

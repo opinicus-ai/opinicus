@@ -163,6 +163,7 @@ pub(crate) fn build_case(test: &TestSource) -> TestCase {
         test.input.as_ref(),
         test.signal_send.as_ref(),
         test.tamper.as_ref(),
+        test.discrepancy.as_ref(),
         &process,
     );
     let session = test_session(
@@ -234,6 +235,7 @@ fn build_step(step: &TestStep, at_seconds: u64) -> TestCase {
         step.input.as_ref(),
         step.signal_send.as_ref(),
         step.tamper.as_ref(),
+        step.discrepancy.as_ref(),
         &process,
     );
     let session = test_session(&process, &ancestry, &BTreeMap::new(), None, &[]);
@@ -321,6 +323,7 @@ fn to_process(source: &TestProcess, default_pid: i32) -> ProcessInfo {
         cwd: source.cwd.clone(),
         env: source.env.clone(),
         sid: None,
+        dynamic_link: None,
     }
 }
 
@@ -334,6 +337,7 @@ fn to_action(
     input: Option<&crate::source::TestInput>,
     signal_send: Option<&crate::source::TestSignalSend>,
     tamper: Option<&crate::source::TestTamper>,
+    discrepancy: Option<&crate::source::TestDiscrepancy>,
     process: &ProcessInfo,
 ) -> Action {
     if let Some(open) = file_open {
@@ -377,6 +381,15 @@ fn to_action(
                 .detail
                 .clone()
                 .unwrap_or_else(|| tamper.kind.label().to_string()),
+        };
+    }
+    if let Some(discrepancy) = discrepancy {
+        return Action::Discrepancy {
+            kind: discrepancy.kind,
+            detail: discrepancy
+                .detail
+                .clone()
+                .unwrap_or_else(|| discrepancy.kind.label().to_string()),
         };
     }
     Action::Exec {

@@ -66,6 +66,17 @@ pub struct ProcessInfo {
     /// Working directory of the process, when the monitor can read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Whether the program image of the process needs the dynamic linker.
+    ///
+    /// The monitor reads this fact from the program file at the exec stop:
+    /// `Some(true)` names a program that carries `PT_INTERP`, so it loads the
+    /// linker and with it every `LD_PRELOAD` library of its environment;
+    /// `Some(false)` names a static program that no preload can reach; `None`
+    /// means the monitor could not read the file. Correlation keys on this
+    /// fact: a dynamic child of a session that carries the sensor preload
+    /// must report, and a static child never can.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_link: Option<bool>,
     /// Selected environment variables.
     ///
     /// The monitor keeps only names that a policy needs. It never keeps a
@@ -216,6 +227,19 @@ pub enum Action {
         /// The measured facts behind the sense, one line for the evidence.
         detail: String,
     },
+    /// The expected view and the observed view of one session disagree.
+    ///
+    /// The correlation engine raises these facts by comparing the in-process
+    /// sensor's own record with the external view of the monitor. Every kind
+    /// is keyed to the sensor instances the firewall itself installed, never
+    /// to the absence of instrumentation on a foreign process, which a normal
+    /// toolchain produces every day.
+    Discrepancy {
+        /// Which shape was sensed.
+        kind: DiscrepancyKind,
+        /// The measured facts behind the sense, one line for the evidence.
+        detail: String,
+    },
 }
 
 /// Which sensed shape a [`Action::Tamper`] carries.
@@ -253,6 +277,65 @@ impl std::fmt::Display for TamperKind {
     }
 }
 
+/// Which disagreement a [`Action::Discrepancy`] carries.
+///
+/// The correlation engine of DIRECTION.md §3.4 compares what the in-process
+/// sensor said with what the external view observed, and every kind below is
+/// a way for the two views to disagree. The decision log binds how: each kind
+/// keys on the sensor instances the firewall itself installed in this
+/// session, so a static binary and a raw `syscall()` — which never touch a
+/// preload on a foreign process — can never raise one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscrepancyKind {
+    /// A sensor instance the firewall installed went quiet while its process
+    /// lived on.
+    ///
+    /// The instance proved it talks (a heartbeat), the product view proves
+    /// the process lives past the quiet window, and the sensor's last word
+    /// was not an exec intent whose image replacement explains the quiet.
+    SensorSilentSubtree,
+    /// The sensor reported a spawn whose exec the external view never saw.
+    ///
+    /// In a launch session the exec stop is a kernel guarantee for the whole
+    /// tree, so the engine measures this kind and expects zero.
+    SpawnReportedUnseen,
+    /// The external view saw a spawn that the sensor never reported.
+    ///
+    /// The fact keys on a child that inherited the session's preload value,
+    /// whose program needs the dynamic linker, and whose successor image
+    /// never registered a sensor instance. A static child and a child that
+    /// stripped the preload from its environment are both quiet: the first
+    /// can never report, the second is the tamper fact of M4.
+    SpawnSeenUnreported,
+    /// The external view held an action that the sensor of the acting
+    /// process never reported.
+    ///
+    /// The fact keys on a process with a registered sensor instance: a file
+    /// open or a connection that the kernel filter held crossed the process
+    /// without crossing libc, which is the shape of an unhooked or blinded
+    /// sensor.
+    ActionContradicted,
+}
+
+impl DiscrepancyKind {
+    /// Returns the label that the rule file and the trace use.
+    pub fn label(&self) -> &'static str {
+        match self {
+            DiscrepancyKind::SensorSilentSubtree => "sensor_silent_subtree",
+            DiscrepancyKind::SpawnReportedUnseen => "spawn_reported_unseen",
+            DiscrepancyKind::SpawnSeenUnreported => "spawn_seen_unreported",
+            DiscrepancyKind::ActionContradicted => "action_contradicted",
+        }
+    }
+}
+
+impl std::fmt::Display for DiscrepancyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 impl Action {
     /// Returns the program name for an [`Action::Exec`], and `None` otherwise.
     pub fn program(&self) -> Option<&str> {
@@ -271,6 +354,7 @@ impl Action {
             Action::Input { .. } => "input",
             Action::SignalSend { .. } => "signal_send",
             Action::Tamper { .. } => "tamper",
+            Action::Discrepancy { .. } => "discrepancy",
         }
     }
 
@@ -302,6 +386,7 @@ impl Action {
                 format!("signal {signal} to process {target}")
             }
             Action::Tamper { kind, detail } => format!("{kind}: {detail}"),
+            Action::Discrepancy { kind, detail } => format!("{kind}: {detail}"),
         }
     }
 }

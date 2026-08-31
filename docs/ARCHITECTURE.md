@@ -469,6 +469,93 @@ person rules. The measurement behind this section is
 * The sensor instance list is a snapshot from launch. Whether an instance
   still speaks is the correlation question of M5.
 
+## 3e. The path of one discrepancy
+
+The firewall can hold two views of one session: the external view of the
+monitor (§3, §3a) and the in-process view of the sensor of M2. The
+correlation engine compares the two after the session, on the recorded
+pair, and every disagreement becomes a `discrepancy` event that the rules
+of `policies/correlation.yaml` judge. The measurement behind this section
+is `research/bypass/correlate.sh` and the M5 section of
+`research/bypass/FINDINGS.md`.
+
+1. **The engine reads three files.** `agent-firewall correlate <trace>
+   --sensor <sensor-trace> --reg <record>` reads the monitor's trace (the
+   observed view), the sensor's trace (the expected view) and the
+   registration record that names every sensor instance the session
+   installed. The record is the key: an empty record means no sensor, and
+   then no disagreement can exist.
+
+2. **Four disagreements are sensed.** A sensor instance that proved it
+   talks (a heartbeat) and then said nothing through a gap wider than the
+   quiet window while the external view shows its process alive inside the
+   gap (`sensor_silent_subtree`); a spawn the sensor reported whose exec
+   the external view never saw (`spawn_reported_unseen`); a spawn the
+   external view saw whose successor image never registered
+   (`spawn_seen_unreported`); and a held connection that crossed a
+   registered process without crossing libc (`action_contradicted`). The
+   reported spawn measured zero on both corpora, because the exec stop of
+   §3 is a kernel guarantee for the whole tree — no rule ships for it. The
+   contradicted action covers connections only: the write-open comparison
+   fired 30 times on one 28-second corpus session — `mkstemp` and other
+   glibc-internal opens, retried lock attempts, reflog re-opens never
+   cross the interposed libc — and the gate refused it. The measurement
+   stays runnable behind `correlate --compare-write-opens`.
+
+3. **The keying is the decision log's.** A static binary (`dynamic_link:
+   false`, a fact the monitor reads from the program file at the exec stop)
+   can never load a preload, a child that stripped the preload from its
+   environment raises the tamper fact of §3d instead, a child that
+   registered after its exec — `posix_spawn` does, without an intent — is
+   quiet, a call the kernel floor refused or the policy rejected never ran
+   and the sensor is honest about it, and the loader's own opens between
+   an exec stop and the successor's registration are plumbing, not the
+   program acting. A thread reports under its group leader, because the
+   sensor reads `getpid` and the monitor reads the acting thread.
+
+4. **Two rules quarantine, one reports.** The silence and the unreported
+   spawn carry `quarantine: true`: they name acts that only an attack on
+   the sensor's visibility produces — nobody blinds a sensor inside a
+   living process, nobody deletes the sensor's library from under its own
+   session — and the benign corpus exercised their negatives (every
+   instance of every corpus run beat at about 1 Hz; every dynamic child of
+   the corpus registered after its exec). The contradicted connection
+   reports instead, because the corpus is offline and cannot prove that
+   negative; the quarantine waits for sessions with real network traffic.
+   The engine itself never suspends anything: it reads finished traces,
+   reports the findings, and writes them as one schema-valid trace that
+   `replay` judges with the current rules. Live judging — the monitor
+   correlating while the session runs — is the alpha work of M6.
+
+5. **The gate is the negative half.** The benign corpus of M1, with the
+   sensor active, fired zero of the three rules in all three filter modes;
+   the seeded techniques of the harness fired each of them. A healthy
+   instance talks at about 1 Hz — the heartbeat thread of the registration
+   record fills every idle second — which is what makes a 3-second quiet
+   gap a signal instead of a pace.
+
+### What the correlation layer does not cover
+
+* **The judge runs after the session.** A discrepancy cannot stop the
+  action that produced it; it names the act for the ruling that follows.
+  The sensor stays what it always was — a reporter, never a boundary.
+* **A read open is never compared.** The loader machinery of a normal
+  session — the program's libraries, a `dlopen` and its dependencies —
+  never crosses the interposed libc, and a rule that compared reads would
+  fire on every dynamic exec. The write half and the connections see the
+  same attacker.
+* **A frozen process does not stay frozen under the product.** The
+  monitor's wait loop continues a tracee that stopped itself, so a
+  whole-process `SIGSTOP` cannot hold a session open (measured: the frozen
+  child exits at the freeze instant). The silence fact stays reachable
+  through the blinded shape — the sensor's descriptors closed mid-run —
+  which raises the silence and the contradiction together.
+* **A dynamic program that opens through its own runtime — a Go build with
+  cgo, a setuid binary whose loader ignores the preload by kernel order —
+  reports nothing and is not a static child.** The corpus of M1 carries no
+  such program; the caveat is recorded here so the first report of one is
+  read as the known limit and not as a surprise.
+
 ## 4. The enforcement boundary
 
 **The firewall has two decision boundaries — the entry of the `execve`
@@ -704,7 +791,7 @@ rather than one interception mechanism.
 | exec `ptrace` | **ships** (§3) | provenance, hold-at-exec, session tree |
 | `seccomp` `RET_TRACE` filter | **ships** (§3a) | file opens and connections inside a running program; a signal to the monitor itself, held before it runs (§3d) |
 | in-process instrumentation (`LD_PRELOAD`) | **measured sensor** — spike of 2026-08-31 (`research/spikes/inprocess/`), not product-integrated | semantics close to the agent: about-to-exec, small-file content, delete/rename, dlopen, environment; durable instance registration for M4/M5; never a boundary |
-| correlation of expected vs observed | planned | a discrepancy between the in-process view and this document's sensors is a high-severity signal on its own (DIRECTION.md §3.4) |
+| correlation of expected vs observed | **measured engine** — `agent-firewall correlate` (§3e), post-hoc over the recorded pair, three rules shipped on a zero-benign gate; live judging is M6 | a discrepancy between the in-process view and this document's sensors is a high-severity signal on its own (DIRECTION.md §3.4) |
 | Landlock | **ships** (§3c) | in-kernel "always no" rules; removes the question ([DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4) |
 | `fanotify` / eBPF | enterprise tier | privileged observation, later (DIRECTION.md §10) |
 | Windows hooks (Win32/`ntdll`) | planned track | the Windows counterpart of the in-process sensor, under the same hook-visibility rule |

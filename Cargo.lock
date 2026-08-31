@@ -17,6 +17,7 @@ version = "0.1.0"
 dependencies = [
  "af-approval",
  "af-core",
+ "af-correlate",
  "af-monitor",
  "af-policy",
  "af-provenance",
@@ -35,6 +36,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "af-correlate"
+version = "0.1.0"
+dependencies = [
+ "af-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

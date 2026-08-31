@@ -6,6 +6,46 @@ otherwise. Each entry names its evidence.
 
 ---
 
+## 2026-08-31 — Correlation ships post-hoc, and the budget refused the write comparison
+
+The M5 gate measured the correlation engine
+(`agent-firewall correlate`) on the seeded discrepancy techniques and on
+the benign corpus, in all three filter modes:
+
+* **The engine judges recorded pairs, not live sessions.** The monitor
+  holds processes at its boundaries; correlation reads two finished views
+  and writes findings as `discrepancy` events that `replay` judges with
+  the current rules. Live judging joins the monitor loop only with the
+  alpha of M6, if at all — the post-hoc form already answers the
+  milestone's question.
+* **Two rules quarantine; one reports.** `correlation.sensor.silent-subtree`
+  and `correlation.spawn.unreported` ship with `quarantine: true`, because
+  the benign corpus exercised their negatives (every instance of every
+  corpus run beat at about 1 Hz; every dynamic child registered after its
+  exec) and fired zero in all three modes.
+  `correlation.action.contradicted` reports, because the corpus is offline
+  and cannot prove the negative for a connection.
+* **The write-open comparison is refused, with numbers.** Comparing every
+  held write open against the sensor's reports fired **30 times on one
+  28-second corpus session** (write-only; 49 counting all-opens): `mkstemp`
+  and other glibc-internal opens, retried lock attempts and reflog
+  re-opens never cross the interposed libc, and bash probes `/dev/tty`
+  with a write open that fails under a pipe. A rule on that comparison
+  fires on shapes normal tools make, which the 2026-08-31 budget decision
+  forbids whatever the severity. The comparison stays measurable behind
+  `correlate --compare-write-opens` as research telemetry.
+* **A frozen tracee is the monitor's own defense.** The wait loop continues
+  a tracee that stopped itself, so a whole-process `SIGSTOP` cannot hold a
+  session open — measured: the frozen child exits at the freeze instant.
+  The silence fact stays reachable through the blinded shape (the sensor's
+  descriptors closed mid-run), which raises the silence and the
+  contradiction together.
+
+Evidence: `research/bypass/correlate.sh`, `research/bypass/FINDINGS.md`
+(After M5), `policies/correlation.yaml` (the tests of every rule).
+
+---
+
 ## 2026-08-31 — The budget outranks the severity, measured on the detach
 
 The first shipped form of the M4 detach rule quarantined: a descendant that

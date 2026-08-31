@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     decision::Verdict,
     identity::{AgentTag, SessionDetach},
-    process::{Action, ProcessInfo, TamperKind},
+    process::{Action, DiscrepancyKind, ProcessInfo, TamperKind},
     session::{SessionId, SessionMeta},
     traits::ApprovalOutcome,
     Pid, TimestampNanos,
@@ -219,6 +219,18 @@ pub enum EventKind {
         /// The measured facts behind the sense, one line.
         detail: String,
     },
+    /// The expected view and the observed view of the session disagree.
+    ///
+    /// The correlation engine raises the fact by comparing the record of the
+    /// in-process sensor with the external view of the monitor. The event is
+    /// evidence, whatever the rules say about it, and every kind keys on the
+    /// sensor instances the firewall itself installed.
+    Discrepancy {
+        /// Which disagreement was sensed.
+        kind: DiscrepancyKind,
+        /// The measured facts behind the sense, one line.
+        detail: String,
+    },
     /// A process read the content of a small file into memory.
     ///
     /// The in-process sensor reports this. The shipped monitor does not
@@ -381,6 +393,7 @@ impl EventKind {
             EventKind::NetworkConnect { .. } => "network_connect",
             EventKind::SignalSend { .. } => "signal_send",
             EventKind::Tamper { .. } => "tamper",
+            EventKind::Discrepancy { .. } => "discrepancy",
             EventKind::FileRead { .. } => "file_read",
             EventKind::FileDelete { .. } => "file_delete",
             EventKind::FileRename { .. } => "file_rename",
@@ -416,6 +429,7 @@ impl EventKind {
                 | EventKind::ProcessUnlinked { .. }
                 | EventKind::SignalSend { .. }
                 | EventKind::Tamper { .. }
+                | EventKind::Discrepancy { .. }
                 | EventKind::KernelFloor { .. }
                 | EventKind::KernelDenied { .. }
         ) || matches!(
@@ -487,6 +501,69 @@ mod tests {
             ancestry: Vec::new(),
         };
         assert!(!allow.is_evidence());
+    }
+
+    #[test]
+    fn discrepancy_events_round_trip_through_json() {
+        // Every disagreement the correlation engine can raise, as the trace
+        // carries it. Evidence is the point: retention keeps the event in
+        // every mode.
+        for kind in [
+            DiscrepancyKind::SensorSilentSubtree,
+            DiscrepancyKind::SpawnReportedUnseen,
+            DiscrepancyKind::SpawnSeenUnreported,
+            DiscrepancyKind::ActionContradicted,
+        ] {
+            let event = Event::new(
+                SessionId::from("afw-correlate"),
+                42,
+                EventKind::Discrepancy {
+                    kind,
+                    detail: format!("{kind}: measured evidence"),
+                },
+            );
+            assert!(event.kind.is_evidence());
+            let text = serde_json::to_string(&event).expect("encode");
+            assert!(text.contains("\"type\":\"discrepancy\""));
+            let back: Event = serde_json::from_str(&text).expect("decode");
+            assert_eq!(back, event);
+        }
+    }
+
+    #[test]
+    fn the_dynamic_link_fact_travels_with_the_process_and_stays_absent_when_unknown() {
+        let mut process = ProcessInfo {
+            pid: 7,
+            exe: Some("/usr/bin/psql".to_string()),
+            comm: "psql".to_string(),
+            ..Default::default()
+        };
+        process.dynamic_link = Some(true);
+        let event = Event::new(
+            SessionId::from("afw-link"),
+            7,
+            EventKind::ProcessExec {
+                process: Box::new(process),
+            },
+        );
+        let text = serde_json::to_string(&event).expect("encode");
+        assert!(text.contains("\"dynamic_link\":true"));
+        let back: Event = serde_json::from_str(&text).expect("decode");
+        assert_eq!(back, event);
+
+        // A process the monitor could not read carries no guess, and an
+        // older trace reads back with the fact absent.
+        let plain = Event::new(
+            SessionId::from("afw-link"),
+            7,
+            EventKind::ProcessExec {
+                process: Box::new(ProcessInfo::from_pid(7)),
+            },
+        );
+        let text = serde_json::to_string(&plain).expect("encode");
+        assert!(!text.contains("dynamic_link"));
+        let back: Event = serde_json::from_str(&text).expect("decode");
+        assert_eq!(back.kind, plain.kind);
     }
 
     #[test]

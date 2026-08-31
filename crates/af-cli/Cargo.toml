@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 af-core = { workspace = true }
+af-correlate = { workspace = true }
 af-monitor = { workspace = true }
 af-policy = { workspace = true }
 af-provenance = { workspace = true }

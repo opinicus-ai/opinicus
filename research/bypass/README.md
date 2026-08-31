@@ -14,6 +14,7 @@ attacks arrive on purpose? The numbers live in [FINDINGS.md](FINDINGS.md).
 | `classify.py` | verifies effects from the filesystem and the listener log, parses traces structurally, prints the matrix; the sensor columns show which silent cells the in-process sensor moved to seen |
 | `benign.sh` + `corpus.sh` | the scripted normal dev session that must run with zero questions; `corpus.sh` is shared with the in-process sensor spike |
 | `tamper.sh` | the `[af-4]` gate: the four seeded tamper techniques must fire every time, the quarantine rules must hold the tree, and the report rules must not ask; the negative side is `benign.sh` |
+| `correlate.sh` | the `[af-5]` gate: `agent-firewall correlate` compares the sensor's record with the monitor's trace on the seeded discrepancy techniques and on the benign corpus, and the three rules of `policies/correlation.yaml` ship only on the benign side firing zero |
 | `run.sh` | everything, then the classification, then the corpus |
 | `results/` | raw runs (regenerable, not committed) |
 
@@ -25,6 +26,7 @@ python3 orchestrate.py  # the runs only
 python3 classify.py     # re-print the matrix from results/
 ./benign.sh all-opens   # the corpus at one filter mode
 ./tamper.sh             # the tamper gate of [af-4]
+./correlate.sh          # the correlation gate of [af-5]
 ```
 
 Requires the release build (`cargo build --release`), `cc`, `go`, and the

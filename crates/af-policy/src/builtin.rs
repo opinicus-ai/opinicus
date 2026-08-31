@@ -38,6 +38,10 @@ pub(crate) const FILES: &[(&str, &str)] = &[
         include_str!("../../../policies/tamper.yaml"),
     ),
     (
+        "builtin:correlation.yaml",
+        include_str!("../../../policies/correlation.yaml"),
+    ),
+    (
         "builtin:memory.yaml",
         include_str!("../../../policies/memory.yaml"),
     ),

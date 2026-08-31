@@ -73,6 +73,8 @@ pub enum ActionKind {
     SignalSend,
     /// The firewall sensed a state of its own visibility.
     Tamper,
+    /// The expected view and the observed view of the session disagree.
+    Discrepancy,
 }
 
 impl ActionKind {
@@ -85,6 +87,7 @@ impl ActionKind {
             ActionKind::Input => "input",
             ActionKind::SignalSend => "signal_send",
             ActionKind::Tamper => "tamper",
+            ActionKind::Discrepancy => "discrepancy",
         }
     }
 }
@@ -355,6 +358,12 @@ pub struct MatchSource {
     /// `detached_descendant` or `preload_stripped`.
     #[serde(default)]
     pub tamper: Option<Words>,
+    /// Which disagreement a `discrepancy` action carries.
+    ///
+    /// One of the words must be the kind of the disagreement: for example
+    /// `sensor_silent_subtree` or `action_contradicted`.
+    #[serde(default)]
+    pub discrepancy: Option<Words>,
     /// A condition that must not match.
     #[serde(default)]
     pub not: Option<Box<MatchSource>>,
@@ -456,6 +465,17 @@ pub struct TestTamper {
     pub detail: Option<String>,
 }
 
+/// The sensed disagreement that a declared test carries.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestDiscrepancy {
+    /// Which disagreement the test senses.
+    pub kind: af_core::DiscrepancyKind,
+    /// The measured facts, one line. The default names the kind alone.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 /// The observed content of a declared test.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -516,6 +536,9 @@ pub struct TestStep {
     /// A sensed fact instead of the default program start.
     #[serde(default)]
     pub tamper: Option<TestTamper>,
+    /// A sensed disagreement instead of the default program start.
+    #[serde(default)]
+    pub discrepancy: Option<TestDiscrepancy>,
     /// How many times the step repeats. The default is one.
     ///
     /// A repeated step stands one second after the one before it, so a test
@@ -561,6 +584,9 @@ pub struct TestSource {
     /// A sensed fact instead of the default program start.
     #[serde(default)]
     pub tamper: Option<TestTamper>,
+    /// A sensed disagreement instead of the default program start.
+    #[serde(default)]
+    pub discrepancy: Option<TestDiscrepancy>,
     /// The steps that happened before the action of the test.
     #[serde(default)]
     pub history: Vec<TestStep>,

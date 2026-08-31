@@ -52,6 +52,7 @@ pub(crate) struct Matcher {
     env: Vec<(String, Option<Regex>)>,
     signal_target: Vec<SignalTarget>,
     tamper: Vec<String>,
+    discrepancy: Vec<String>,
     not: Option<Box<Matcher>>,
     all_of: Vec<Matcher>,
     any_of: Vec<Matcher>,
@@ -164,6 +165,7 @@ impl Matcher {
             env: compile_env(source.env.as_ref())?,
             signal_target: compile_signal_targets(source.signal_target.as_ref())?,
             tamper: words(&source.tamper),
+            discrepancy: words(&source.discrepancy),
             not: match &source.not {
                 Some(inner) => Some(Box::new(Matcher::compile(inner)?)),
                 None => None,
@@ -367,6 +369,14 @@ impl Matcher {
                 return false;
             }
         }
+        if !self.discrepancy.is_empty() {
+            let Some(kind) = subject.discrepancy_kind else {
+                return false;
+            };
+            if !self.discrepancy.iter().any(|want| want == kind) {
+                return false;
+            }
+        }
         if let Some(inner) = &self.not {
             if inner.matches(subject) {
                 return false;
@@ -466,6 +476,11 @@ impl Matcher {
             !self.signal_target.is_empty(),
         );
         add("tamper", ActionKind::Tamper, !self.tamper.is_empty());
+        add(
+            "discrepancy",
+            ActionKind::Discrepancy,
+            !self.discrepancy.is_empty(),
+        );
         out
     }
 
@@ -496,6 +511,7 @@ impl Matcher {
             && self.env.is_empty()
             && self.signal_target.is_empty()
             && self.tamper.is_empty()
+            && self.discrepancy.is_empty()
             && self.not.is_none()
             && self.all_of.is_empty()
             && self.any_of.is_empty()
@@ -694,6 +710,7 @@ pub(crate) struct Subject<'a> {
     memory: &'a SessionMemory,
     signal_target: Option<SignalTarget>,
     tamper_kind: Option<&'a str>,
+    discrepancy_kind: Option<&'a str>,
 }
 
 impl<'a> Subject<'a> {
@@ -731,6 +748,7 @@ impl<'a> Subject<'a> {
             memory,
             signal_target: None,
             tamper_kind: None,
+            discrepancy_kind: None,
         };
         match ctx.action {
             Action::Exec {
@@ -791,6 +809,9 @@ impl<'a> Subject<'a> {
             }
             Action::Tamper { kind, .. } => {
                 subject.tamper_kind = Some(kind.label());
+            }
+            Action::Discrepancy { kind, .. } => {
+                subject.discrepancy_kind = Some(kind.label());
             }
         }
         subject.argv_joined = subject.argv.join(" ");
@@ -968,6 +989,7 @@ fn kind_of(action: &Action) -> ActionKind {
         Action::Input { .. } => ActionKind::Input,
         Action::SignalSend { .. } => ActionKind::SignalSend,
         Action::Tamper { .. } => ActionKind::Tamper,
+        Action::Discrepancy { .. } => ActionKind::Discrepancy,
     }
 }
 

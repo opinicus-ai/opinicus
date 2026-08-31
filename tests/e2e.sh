@@ -440,7 +440,7 @@ assert_contains "K8 the write names the write rule" \
 printf '\n%sT — tamper sensing and the quarantine flow%s\n' "$AFW_BOLD" "$AFW_RESET"
 
 TECH="$REPO_ROOT/research/bypass/techniques"
-for src in kill-monitor escape-setsid respawn strip-preload; do
+for src in kill-monitor escape-setsid respawn strip-preload sensor-blind; do
     cc -O2 -o "$WORK_DIR/$src" "$TECH/$src.c"
 done
 SENSOR="$REPO_ROOT/research/spikes/inprocess/libafsensor.so"
@@ -536,6 +536,56 @@ status_td=0
     >"$WORK_DIR/td.stdout" 2>"$WORK_DIR/td.stderr" || status_td=$?
 assert_contains "T18 a killed monitor leaves the evidence of what ran" \
     "$(file_text "$TRACE_TD")" "kill-monitor"
+
+# ---------------------------------------------------------------------------
+# C. Correlation: the expected view of the sensor against the observed view
+#    of the monitor, on recorded pairs. A blinded sensor raises the
+#    discrepancy and the rule fires; a session that stripped the preload
+#    stays quiet for correlation, because M4 owns that fact live; the
+#    emitted findings read back as a trace and replay with the rules.
+# ---------------------------------------------------------------------------
+
+printf '\n%sC — the correlation engine%s\n' "$AFW_BOLD" "$AFW_RESET"
+
+# T19–T20: the blinded sensor. The technique closes the sensor's own
+# descriptors mid-run, so its instance goes quiet while the process lives
+# on — the correlation engine reads the two views afterwards and the rule
+# fires on the recorded pair.
+TRACE_CB="$WORK_DIR/trace-cb.jsonl"
+status_cb=0
+LD_PRELOAD="$SENSOR" \
+    AF_SENSOR_TRACE="$WORK_DIR/cb-sensor.jsonl" \
+    AF_SENSOR_REG="$WORK_DIR/cb-sensor.reg" \
+    AF_SENSOR_SESSION=afw-e2e-blind \
+    "$BINARY" run --approve deny --retention all --trace "$TRACE_CB" \
+    -- "$WORK_DIR/sensor-blind" "$WORK_DIR/cb-marker.txt" \
+    >"$WORK_DIR/cb.stdout" 2>"$WORK_DIR/cb.stderr" || status_cb=$?
+
+assert_exit "T19 the blinded session runs to its end" 0 "$status_cb"
+CORRELATE_CB="$("$BINARY" correlate "$TRACE_CB" \
+    --sensor "$WORK_DIR/cb-sensor.jsonl" --reg "$WORK_DIR/cb-sensor.reg" \
+    --emit "$WORK_DIR/cb-findings.jsonl")"
+assert_contains "T20 the silent sensor raised its discrepancy and its rule" \
+    "$CORRELATE_CB" "sensor_silent_subtree"
+assert_contains "T20a the rule of the pack fired" \
+    "$CORRELATE_CB" "correlation.sensor.silent-subtree"
+"$BINARY" tree "$WORK_DIR/cb-findings.jsonl" >"$WORK_DIR/cb-tree.txt" 2>&1
+assert_contains "T20b the emitted findings read back as a trace" \
+    "$(file_text "$WORK_DIR/cb-findings.jsonl")" '"kind":"sensor_silent_subtree"'
+
+# T21: the stripped preload belongs to the tamper pack, live; the
+# correlation view must stay quiet about the same session, because the
+# child's environment names no sensor to contradict.
+CORRELATE_TS="$("$BINARY" correlate "$TRACE_TS" \
+    --sensor "$WORK_DIR/ts-sensor.jsonl" --reg "$WORK_DIR/ts-sensor.reg")"
+assert_not_contains "T21 the stripped-preload session stays quiet for correlation" \
+    "$CORRELATE_TS" "spawn_seen_unreported"
+
+# T22: the emitted findings replay with the current rules and the same
+# discrepancy fires again — the trace is the shared contract.
+REPLAY_CB="$("$BINARY" replay "$WORK_DIR/cb-findings.jsonl")"
+assert_contains "T22 the discrepancy trace replays with the rules" \
+    "$REPLAY_CB" "correlation.sensor.silent-subtree"
 
 # ---------------------------------------------------------------------------
 # Summary.

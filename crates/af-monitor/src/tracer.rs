@@ -679,6 +679,16 @@ impl Tracer<'_> {
             None
         };
 
+        // The dynamic-link fact of the new image, read from the program file
+        // itself. Correlation keys on it: a child that inherited the sensor
+        // preload and needs the linker must report, and a static child never
+        // can. A program the monitor cannot read keeps `None`, and the
+        // correlator stays quiet rather than guessing.
+        let mut info = info;
+        if let Some(exe) = info.exe.as_deref() {
+            info.dynamic_link = procfs::is_dynamic_elf(std::path::Path::new(exe));
+        }
+
         // The liveness fact of B.6: this same program ran under this same
         // parent before, and the monitor killed it. The fact keys on what
         // the firewall itself did — a session where the monitor killed

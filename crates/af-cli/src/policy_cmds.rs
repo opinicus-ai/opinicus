@@ -23,8 +23,10 @@ pub fn load_policy(options: &PolicyOptions) -> Result<PolicySet> {
 /// provenance graph make themselves — a program that repeats one the
 /// firewall killed, a child that inherits no sensor preload, a descendant
 /// that detached, a process that outlived the session — so they are there in
-/// every mode too.
-pub const ALWAYS_SUPPORTED_ACTIONS: &[&str] = &["exec", "input", "tamper"];
+/// every mode too. The discrepancy facts ride the correlation of the two
+/// recorded views, which needs no kernel filter either: `correlate` reads
+/// finished traces.
+pub const ALWAYS_SUPPORTED_ACTIONS: &[&str] = &["exec", "input", "tamper", "discrepancy"];
 
 /// Names every action kind that a session with this filter mode can make.
 ///

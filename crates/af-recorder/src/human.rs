@@ -138,6 +138,7 @@ fn summary(event: &Event) -> String {
             format!("send {name} to process {target}")
         }
         EventKind::Tamper { kind, detail } => format!("{kind}: {detail}"),
+        EventKind::Discrepancy { kind, detail } => format!("{kind}: {detail}"),
         EventKind::QuarantineStarted { rule, evidence } => {
             format!("suspended by {rule}: {evidence}")
         }

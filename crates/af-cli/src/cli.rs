@@ -25,6 +25,8 @@ pub enum Command {
     Replay(ReplayArgs),
     /// Draws the process tree of a recorded trace.
     Tree(TreeArgs),
+    /// Compares the sensor's record with the monitor's trace.
+    Correlate(CorrelateArgs),
     /// Works with policy files.
     #[command(subcommand)]
     Policy(PolicyCommand),
@@ -148,6 +150,48 @@ pub struct TreeArgs {
     /// The trace file to read.
     #[arg(value_name = "TRACE")]
     pub trace: PathBuf,
+}
+
+/// Arguments of the `correlate` sub-command.
+#[derive(Debug, clap::Args)]
+pub struct CorrelateArgs {
+    /// The trace file the monitor wrote (the observed view).
+    #[arg(value_name = "TRACE")]
+    pub trace: PathBuf,
+
+    /// The trace file of the in-process sensor (the expected view).
+    #[arg(long, value_name = "PATH")]
+    pub sensor: PathBuf,
+
+    /// The registration record that names the sensor instances.
+    #[arg(long, value_name = "PATH")]
+    pub reg: PathBuf,
+
+    /// How long an instance that proved it talks may stay quiet before the
+    /// engine asks the external view whether its process still lives.
+    #[arg(long, value_name = "MILLIS", default_value = "3000")]
+    pub stale_ms: u64,
+
+    /// Also compares write-intent file opens, not only connections.
+    ///
+    /// Research telemetry: the benign corpus measured 30 such
+    /// contradictions in one normal session — `mkstemp` and other
+    /// glibc-internal opens, retried lock attempts, reflog re-opens never
+    /// cross the interposed libc — so the product posture compares
+    /// connections only. The flag keeps the write comparison measurable.
+    #[arg(long)]
+    pub compare_write_opens: bool,
+
+    /// Writes the disagreements as a schema-valid trace.
+    #[arg(long, value_name = "PATH")]
+    pub emit: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub policy: PolicyOptions,
+
+    /// Prints the result as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// The sub-commands of `policy`.
