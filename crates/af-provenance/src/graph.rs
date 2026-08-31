@@ -126,6 +126,11 @@ impl ProcessGraph {
             EventKind::SessionEnd { .. } => self.end_all(),
             EventKind::FileOpen { .. }
             | EventKind::NetworkConnect { .. }
+            | EventKind::FileRead { .. }
+            | EventKind::FileDelete { .. }
+            | EventKind::FileRename { .. }
+            | EventKind::LibraryLoad { .. }
+            | EventKind::EnvChange { .. }
             | EventKind::StdinWrite { .. }
             | EventKind::ApprovalRequested { .. }
             | EventKind::ApprovalResolved { .. }

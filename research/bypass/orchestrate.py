@@ -27,6 +27,7 @@ BIN = Path(__file__).resolve().parent / "bin"
 SCRATCH_ROOT = REPO / "tmp" / "bypass"
 RESULTS = Path(__file__).resolve().parent / "results"
 POLICY = Path(__file__).resolve().parent / "policies" / "catchall.yaml"
+SENSOR = REPO / "research" / "spikes" / "inprocess" / "libafsensor.so"
 
 MODES = ["write-only", "all-opens", "off"]
 PORT = 45777
@@ -130,6 +131,19 @@ def run_cell(pass_name, mode, name, runs_dir):
     trace = scratch / "trace.jsonl"
     listener = Listener(scratch / "listen.log") if needs_listener else None
 
+    env = None
+    if pass_name == "preload":
+        # The [af-2] pass: the product posture plus the in-process sensor.
+        # The shim rides the environment into the launcher and the whole
+        # monitored tree; it reports, it never holds.
+        env = dict(os.environ)
+        env.update(
+            LD_PRELOAD=str(SENSOR),
+            AF_SENSOR_TRACE=str(scratch / "sensor.jsonl"),
+            AF_SENSOR_REG=str(scratch / "sensor.reg"),
+            AF_SENSOR_SESSION=f"af2-{mode}-{name}",
+        )
+
     if pass_name == "baseline":
         cmd = list(argv)
     else:
@@ -144,7 +158,12 @@ def run_cell(pass_name, mode, name, runs_dir):
     try:
         timeout = 25 if name == "outlive" else 12
         proc = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, cwd=scratch
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            cwd=scratch,
+            env=env,
         )
         fw_exit = proc.returncode
         fw_out = proc.stdout.decode(errors="replace")
@@ -179,6 +198,9 @@ def main():
         sys.exit("the harness runs as a normal user")
     if not FW.exists():
         sys.exit(f"missing {FW}; run cargo build --release")
+    preload = "--preload" in sys.argv
+    if preload and not SENSOR.exists():
+        sys.exit(f"missing {SENSOR}; run research/spikes/inprocess/build.sh")
     RESULTS.mkdir(exist_ok=True)
     s = socket.socket()
     try:
@@ -200,14 +222,14 @@ def main():
         "pydrop",
         "kill-monitor",
     ]
-    for name in techniques:
-        run_cell("baseline", "none", name, RESULTS)
-    for mode in MODES:
-        for name in techniques:
-            run_cell("builtin", mode, name, RESULTS)
-    for mode in MODES:
-        for name in techniques:
-            run_cell("probe", mode, name, RESULTS)
+    passes = [("baseline", ["none"])]
+    passes += [("builtin", MODES), ("probe", MODES)]
+    if preload:
+        passes += [("preload", MODES)]
+    for pass_name, modes in passes:
+        for mode in modes:
+            for name in techniques:
+                run_cell(pass_name, mode, name, RESULTS)
     print("done; now run: python3 research/bypass/classify.py")
 
 

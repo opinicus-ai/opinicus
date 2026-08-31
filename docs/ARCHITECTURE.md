@@ -280,9 +280,11 @@ It is strong at the system-call boundary for a different reason:
   a chatty program, which is the same order as the full system-call tracing
   that this design rejected. Seeing that content needs a proxy for the
   protocol, not a system-call filter.
-* **A delete and a rename.** The kernel filter could hold them, and the
-  normalized schema has no event for them yet. A delete is still judged at
-  the command that does it.
+* **A delete and a rename.** The kernel filter could hold them. The
+  normalized schema has the event kinds (`file_delete`, `file_rename`);
+  only the in-process research sensor produces them today
+  (`research/spikes/inprocess/`), and no shipped rule can act on them. A
+  delete is still judged at the command that does it.
 * **An open that only reads, in the default mode.** The kernel drops it, on
   purpose, because a read is 99.7% of the file traffic of a normal build.
   `--syscall-filter all-opens` holds it and costs more.
@@ -456,7 +458,7 @@ rather than one interception mechanism.
 | --- | --- | --- |
 | exec `ptrace` | **ships** (§3) | provenance, hold-at-exec, session tree |
 | `seccomp` `RET_TRACE` filter | **ships** (§3a) | file opens and connections inside a running program |
-| in-process instrumentation (`LD_PRELOAD`) | planned sensor | semantics close to the agent: what it is about to run, what it feeds its children; never a boundary |
+| in-process instrumentation (`LD_PRELOAD`) | **measured sensor** — spike of 2026-08-31 (`research/spikes/inprocess/`), not product-integrated | semantics close to the agent: about-to-exec, small-file content, delete/rename, dlopen, environment; durable instance registration for M4/M5; never a boundary |
 | correlation of expected vs observed | planned | a discrepancy between the in-process view and this document's sensors is a high-severity signal on its own (DIRECTION.md §3.4) |
 | Landlock | recommended, unbuilt | in-kernel "always no" rules; removes questions ([DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4) |
 | `fanotify` / eBPF | enterprise tier | privileged observation, later (DIRECTION.md §10) |

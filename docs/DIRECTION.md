@@ -501,7 +501,7 @@ The ten questions, with the evidence already in the repository:
 | --- | --- | --- | --- |
 | 1 | How reliably can we identify AI-agent root processes? | **open** — launcher-only today; detection subsystem is new work | W3 |
 | 2 | How reliably can AI provenance propagate through process trees? | **answered for launch sessions** — no gap, no race | [RESEARCH.md](RESEARCH.md) §2; attach-mode propagation = open |
-| 3 | What can `LD_PRELOAD` provide? | **partly** — ~1.0× overhead, not a boundary; sensor semantics unmeasured | [DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §1; W1 |
+| 3 | What can `LD_PRELOAD` provide? | **answered as a sensor** — 11 of 14 gap cells moved to seen, 98 % semantic gain, ×1.13–×1.29 over the product, quiet and silent-free on the corpus; kept, never a boundary | [research/spikes/inprocess/FINDINGS.md](../research/spikes/inprocess/FINDINGS.md); W1 |
 | 4 | What common execution paths bypass it? | **partly** — `env -u`, static binaries, raw `syscall()` known; full matrix missing | W2 |
 | 5 | What complementary mechanisms work without root? | **answered** — exec ptrace, seccomp `RET_TRACE`, Landlock; all user-space | [DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) |
 | 6 | Can suspicious processes be suspended before their action completes? | **answered at the action level** — exec stop, syscall stop; quarantine as a lasting state = open | [RESEARCH.md](RESEARCH.md) §5; W6 |

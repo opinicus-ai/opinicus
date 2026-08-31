@@ -10,9 +10,9 @@ attacks arrive on purpose? The numbers live in [FINDINGS.md](FINDINGS.md).
 | --- | --- |
 | `techniques/` | one small program per technique, C unless named `.go` or `pydrop`; `build.sh` compiles them into `bin/` |
 | `policies/catchall.yaml` | the capability probe: holds every action kind the sensors can deliver. Harness equipment, not product policy |
-| `orchestrate.py` | runs every cell: baseline (no firewall), builtin (product posture), probe (capability), across the three filter modes |
-| `classify.py` | verifies effects from the filesystem and the listener log, parses traces structurally, prints the matrix |
-| `benign.sh` | the scripted normal dev session that must run with zero questions |
+| `orchestrate.py` | runs every cell: baseline (no firewall), builtin (product posture), probe (capability), across the three filter modes; `--preload` adds the `[af-2]` pass that re-runs the product posture with the in-process sensor active |
+| `classify.py` | verifies effects from the filesystem and the listener log, parses traces structurally, prints the matrix; the sensor columns show which silent cells the in-process sensor moved to seen |
+| `benign.sh` + `corpus.sh` | the scripted normal dev session that must run with zero questions; `corpus.sh` is shared with the in-process sensor spike |
 | `run.sh` | everything, then the classification, then the corpus |
 | `results/` | raw runs (regenerable, not committed) |
 

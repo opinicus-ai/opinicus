@@ -43,6 +43,113 @@ def rules_of(events):
     return sorted(set(r for r in out if r))
 
 
+def sensor_events(scratch):
+    """The trace of the in-process sensor of a preload run."""
+    trace = Path(scratch) / "sensor.jsonl"
+    if not trace.exists():
+        return []
+    events = []
+    for line in trace.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return events
+
+
+def sensor_witness(tech, action, events):
+    """True when the sensor trace carries a witness for the action.
+
+    The shim never holds, so a sensor witness can only move a silent cell to
+    seen; the product alone can hold.
+    """
+
+    def any_read(token):
+        return any(
+            e.get("type") == "file_read" and token in str(e.get("data", ""))
+            for e in events
+        )
+
+    if tech in ("static-file-net", "rawsys", "uring"):
+        if action in ("write", "file", "uring"):
+            return any(
+                e.get("type") == "file_open"
+                and str(e.get("path", "")).endswith("marker.txt")
+                and e.get("write")
+                for e in events
+            )
+        return any(e.get("type") == "network_connect" for e in events)
+    if tech == "escape-setsid":
+        return any(
+            e.get("type") == "file_open"
+            and str(e.get("path", "")).endswith("marker.txt")
+            and e.get("write")
+            for e in events
+        )
+    if tech == "outlive":
+        return any(
+            e.get("type") == "file_open"
+            and str(e.get("path", "")).endswith("marker.txt")
+            and e.get("write")
+            for e in events
+        )
+    if tech == "delete-rename":
+        deleted = any(
+            e.get("type") == "file_delete"
+            and str(e.get("path", "")).endswith("victim/f")
+            for e in events
+        )
+        renamed = any(
+            e.get("type") == "file_rename"
+            and str(e.get("from", "")).endswith("victim")
+            and str(e.get("to", "")).endswith("moved")
+            for e in events
+        )
+        return deleted or renamed
+    if tech == "cred-read":
+        return any(
+            e.get("type") == "file_open"
+            and str(e.get("path", "")).endswith(".aws/credentials")
+            and not e.get("write")
+            for e in events
+        )
+    if tech == "fileclient" and action == "byfile-unknown":
+        return any_read("DROP DATABASE")
+    if tech == "fileclient" and action == "byfile-psql":
+        return any_read("DROP DATABASE")
+    if tech == "payload-assembly":
+        return any(
+            e.get("type") == "process_exec"
+            and "payload.sh" in json.dumps(e.get("process", {}))
+            for e in events
+        )
+    if tech == "pydrop":
+        return any_read("DROP DATABASE")
+    return False
+
+
+def sensor_notes(tech, events):
+    notes = []
+    if tech == "static-file-net":
+        notes.append("static Go binary: the shim never loads, so nothing reports")
+    if tech == "rawsys":
+        notes.append("raw syscall(): the interposed libc symbols are never called")
+    if tech == "uring":
+        notes.append("ring operations never cross libc; the shim sees the technique binary itself, not the ring")
+    if tech == "kill-monitor":
+        scan = any(
+            e.get("type") == "file_open" and "/proc/" in str(e.get("path", ""))
+            for e in events
+        )
+        notes.append(
+            "the /proc scan is visible to the sensor" if scan else "the /proc scan never crossed libc"
+        )
+        notes.append("the kill() call is not in the hook set; a signal needs no libc crossing the sensor watches")
+    return notes
+
+
 def decision_levels(events):
     return sorted({e.get("verdict", {}).get("decision") for e in events if e.get("type") == "policy_decision"})
 
@@ -92,6 +199,28 @@ def verdict_for(record, action):
     effect = effect_ok(record, action)
     fw_died = record["fw_exit"] is not None and record["fw_exit"] < 0
     fw_exit = record["fw_exit"]
+
+    if record["pass"] == "preload":
+        # The [af-2] re-run: the product posture plus the in-process sensor.
+        # The sensor never holds, so a cell is held only when the product
+        # held it; a sensor witness moves a silent cell to seen.
+        if not effect:
+            held_by_decision = any(
+                d in ("approval_required", "deny") for d in decision_levels(events)
+            )
+            if fw_exit == 3 or held_by_decision or fw_died:
+                return "held (product)", False, rules, notes
+            return "action-failed", False, rules, notes
+        product = witness_ok(record, action, events, notes)
+        if product:
+            return "seen", True, rules, notes
+        sevents = sensor_events(scratch)
+        if sensor_witness(tech, action, sevents):
+            notes.append("the in-process sensor carried the witness")
+            notes.extend(sensor_notes(tech, sevents))
+            return "seen (sensor)", True, rules, notes
+        notes.extend(sensor_notes(tech, sevents))
+        return "silent", False, rules, notes
 
     if record["pass"] == "probe":
         # The probe pass asks one question: can a rule act on this action's
@@ -252,8 +381,13 @@ def main():
     (RESULTS / "matrix.json").write_text(json.dumps(records, indent=2))
 
     modes = ["write-only", "all-opens", "off"]
-    print("| technique / action | scenario | baseline | builtin w-o | builtin a-o | builtin off | probe w-o | probe a-o | probe off | rules that fired (any pass) |")
-    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    has_preload = any(p.name.startswith("preload-") for p in RESULTS.glob("preload-*.json"))
+    head = "| technique / action | scenario | baseline | builtin w-o | builtin a-o | builtin off | probe w-o | probe a-o | probe off |"
+    if has_preload:
+        head += " sensor w-o | sensor a-o | sensor off |"
+    head += " rules that fired (any pass) |"
+    print(head)
+    print("| --- |" + " --- |" * (head.count("|") - 2))
 
     def cell(pass_name, mode, tech, action):
         for r in records:
@@ -263,6 +397,13 @@ def main():
                 return r["verdict"]
         return "?"
 
+    def short(verdict):
+        if verdict.startswith("seen"):
+            return "seen"
+        if verdict.startswith("held"):
+            return "held"
+        return verdict
+
     by_key = {(r["pass"], r["mode"], r["technique"], r["action"]): r for r in records}
     for tech, actions in ACTIONS.items():
         for action in actions:
@@ -271,6 +412,13 @@ def main():
             for pass_name in ("builtin", "probe"):
                 for mode in modes:
                     row.append(cell(pass_name, mode, tech, action))
+            if has_preload:
+                for mode in modes:
+                    before = short(cell("builtin", mode, tech, action))
+                    after = cell("preload", mode, tech, action)
+                    after_short = short(after)
+                    mark = f"{before}\u2192{after_short}" if before != after_short else after_short
+                    row.append(mark)
             all_rules = sorted({x for r in records if r["technique"] == tech and r["action"] == action for x in r["rules"]})
             row.append(", ".join(all_rules) if all_rules else "none")
             print("| " + " | ".join(row) + " |")

@@ -106,6 +106,16 @@ fn summary(event: &Event) -> String {
             Some(host) => format!("{host} ({addr}:{port})"),
             None => format!("{addr}:{port}"),
         },
+        EventKind::FileRead { path, data } => {
+            format!("read {path}: {}", af_core::display::truncate(data, 60))
+        }
+        EventKind::FileDelete { path } => format!("delete {path}"),
+        EventKind::FileRename { from, to } => format!("rename {from} to {to}"),
+        EventKind::LibraryLoad { path } => format!("load {path}"),
+        EventKind::EnvChange { name, value } => match value {
+            Some(value) => format!("set {name}={value}"),
+            None => format!("unset {name}"),
+        },
         EventKind::StdinWrite { stream, data } => format!("{stream:?} {data}"),
         EventKind::PolicyDecision {
             action, verdict, ..

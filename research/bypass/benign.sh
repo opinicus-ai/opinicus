@@ -18,32 +18,9 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 cd "$WORK"
 
-cat > corpus.sh <<'EOF'
-set -e
-git init -q .
-git config user.email probe@example.com
-git config user.name probe
-echo hello > README.md
-git add README.md
-git commit -qm "first"
-git log --oneline
-git status --short
-# The cargo crate is created and built OUTSIDE the repository: cargo new
-# registers a new crate into any workspace it finds by walking upward, and
-# it rewrites that root manifest. A standalone directory in /tmp cannot
-# pollute the repository workspace; the built binary is copied back.
-CRATE="$(mktemp -d /tmp/af-corpus.XXXXXX)"
-cargo new --offline -q "$CRATE/tool"
-(cd "$CRATE/tool" && cargo build --offline -q)
-mkdir tool
-cp "$CRATE/tool/target/debug/tool" tool/tool
-./tool/tool
-rm -rf "$CRATE"
-mkdir web && (cd web && npm init -y >/dev/null 2>&1 && npm --version >/dev/null)
-python3 -c 'print("corpus", 6 * 7)'
-find . -name '*.md' | sort
-grep -r hello README.md
-EOF
+# The corpus is one shared script, so the bypass harness and the in-process
+# sensor spike of [af-2] measure the same session.
+install -m 0755 "$DIR/corpus.sh" corpus.sh
 
 set +e
 "$FW" run --retention all --approve deny --syscall-filter "$MODE" --trace "$OUT/trace.jsonl" \

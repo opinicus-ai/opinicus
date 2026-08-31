@@ -148,6 +148,51 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
     },
+    /// A process read the content of a small file into memory.
+    ///
+    /// The in-process sensor reports this. The shipped monitor does not
+    /// produce it. The content is cut to a small length.
+    FileRead {
+        /// Path of the file.
+        path: String,
+        /// The content that the process read, cut to a safe length.
+        data: String,
+    },
+    /// A process removed a file or a directory.
+    ///
+    /// The in-process sensor reports this. The shipped monitor holds no
+    /// delete, so no product rule can act on it yet.
+    FileDelete {
+        /// Path of the file.
+        path: String,
+    },
+    /// A process renamed or moved a file.
+    ///
+    /// The in-process sensor reports this. The shipped monitor holds no
+    /// rename, so no product rule can act on it yet.
+    FileRename {
+        /// Path before the change.
+        from: String,
+        /// Path after the change.
+        to: String,
+    },
+    /// A process loaded a shared object at run time.
+    ///
+    /// The in-process sensor reports this.
+    LibraryLoad {
+        /// Path of the shared object.
+        path: String,
+    },
+    /// A process changed a variable of its own environment.
+    ///
+    /// The in-process sensor reports this.
+    EnvChange {
+        /// Name of the variable.
+        name: String,
+        /// New value of the variable, or `None` when the process removed it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
     /// The monitor observed content on a stream of a process.
     StdinWrite {
         /// Which stream carried the content.
@@ -208,6 +253,11 @@ impl EventKind {
             EventKind::ProcessExit { .. } => "process_exit",
             EventKind::FileOpen { .. } => "file_open",
             EventKind::NetworkConnect { .. } => "network_connect",
+            EventKind::FileRead { .. } => "file_read",
+            EventKind::FileDelete { .. } => "file_delete",
+            EventKind::FileRename { .. } => "file_rename",
+            EventKind::LibraryLoad { .. } => "library_load",
+            EventKind::EnvChange { .. } => "env_change",
             EventKind::StdinWrite { .. } => "stdin_write",
             EventKind::PolicyDecision { .. } => "policy_decision",
             EventKind::ApprovalRequested { .. } => "approval_requested",
@@ -272,5 +322,38 @@ mod tests {
             ancestry: Vec::new(),
         };
         assert!(!allow.is_evidence());
+    }
+
+    #[test]
+    fn sensor_events_round_trip_through_json() {
+        // The kinds that only the in-process sensor produces today. They are
+        // part of the schema, so a sensor trace reads back like any trace.
+        let cases = vec![
+            EventKind::FileRead {
+                path: "/tmp/drop.py".to_string(),
+                data: "DROP DATABASE customer_prod".to_string(),
+            },
+            EventKind::FileDelete {
+                path: "/tmp/victim/f".to_string(),
+            },
+            EventKind::FileRename {
+                from: "/tmp/victim".to_string(),
+                to: "/tmp/moved".to_string(),
+            },
+            EventKind::LibraryLoad {
+                path: "/usr/lib64/libcurl.so.4".to_string(),
+            },
+            EventKind::EnvChange {
+                name: "LD_PRELOAD".to_string(),
+                value: None,
+            },
+        ];
+        for kind in cases {
+            let event = Event::new(SessionId::from("afw-sensor"), 7, kind);
+            let text = serde_json::to_string(&event).expect("encode");
+            let back: Event = serde_json::from_str(&text).expect("decode");
+            assert_eq!(back, event);
+            assert!(text.contains(&format!("\"type\":\"{}\"", event.kind.label())));
+        }
     }
 }
