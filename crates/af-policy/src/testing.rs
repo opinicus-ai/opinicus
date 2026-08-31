@@ -161,9 +161,17 @@ pub(crate) fn build_case(test: &TestSource) -> TestCase {
         test.file_open.as_ref(),
         test.connect.as_ref(),
         test.input.as_ref(),
+        test.signal_send.as_ref(),
+        test.tamper.as_ref(),
         &process,
     );
-    let session = test_session(&process, &ancestry, &test.baseline);
+    let session = test_session(
+        &process,
+        &ancestry,
+        &test.baseline,
+        test.monitor_pid,
+        &test.sensor_instances,
+    );
     let ts = seconds(test.at_seconds.unwrap_or_else(|| history_length(test)));
     TestCase {
         session,
@@ -224,9 +232,11 @@ fn build_step(step: &TestStep, at_seconds: u64) -> TestCase {
         step.file_open.as_ref(),
         step.connect.as_ref(),
         step.input.as_ref(),
+        step.signal_send.as_ref(),
+        step.tamper.as_ref(),
         &process,
     );
-    let session = test_session(&process, &ancestry, &BTreeMap::new());
+    let session = test_session(&process, &ancestry, &BTreeMap::new(), None, &[]);
     TestCase {
         session,
         action,
@@ -256,6 +266,8 @@ fn test_session(
     process: &ProcessInfo,
     ancestry: &[ProcessInfo],
     baseline: &BTreeMap<String, Vec<String>>,
+    monitor_pid: Option<i32>,
+    sensor_instances: &[i32],
 ) -> SessionMeta {
     let mut sets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, values) in baseline {
@@ -276,6 +288,11 @@ fn test_session(
         schema_version: af_core::EVENT_SCHEMA_VERSION,
         baseline: sets,
         detection: None,
+        monitor_pid: monitor_pid.unwrap_or(0),
+        sensor: (!sensor_instances.is_empty()).then(|| af_core::SensorMeta {
+            preload: "/research/spikes/inprocess/libafsensor.so".to_string(),
+            instances: sensor_instances.to_vec(),
+        }),
     }
 }
 
@@ -315,6 +332,8 @@ fn to_action(
     file_open: Option<&crate::source::TestFileOpen>,
     connect: Option<&crate::source::TestConnect>,
     input: Option<&crate::source::TestInput>,
+    signal_send: Option<&crate::source::TestSignalSend>,
+    tamper: Option<&crate::source::TestTamper>,
     process: &ProcessInfo,
 ) -> Action {
     if let Some(open) = file_open {
@@ -343,6 +362,21 @@ fn to_action(
                 TestInputSource::Environment => InputSource::Environment,
             },
             data: input.data.clone(),
+        };
+    }
+    if let Some(signal) = signal_send {
+        return Action::SignalSend {
+            target: signal.target,
+            signal: signal.signal,
+        };
+    }
+    if let Some(tamper) = tamper {
+        return Action::Tamper {
+            kind: tamper.kind,
+            detail: tamper
+                .detail
+                .clone()
+                .unwrap_or_else(|| tamper.kind.label().to_string()),
         };
     }
     Action::Exec {

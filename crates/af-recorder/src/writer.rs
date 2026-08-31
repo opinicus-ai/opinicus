@@ -41,9 +41,11 @@ pub struct WriterStats {
 /// it waits, so `kept + dropped` always equals the number of events that the
 /// writer saw.
 ///
-/// The writer flushes after every event that is evidence, and it flushes when
-/// it goes away. A session that ends badly therefore still leaves usable
-/// evidence.
+/// The writer flushes after every event that is evidence and after every
+/// event that is durable — the events that name the processes of the
+/// session, which are the record of who ran when — and it flushes when it
+/// goes away. A session that ends badly, and a monitor that an attack
+/// kills, therefore still leave usable evidence.
 pub struct TraceWriter {
     /// Where the lines go.
     out: Box<dyn Write + Send>,
@@ -112,8 +114,12 @@ impl TraceWriter {
         serde_json::to_writer(&mut self.out, &line)?;
         self.out.write_all(b"\n")?;
         self.stats.kept += 1;
-        if line.kind.is_evidence() {
-            // Evidence must survive a hard stop of the session.
+        if line.kind.is_durable() {
+            // Evidence, and the process events that name who ran when, must
+            // survive a hard stop of the session — also a `SIGKILL` of the
+            // monitor itself, which takes no cleanup path with it. The write
+            // reaches the kernel here; the file system makes it visible to
+            // the next reader even if this process dies on the next line.
             self.out.flush()?;
         }
         Ok(())

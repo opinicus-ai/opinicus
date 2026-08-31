@@ -50,6 +50,8 @@ pub(crate) struct Matcher {
     ancestor_program: Vec<String>,
     ancestor_depth_at_least: Option<usize>,
     env: Vec<(String, Option<Regex>)>,
+    signal_target: Vec<SignalTarget>,
+    tamper: Vec<String>,
     not: Option<Box<Matcher>>,
     all_of: Vec<Matcher>,
     any_of: Vec<Matcher>,
@@ -91,6 +93,44 @@ pub(crate) struct VarResolvesCondition {
     root: bool,
 }
 
+/// Where a signal goes, in the words of the rule file.
+///
+/// The words are the B.5 facts: processes of the firewall itself. A rule
+/// that names one of them never fires on the signals of a normal session,
+/// because no normal program signals the monitor, the session root by
+/// firewall order, or a sensor instance the firewall installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignalTarget {
+    /// The monitor process of this session.
+    Monitor,
+    /// The root process that the monitor launched.
+    SessionRoot,
+    /// A process that carries a sensor instance of this session.
+    SensorInstance,
+    /// Every process the sender can reach (`kill(-1, ...)`), the monitor
+    /// included.
+    Everything,
+    /// Any other process.
+    Other,
+}
+
+impl SignalTarget {
+    /// Reads one word of the rule file.
+    fn parse(word: &str) -> Result<Self, String> {
+        match word {
+            "monitor" => Ok(SignalTarget::Monitor),
+            "session_root" => Ok(SignalTarget::SessionRoot),
+            "sensor_instance" => Ok(SignalTarget::SensorInstance),
+            "everything" => Ok(SignalTarget::Everything),
+            "other" => Ok(SignalTarget::Other),
+            other => Err(format!(
+                "field `signal_target` accepts monitor, session_root, sensor_instance, \
+                 everything or other, but it got `{other}`"
+            )),
+        }
+    }
+}
+
 impl Matcher {
     /// Compiles one condition.
     ///
@@ -122,6 +162,8 @@ impl Matcher {
             ancestor_program: words(&source.ancestor_program),
             ancestor_depth_at_least: source.ancestor_depth_at_least,
             env: compile_env(source.env.as_ref())?,
+            signal_target: compile_signal_targets(source.signal_target.as_ref())?,
+            tamper: words(&source.tamper),
             not: match &source.not {
                 Some(inner) => Some(Box::new(Matcher::compile(inner)?)),
                 None => None,
@@ -310,6 +352,21 @@ impl Matcher {
                 }
             }
         }
+        if !self.signal_target.is_empty()
+            && !subject
+                .signal_target
+                .is_some_and(|target| self.signal_target.contains(&target))
+        {
+            return false;
+        }
+        if !self.tamper.is_empty() {
+            let Some(kind) = subject.tamper_kind else {
+                return false;
+            };
+            if !self.tamper.iter().any(|want| want == kind) {
+                return false;
+            }
+        }
         if let Some(inner) = &self.not {
             if inner.matches(subject) {
                 return false;
@@ -403,6 +460,12 @@ impl Matcher {
             ActionKind::Input,
             self.input_matches.is_some(),
         );
+        add(
+            "signal_target",
+            ActionKind::SignalSend,
+            !self.signal_target.is_empty(),
+        );
+        add("tamper", ActionKind::Tamper, !self.tamper.is_empty());
         out
     }
 
@@ -431,6 +494,8 @@ impl Matcher {
             && self.ancestor_program.is_empty()
             && self.ancestor_depth_at_least.is_none()
             && self.env.is_empty()
+            && self.signal_target.is_empty()
+            && self.tamper.is_empty()
             && self.not.is_none()
             && self.all_of.is_empty()
             && self.any_of.is_empty()
@@ -581,6 +646,20 @@ fn compile_env(
     Ok(out)
 }
 
+/// Reads the words of `signal_target` and checks every one of them.
+fn compile_signal_targets(source: Option<&Words>) -> Result<Vec<SignalTarget>, CompileError> {
+    let Some(words) = source else {
+        return Ok(Vec::new());
+    };
+    words
+        .0
+        .iter()
+        .map(|word| {
+            SignalTarget::parse(word).map_err(|message| format!("field `signal_target`: {message}"))
+        })
+        .collect()
+}
+
 fn compile_list(source: Option<&[MatchSource]>) -> Result<Vec<Matcher>, CompileError> {
     let Some(list) = source else {
         return Ok(Vec::new());
@@ -613,6 +692,8 @@ pub(crate) struct Subject<'a> {
     ts: TimestampNanos,
     subtree_root: Pid,
     memory: &'a SessionMemory,
+    signal_target: Option<SignalTarget>,
+    tamper_kind: Option<&'a str>,
 }
 
 impl<'a> Subject<'a> {
@@ -648,6 +729,8 @@ impl<'a> Subject<'a> {
             ts: ctx.ts,
             subtree_root: ctx.subtree_root(),
             memory,
+            signal_target: None,
+            tamper_kind: None,
         };
         match ctx.action {
             Action::Exec {
@@ -684,6 +767,30 @@ impl<'a> Subject<'a> {
             }
             Action::Input { data, .. } => {
                 subject.input = Some(data.as_str());
+            }
+            Action::SignalSend { target, .. } => {
+                // The B.5 facts answer the only question a tamper rule may
+                // ask about a signal: is the target a process of the
+                // firewall itself? A signal to anything else is not a fact
+                // of the firewall, and no rule of this shape may fire on it.
+                // `kill(-1, ...)` is the one exception that names nobody:
+                // the kernel filter holds it precisely because it reaches
+                // the monitor with everything else.
+                let session = ctx.session;
+                subject.signal_target = Some(if *target == -1 {
+                    SignalTarget::Everything
+                } else if session.is_monitor(*target) {
+                    SignalTarget::Monitor
+                } else if session.is_session_root(*target) {
+                    SignalTarget::SessionRoot
+                } else if session.is_sensor_instance(*target) {
+                    SignalTarget::SensorInstance
+                } else {
+                    SignalTarget::Other
+                });
+            }
+            Action::Tamper { kind, .. } => {
+                subject.tamper_kind = Some(kind.label());
             }
         }
         subject.argv_joined = subject.argv.join(" ");
@@ -859,6 +966,8 @@ fn kind_of(action: &Action) -> ActionKind {
         Action::FileOpen { .. } => ActionKind::FileOpen,
         Action::NetworkConnect { .. } => ActionKind::NetworkConnect,
         Action::Input { .. } => ActionKind::Input,
+        Action::SignalSend { .. } => ActionKind::SignalSend,
+        Action::Tamper { .. } => ActionKind::Tamper,
     }
 }
 

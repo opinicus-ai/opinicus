@@ -1,0 +1,163 @@
+version: 1
+name: builtin.tamper
+description: >
+  Attempts to take the firewall's own visibility away. Every rule of this
+  pack keys on the identity of the firewall itself — the monitor process,
+  the session root, the sensor instances this session installed, or an act
+  the firewall itself made — and never on the absence of instrumentation on
+  a foreign process, which a normal toolchain produces every day. Each rule
+  carries its negative test: a normal session stays quiet.
+
+rules:
+  # The four seeded techniques of the bypass harness, as sensed states.
+
+  - id: tamper.monitor.signal
+    title: Signal to the monitor itself
+    category: tamper
+    risk: approval_required
+    decision: approval_required
+    quarantine: true
+    reason: A process of the session sends a signal to the firewall that watches it. There is no legitimate reason for a coding agent to stop its own monitor, and the fail-closed machinery of the kernel would kill the whole tree with it.
+    match:
+      action: signal_send
+      signal_target: [monitor, everything]
+    tests:
+      - name: a kill of the monitor quarantines the session
+        expect: approval_required
+        monitor_pid: 900
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        signal_send: { target: 900, signal: 9 }
+      - name: a signal to every process quarantines the session too
+        expect: approval_required
+        monitor_pid: 900
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        signal_send: { target: -1, signal: 9 }
+      - name: a signal to an unrelated process stays quiet
+        expect: allow
+        monitor_pid: 900
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        signal_send: { target: 4321, signal: 15 }
+      - name: a signal to the session root stays quiet here
+        expect: allow
+        monitor_pid: 900
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, kill 1000] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        signal_send: { target: 1000, signal: 15 }
+      - name: a signal to a sensor instance stays quiet here
+        expect: allow
+        monitor_pid: 900
+        sensor_instances: [1700]
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        signal_send: { target: 1700, signal: 9 }
+      - name: a session that does not name its monitor stays quiet
+        expect: allow
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        signal_send: { target: 900, signal: 9 }
+
+  - id: tamper.process.detached
+    title: A descendant left the session tree
+    category: tamper
+    risk: suspicious
+    decision: allow
+    reason: A process of the session called setsid or descended from one that did, so it can outlive the session and its later actions arrive with no link back. The tracer still follows it — this is the sensed fact, not an escape that worked. It stays a report, because normal tooling detaches on its own, and git maintenance does it on every commit of a normal session.
+    match:
+      action: tamper
+      tamper: [detached_descendant]
+    tests:
+      - name: a descendant that detached is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: worker, exe: /tmp/worker, argv: [worker] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        tamper: { kind: detached_descendant, detail: "pid 1500 sid 1500, root sid 1000" }
+      - name: a preload fact is not a detach
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a plain program start stays quiet
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+
+  - id: tamper.process.respawned
+    title: A program the firewall killed came back
+    category: tamper
+    risk: approval_required
+    decision: approval_required
+    quarantine: true
+    reason: The firewall stopped this program in this session, and the same parent started it again. A session that answers a refusal by repeating the refused command is exactly the loop a quarantine exists to stop.
+    match:
+      action: tamper
+      tamper: [killed_subtree_returned]
+    tests:
+      - name: a killed program that returns quarantines the session
+        expect: approval_required
+        process: { pid: 1502, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1500, comm: sh }]
+        tamper: { kind: killed_subtree_returned, detail: "payload under pid 1500, killed earlier in this session" }
+      - name: a program nobody killed stays quiet
+        expect: allow
+        process: { pid: 1502, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1500, comm: bash }]
+
+  - id: tamper.sensor.preload-stripped
+    title: A child inherited no copy of the sensor preload
+    category: tamper
+    risk: approval_required
+    decision: approval_required
+    quarantine: true
+    reason: This session runs with the in-process sensor, and a child of it starts with the sensor's preload removed from its environment. The outside view still holds the child; only the semantic view was taken away, and that removal is the signal.
+    match:
+      action: tamper
+      tamper: [preload_stripped]
+    tests:
+      - name: a child that strips the preload quarantines the session
+        expect: approval_required
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, env -u LD_PRELOAD payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        tamper: { kind: preload_stripped, detail: "LD_PRELOAD absent, session carried /research/spikes/inprocess/libafsensor.so" }
+      - name: a detach is not a preload fact
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a normal program start stays quiet
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+
+  # Report only: the liveness facts of B.6 that a rule can now ask about.
+  # A background job of a normal session has the same shape, so these rules
+  # report and never ask — the corpus of [af-1] proved the question wrong:
+  # `git maintenance run --detach`, on every commit of a normal session,
+  # raises the detach fact, and the interruption budget wins over the
+  # severity.
+
+  - id: tamper.process.outlived
+    title: A process was still alive after the session ended
+    category: tamper
+    risk: suspicious
+    decision: allow
+    reason: The session root ended and this process of the session lives on. The tracer still follows it, so nothing escaped; the report names the work that continues after the session.
+    match:
+      action: tamper
+      tamper: [outlived_session]
+    tests:
+      - name: a daemon that outlives the session is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: daemon, exe: /tmp/daemon, argv: [daemon] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        tamper: { kind: outlived_session, detail: "alive after root 1000 ended" }
+      - name: a detach is not an outlived process
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a plain program start stays quiet
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]

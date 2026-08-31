@@ -130,6 +130,8 @@ fn arguments_of(action: &Action) -> String {
             format!("{host} {addr} {port}")
         }
         Action::Input { source, data } => format!("{source:?} {data}"),
+        Action::SignalSend { target, signal } => format!("{target} {signal}"),
+        Action::Tamper { kind, detail } => format!("{kind} {detail}"),
     }
 }
 

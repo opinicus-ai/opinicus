@@ -202,6 +202,13 @@ CLASSIFICATION = {
     "allowlist.git.dry-run": ("C", "the exception matches a command argument"),
     "allowlist.cloud.local-cluster": ("C", "the exception matches a context name"),
     "allowlist.database.local-host": ("C", "the exception matches a host argument"),
+
+    # ---------------- tamper (M4, 2026-08-31) ----------------
+    "tamper.monitor.signal": ("B", "the signal scope (ABI 6) refuses the call when the ruling allows it, so the monitor survives either way; the quarantine still asks, because a signal aimed at the firewall is a fact the user must rule on, whatever the kernel does with the call"),
+    "tamper.process.detached": ("C", "the sensed fact is a session identifier of a process; the floor sees no process at all"),
+    "tamper.process.respawned": ("C", "the sensed fact is an act of the monitor itself"),
+    "tamper.sensor.preload-stripped": ("C", "the sensed fact is the environment of an exec"),
+    "tamper.process.outlived": ("C", "the sensed fact is liveness at the end of the session root"),
 }
 
 

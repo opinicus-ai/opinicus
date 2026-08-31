@@ -18,8 +18,13 @@ pub fn load_policy(options: &PolicyOptions) -> Result<PolicySet> {
 
 /// The action kinds that the monitor makes whatever the filter mode is.
 ///
-/// The exec boundary needs no kernel filter, so these two are always there.
-pub const ALWAYS_SUPPORTED_ACTIONS: &[&str] = &["exec", "input"];
+/// The exec boundary needs no kernel filter, so `exec` and `input` are
+/// always there. The tamper facts ride events that the monitor and the
+/// provenance graph make themselves — a program that repeats one the
+/// firewall killed, a child that inherits no sensor preload, a descendant
+/// that detached, a process that outlived the session — so they are there in
+/// every mode too.
+pub const ALWAYS_SUPPORTED_ACTIONS: &[&str] = &["exec", "input", "tamper"];
 
 /// Names every action kind that a session with this filter mode can make.
 ///
@@ -31,6 +36,9 @@ pub fn supported_actions(filter: SyscallFilter) -> Vec<&'static str> {
     if filter.observes_opens() {
         kinds.push("file_open");
         kinds.push("network_connect");
+        // The filter holds a signal only when its target is the monitor
+        // itself, so the kind exists exactly when the filter does.
+        kinds.push("signal_send");
     }
     kinds
 }

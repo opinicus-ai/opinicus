@@ -28,7 +28,7 @@
 //!
 //! ```no_run
 //! use af_core::SessionMeta;
-//! use af_monitor::{Intercept, Monitor, MonitorConfig, MonitorHandler};
+//! use af_monitor::{ExecSensed, Intercept, Monitor, MonitorConfig, MonitorHandler, TreeControl};
 //!
 //! struct Guard;
 //!
@@ -42,10 +42,22 @@
 //!         process: &af_core::ProcessInfo,
 //!         _ancestry: &[af_core::Pid],
 //!         _input: Option<&af_monitor::InputSnapshot>,
+//!         _sensed: &ExecSensed,
+//!         _tree: &mut dyn TreeControl,
 //!     ) -> Intercept {
 //!         if process.program_name() == "shred" {
 //!             return Intercept::Deny;
 //!         }
+//!         Intercept::Continue
+//!     }
+//!
+//!     fn on_syscall(
+//!         &mut self,
+//!         _pid: af_core::Pid,
+//!         _action: &af_core::Action,
+//!         _ancestry: &[af_core::Pid],
+//!         _tree: &mut dyn TreeControl,
+//!     ) -> Intercept {
 //!         Intercept::Continue
 //!     }
 //! }
@@ -75,6 +87,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use procfs::{DEFAULT_ENV_ALLOWLIST, REDACTED};
+
+use af_core::{Pid, TamperKind};
 
 /// How much text the monitor reads of one stream or one script by default.
 pub const DEFAULT_MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -230,6 +244,13 @@ pub struct MonitorConfig {
     /// its own notion of the home directory — and a test with a temporary
     /// one — can name it.
     pub landlock_home: Option<PathBuf>,
+    /// Process identifier of the monitor itself.
+    ///
+    /// The kernel filter holds a signal whose target is this process, so a
+    /// program of the session cannot stop the firewall without the firewall
+    /// noticing. The value is zero when the caller does not name itself, and
+    /// the filter then holds no signal at all.
+    pub monitor_pid: Pid,
 }
 
 impl Default for MonitorConfig {
@@ -243,6 +264,7 @@ impl Default for MonitorConfig {
             syscall_filter: SyscallFilter::default(),
             landlock: LandlockMode::default(),
             landlock_home: None,
+            monitor_pid: 0,
         }
     }
 }
@@ -338,30 +360,36 @@ pub trait MonitorHandler {
     /// ask the user. `ancestry` names the parents of the process, the nearest
     /// parent first and the root of the session last. `input` holds the text
     /// that the monitor read, and is `None` when
-    /// [`MonitorConfig::capture_input`] is false.
+    /// [`MonitorConfig::capture_input`] is false. `sensed` holds the facts
+    /// that the monitor measured beyond the program itself, and `tree` takes
+    /// the orders that the handler gives about the whole session tree — a
+    /// quarantine suspends it.
     fn on_exec(
         &mut self,
         process: &af_core::ProcessInfo,
         ancestry: &[af_core::Pid],
         input: Option<&InputSnapshot>,
-    ) -> Intercept {
-        let _ = (process, ancestry, input);
-        Intercept::Continue
-    }
+        sensed: &ExecSensed,
+        tree: &mut dyn TreeControl,
+    ) -> Intercept;
 
     /// Answers what must happen with an action inside a running program.
     ///
-    /// The kernel filter held the process before it opened a file or before
-    /// it opened a connection, and the call has not happened yet. The process
-    /// holds until this call returns, so the implementation can ask the user.
+    /// The kernel filter held the process before it opened a file, before it
+    /// opened a connection, or before it sent a signal to a process of the
+    /// firewall, and the call has not happened yet. The process holds until
+    /// this call returns, so the implementation can ask the user, and `tree`
+    /// takes the orders that the handler gives about the whole session tree.
     ///
     /// `pid` names the process that acts, and `ancestry` names its parents,
     /// the nearest parent first. The monitor does not read `/proc` again for
     /// this stop, because a session makes many of them; the caller already
     /// knows the process from its exec event.
     ///
-    /// The `action` is always an [`af_core::Action::FileOpen`] or an
-    /// [`af_core::Action::NetworkConnect`].
+    /// The `action` is always an [`af_core::Action::FileOpen`], an
+    /// [`af_core::Action::NetworkConnect`] or an
+    /// [`af_core::Action::SignalSend`] whose target is a process of the
+    /// firewall.
     ///
     /// # A path is not proof
     ///
@@ -370,16 +398,86 @@ pub trait MonitorHandler {
     /// can change that memory before the kernel reads it again. The value is
     /// therefore sound for a report, for [`Intercept::Refuse`] and for a
     /// question to the user, and it must never be the reason to **allow**
-    /// something that would otherwise be stopped.
+    /// something that would otherwise be stopped. The target of a signal is
+    /// a scalar from the registers, so nothing can race that one.
     fn on_syscall(
         &mut self,
         pid: af_core::Pid,
         action: &af_core::Action,
         ancestry: &[af_core::Pid],
-    ) -> Intercept {
-        let _ = (pid, action, ancestry);
+        tree: &mut dyn TreeControl,
+    ) -> Intercept;
+
+    /// Returns a sensed tamper fact that waits for its ruling, when one
+    /// became pending outside a held stop.
+    ///
+    /// The monitor asks this after every state change of the tree. A fact
+    /// that rises while the handler records an event — a descendant that
+    /// detached — cannot stop a process by itself, because no process is held
+    /// at that moment, so the monitor takes the fact here, suspends the tree
+    /// and hands it to [`MonitorHandler::rule_tamper`].
+    fn take_tamper(&mut self) -> Option<SensedTamper> {
+        None
+    }
+
+    /// Judges one sensed tamper fact, with the tree already suspended.
+    ///
+    /// The monitor suspends every process of the session before this call,
+    /// because the fact says that the visibility of the firewall is under
+    /// attack and the ruling must stop the tree before it continues. The
+    /// answer orders the rest: [`Intercept::Continue`] and
+    /// [`Intercept::Deny`] let the tree run again, and
+    /// [`Intercept::TerminateSession`] ends it.
+    ///
+    /// The monitor also uses this path for the liveness fact of a process
+    /// that outlived the session, which a rule reports and never stops.
+    fn rule_tamper(&mut self, sensed: SensedTamper) -> Intercept {
+        let _ = sensed;
         Intercept::Continue
     }
+}
+
+/// What the monitor sensed at one exec stop, beyond the program itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecSensed {
+    /// True when this program repeats one that the monitor killed in this
+    /// session, under the same parent.
+    ///
+    /// The monitor kills a program when a rule denies it. A parent that
+    /// starts the same program again is the loop a quarantine exists to
+    /// stop, and the fact only exists because the firewall itself acted
+    /// first — no normal session kills anything.
+    pub respawned_after_kill: bool,
+}
+
+/// One sensed tamper fact that waits for its ruling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SensedTamper {
+    /// Which shape was sensed.
+    pub kind: TamperKind,
+    /// The process that the fact names.
+    pub pid: af_core::Pid,
+    /// The measured facts behind the sense, one line.
+    pub detail: String,
+}
+
+/// The orders that a handler can give about the whole session tree.
+///
+/// The monitor owns the tree, so it carries these orders out. A handler
+/// that holds one process at a stop — the normal decision path — needs no
+/// order for that process; these orders exist for the quarantine, which
+/// suspends everything while the user rules.
+pub trait TreeControl {
+    /// Stops every process of the session that still runs.
+    ///
+    /// The process that waits at its stop stays where it is. A process in
+    /// the middle of a computation receives `SIGSTOP` and the monitor holds
+    /// its group stop, so the whole tree stands still until
+    /// [`TreeControl::resume`].
+    fn suspend(&mut self);
+
+    /// Lets a suspended session run again.
+    fn resume(&mut self);
 }
 
 /// The result of one monitored session.

@@ -67,6 +67,7 @@ silent hole in the protection.
 | `enabled` | bool | `false` loads the rule but never uses it. |
 | `match` | match block | The condition of the rule. See section 3. |
 | `exceptions` | list of match blocks | Any hit switches the rule off. See section 5. |
+| `quarantine` | bool | The whole session tree stands still while the user rules on the action. The default is `false`. See *The quarantine* below. |
 | `remember` | remember block | Writes a mark for a later rule. See *Session memory* below. |
 | `threshold` | threshold block | A count over a window. The rule is quiet below it. See *Session memory* below. |
 | `tests` | list of tests | Examples that prove the rule. See section 6. |
@@ -86,6 +87,8 @@ implicit **and**.
 | `action` | `file_open` | A process opens a file. |
 | `action` | `network_connect` | A process opens a connection. |
 | `action` | `input` | The monitor captured a script, a standard input stream or another text. |
+| `action` | `signal_send` | A process sends a signal to a process of the firewall. |
+| `action` | `tamper` | The firewall sensed a state of its own visibility. |
 
 Some fields only work with one action kind. The lint reports a rule that mixes
 them, because such a rule can never match.
@@ -136,6 +139,46 @@ The monitor sends a script file, a standard input stream or the text of a
 here-document as an `input` action. A rule that must find `DROP DATABASE` in a
 command line **and** in a script writes two branches under `any_of`, one with
 `action: exec` and one with `action: input`.
+
+### Signal (`signal_send`)
+
+The kernel filter holds a signal only when its target is a process of the
+firewall itself, so a `signal_send` action reaches the engine exactly when
+the signal is an attempt on the firewall.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `signal_target` | list | Where the signal goes: `monitor`, `session_root`, `sensor_instance`, `everything` or `other`. One of the list must name the target. `everything` is `kill(-1, ...)`, which reaches the monitor with everything else. |
+
+These are the B.5 facts. A rule that keys on them never fires on the
+signals of a normal session, because no normal program signals the monitor,
+the session root by firewall order, or a sensor instance the firewall
+installed.
+
+### Tamper (`tamper`)
+
+The firewall senses a state of its own visibility and hands the fact to the
+rules as an action.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `tamper` | list | The sensed shape: `detached_descendant`, `killed_subtree_returned`, `preload_stripped` or `outlived_session`. One of the list must be the kind. |
+
+Every kind is keyed to what the firewall itself did or installed: a kill
+the firewall made, a preload the firewall carried, a session tree the
+firewall launched. A rule of this shape cannot fire on a foreign process.
+
+### The quarantine
+
+A rule with `quarantine: true` decides `approval_required`, and when it
+matches, the firewall stops every process of the session, prints the
+evidence and asks **one** question: allow once, an exception for the rest of
+the session, or the end of the tree. The trace holds the whole exchange.
+
+A quarantine is the most expensive question there is, so the flag belongs
+on a rule that the negative tests of section 6 prove quiet on a normal
+session. The lint refuses a quarantine rule that decides anything other than
+`approval_required`.
 
 ### The process tree
 
@@ -519,12 +562,17 @@ only**, so another rule cannot hide a mistake.
 | `file_open` | `{ path: ..., write: true }` makes a file action. |
 | `connect` | `{ host: ..., addr: ..., port: 5432 }` makes a connection action. |
 | `input` | `{ source: stdin, data: "..." }` makes a captured content action. |
+| `signal_send` | `{ target: 900, signal: 9 }` makes a signal action. The target compares with the B.5 facts of the test session. |
+| `tamper` | `{ kind: detached_descendant }` makes a sensed fact action. |
+| `monitor_pid` | The process identifier of the monitor, for `signal_target: monitor`. |
+| `sensor_instances` | The sensor instances of the session, for `signal_target: sensor_instance`. |
 | `history` | The steps that happened before. See below. |
 | `at_seconds` | Time of the action, in seconds after the start of the test. |
 | `baseline` | The named sets of the session start, for example `{ git_remotes: [origin] }`. |
 
-Without `file_open`, `connect` or `input`, the test builds an `exec` action
-from the `process` block. A test with more than one action is a load error.
+Without `file_open`, `connect`, `input`, `signal_send` or `tamper`, the test
+builds an `exec` action from the `process` block. A test with more than one
+action is a load error.
 
 ### A test with a history
 
@@ -648,15 +696,19 @@ those programs in `program` and asks for the real command with `argv_matches`:
 | `policies/process.yaml` | 33 | Programs from temporary places, hidden payloads, deep shell chains. |
 | `policies/memory.yaml` | 7 | Chains, bursts, sweeps and a remote that the session did not know. |
 | `policies/allowlist.yaml` | 5 | Known safe forms of commands that look dangerous. |
-| **Total** | **147** | |
+| `policies/tamper.yaml` | 5 | Attempts on the firewall itself: a signal to the monitor, a detached descendant, a killed program that came back, a stripped sensor preload, a process that outlived the session. |
+| **Total** | **152** | |
 
-Of the 147 rules, 9 answer `deny`, 61 answer `approval_required` and 77 stay
+Of the 152 rules, 9 answer `deny`, 64 answer `approval_required` and 79 stay
 quiet with `allow`. The rules that stop an action only look at commands that
 destroy data. A normal development session — `git status`, `cargo build`,
 `npm test`, `psql -c "SELECT ..."`, `kubectl get pods` — matches no rule at
 all and produces no note.
 
-Six of the 61 questions are answered by the kernel instead of the user. When
+Three of the 64 questions are quarantines, and two of the five tamper rules
+report instead of asking.
+
+Six of the 64 questions are answered by the kernel instead of the user. When
 the Landlock floor of the monitor is active (the default), the session does
 not ask `filesystem.etc.write`, `filesystem.delete.system-path`,
 `filesystem.delete.mount-root`, `filesystem.device.truncate`,

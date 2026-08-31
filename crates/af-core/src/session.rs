@@ -7,6 +7,32 @@ use serde::{Deserialize, Serialize};
 use crate::identity::IdentifiedAgent;
 use crate::{Pid, TimestampNanos};
 
+/// What the firewall installed inside the processes of this session.
+///
+/// This is requirement B.5 of `docs/DETECTION-REQUIREMENTS.md`: the facts
+/// that a tamper or correlation rule keys on are facts of the firewall's own
+/// identity, never of a foreign process. A session that the launcher starts
+/// without the in-process sensor carries `None`, and every rule that asks for
+/// sensor instances then answers nothing — which is the quiet, correct
+/// answer for a normal session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensorMeta {
+    /// The preload value that carried the sensor into the session root.
+    ///
+    /// The launcher read it from its own environment. A child whose exec
+    /// environment holds no copy of this value has answered a question by
+    /// removing the instrument.
+    pub preload: String,
+    /// The sensor instances that had registered when the session started.
+    ///
+    /// The list is a snapshot of the registration record of the in-process
+    /// sensor (`research/spikes/inprocess/`), taken once at launch. Whether
+    /// an instance still speaks is the correlation question of a later
+    /// milestone; this list only names what the firewall itself installed.
+    #[serde(default)]
+    pub instances: Vec<Pid>,
+}
+
 /// Identifier of one monitored session.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -174,6 +200,18 @@ pub struct SessionMeta {
     /// identity from the trace and never detects again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detection: Option<IdentifiedAgent>,
+    /// Process identifier of the monitor itself.
+    ///
+    /// This is the fact a tamper rule keys on: a signal whose target is this
+    /// process is an attempt on the firewall, whatever program sends it. The
+    /// value travels inside the `SessionStart` event, so a replay answers the
+    /// same question from the trace. Zero means the launcher did not name
+    /// itself, which is the case in every trace of an older version.
+    #[serde(default)]
+    pub monitor_pid: Pid,
+    /// The in-process sensor this session runs with, when it runs with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor: Option<SensorMeta>,
 }
 
 fn default_schema_version() -> u32 {
@@ -197,6 +235,26 @@ impl SessionMeta {
             schema_version: crate::EVENT_SCHEMA_VERSION,
             baseline: BTreeMap::new(),
             detection: None,
+            monitor_pid: 0,
+            sensor: None,
         }
+    }
+
+    /// Returns true when this process is the monitor itself.
+    pub fn is_monitor(&self, pid: Pid) -> bool {
+        self.monitor_pid != 0 && pid == self.monitor_pid
+    }
+
+    /// Returns true when this process is the root of the session.
+    pub fn is_session_root(&self, pid: Pid) -> bool {
+        self.root_pid != 0 && pid == self.root_pid
+    }
+
+    /// Returns true when this process carries a sensor instance that the
+    /// firewall installed.
+    pub fn is_sensor_instance(&self, pid: Pid) -> bool {
+        self.sensor
+            .as_ref()
+            .is_some_and(|sensor| sensor.instances.contains(&pid))
     }
 }

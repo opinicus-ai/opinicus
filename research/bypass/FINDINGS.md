@@ -167,6 +167,62 @@ cargo workspace by `cargo new` itself (it rewrites the root manifest), so
 the corpus crate is now created and built outside the repository, and the
 repository manifest excludes `tmp/`.
 
+## After M4 — the tamper gate (2026-08-31)
+
+M4 made the attempts of this harness sensed states. The gate script is
+`./tamper.sh` (run it after `cargo build --release`); the negative side is
+`./benign.sh`, which now counts quarantines and must stay at zero.
+
+| technique | fw exit | fact events | rule matches | quarantines | rulings | verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| kill-monitor | 3 | 1 | 1 | 1 | 1 | fires and quarantines |
+| escape-setsid | 0 | 3 | 3 | 0 | 0 | fires as a report |
+| respawn | 3 | 2 | 2 | 2 | 2 | fires and quarantines |
+| strip-preload | 3 | 1 | 1 | 1 | 1 | fires and quarantines |
+
+Three runs of the gate gave the same table every time.
+
+What moved, measured on the same machine as the matrix above:
+
+* **kill-monitor went from `silent, fail-closed` to `held`** in the
+  `write-only` and `all-opens` cells of the builtin posture. The kernel
+  filter now holds a signal whose target is the monitor — the comparison
+  runs in the BPF program on the call number and the identifier, before the
+  call happens — so the `SIGKILL` never runs: the tamper rule fires, the
+  tree is quarantined, the ruling (the harness answers with `--approve
+  deny`) refuses the call, and the technique prints `blocked rc=-1` where M1
+  measured a dead monitor and a one-line trace. The `off` cell keeps the
+  fail-closed outcome and gains the durable record: with the floor also off,
+  so that the kill really succeeds, the trace of the killed monitor now
+  holds the `process_exec` of the attacker (2 lines against the 1 line of
+  M1) — the recorder writes every process event through.
+* **escape-setsid and outlive now carry the B.6 facts.** The detach raises
+  `process_unlinked` (M3) plus a `tamper` fact, and the daemon that outlives
+  the root raises its own `tamper` fact. Both rules **report** — the first
+  version of the detach rule quarantined, and the corpus refused it:
+  `git maintenance run --detach`, which runs on every `git init` and
+  `git commit` of the corpus, raises the same fact. The interruption budget
+  wins over the severity; the finding is recorded here because it is the
+  gate doing its job.
+* **Two new seeded techniques** joined the harness: `respawn` (a program
+  the firewall denied, started again by the same parent — 2 facts for 3
+  rounds, because the first round is the kill itself) and `strip-preload`
+  (a child whose environment carries no `LD_PRELOAD`, run with the
+  in-process sensor of `[af-2]` active — the session facts name the sensor
+  and its registered instances, and the fact is sensed at the exec stop).
+* **The benign corpus stays quiet.** Zero questions, zero agent tags and
+  **zero quarantines** in all three filter modes, with and without the
+  sensor; the one `tamper` event per run is the git-maintenance detach
+  report, which asks nobody. The M2 corpus gate re-ran green (zero
+  questions, zero sensor silence, zero preload facts on ~4 400–7 700 sensor
+  events per mode).
+* **The cost is not measurable.** Interleaved A/B on the shared benchmark
+  (the pre-M4 binary against the M4 binary, 3 rounds of 5 runs each):
+  W1 exec 352 vs 358 ms, W2 file 146 vs 145 ms, W3 mixed 252 vs 253 ms —
+  1.00×–1.02×, inside the noise of the machine. The signal rules match no
+  syscall of a normal session, and the four extra BPF blocks cost a few
+  instructions per call.
+
 ## Method
 
 * `orchestrate.py` runs every cell: fresh scratch directory, local listener

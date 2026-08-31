@@ -72,6 +72,8 @@ fn session(root_pid: Pid) -> SessionMeta {
         },
         schema_version: EVENT_SCHEMA_VERSION,
         detection: None,
+        monitor_pid: 0,
+        sensor: None,
         baseline: BTreeMap::new(),
     }
 }

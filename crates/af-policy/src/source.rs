@@ -69,6 +69,10 @@ pub enum ActionKind {
     NetworkConnect,
     /// Content that a process reads or receives.
     Input,
+    /// A process sends a signal to a process of the firewall.
+    SignalSend,
+    /// The firewall sensed a state of its own visibility.
+    Tamper,
 }
 
 impl ActionKind {
@@ -79,6 +83,8 @@ impl ActionKind {
             ActionKind::FileOpen => "file_open",
             ActionKind::NetworkConnect => "network_connect",
             ActionKind::Input => "input",
+            ActionKind::SignalSend => "signal_send",
+            ActionKind::Tamper => "tamper",
         }
     }
 }
@@ -129,6 +135,16 @@ pub struct RuleSource {
     /// Conditions that switch the rule off for one action.
     #[serde(default)]
     pub exceptions: Vec<MatchSource>,
+    /// True when the rule wants the whole session tree suspended while the
+    /// user rules on the action.
+    ///
+    /// The default is false. A rule that sets it starts a quarantine: the
+    /// firewall stops every process of the session, shows the evidence and
+    /// takes one ruling. Because a quarantine is the most expensive question
+    /// there is, the flag belongs on rules that key on the firewall's own
+    /// identity and on nothing else.
+    #[serde(default)]
+    pub quarantine: bool,
     /// A fact that the session writes down when the condition matches.
     #[serde(default)]
     pub remember: Option<RememberSource>,
@@ -325,6 +341,20 @@ pub struct MatchSource {
     /// An empty pattern means that only the name must be present.
     #[serde(default)]
     pub env: Option<BTreeMap<String, String>>,
+    /// Where the signal goes.
+    ///
+    /// One of the words must name the target of a `signal_send` action:
+    /// `monitor`, `session_root` or `sensor_instance`. These are the B.5
+    /// facts — processes of the firewall itself — and a rule that keys on
+    /// them never fires on the signals of a normal session.
+    #[serde(default)]
+    pub signal_target: Option<Words>,
+    /// Which sensed shape a `tamper` action carries.
+    ///
+    /// One of the words must be the kind of the fact: for example
+    /// `detached_descendant` or `preload_stripped`.
+    #[serde(default)]
+    pub tamper: Option<Words>,
     /// A condition that must not match.
     #[serde(default)]
     pub not: Option<Box<MatchSource>>,
@@ -397,6 +427,35 @@ pub struct TestConnect {
     pub port: u16,
 }
 
+/// The signal that a declared test sends.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestSignalSend {
+    /// Process identifier that receives the signal.
+    ///
+    /// The test compares this value with the B.5 facts of the session, so a
+    /// test that wants `monitor` also writes `monitor_pid` on the test.
+    pub target: i32,
+    /// Signal number. The default is `SIGKILL`.
+    #[serde(default = "default_signal")]
+    pub signal: i32,
+}
+
+fn default_signal() -> i32 {
+    9
+}
+
+/// The sensed fact that a declared test carries.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestTamper {
+    /// Which shape the test senses.
+    pub kind: af_core::TamperKind,
+    /// The measured facts, one line. The default names the kind alone.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 /// The observed content of a declared test.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -450,6 +509,13 @@ pub struct TestStep {
     /// Observed content instead of the default program start.
     #[serde(default)]
     pub input: Option<TestInput>,
+    /// A signal to a process of the firewall instead of the default program
+    /// start.
+    #[serde(default)]
+    pub signal_send: Option<TestSignalSend>,
+    /// A sensed fact instead of the default program start.
+    #[serde(default)]
+    pub tamper: Option<TestTamper>,
     /// How many times the step repeats. The default is one.
     ///
     /// A repeated step stands one second after the one before it, so a test
@@ -488,6 +554,13 @@ pub struct TestSource {
     /// Observed content instead of the default program start.
     #[serde(default)]
     pub input: Option<TestInput>,
+    /// A signal to a process of the firewall instead of the default program
+    /// start.
+    #[serde(default)]
+    pub signal_send: Option<TestSignalSend>,
+    /// A sensed fact instead of the default program start.
+    #[serde(default)]
+    pub tamper: Option<TestTamper>,
     /// The steps that happened before the action of the test.
     #[serde(default)]
     pub history: Vec<TestStep>,
@@ -499,4 +572,13 @@ pub struct TestSource {
     /// The named sets that the launcher recorded at session start.
     #[serde(default)]
     pub baseline: BTreeMap<String, Vec<String>>,
+    /// Process identifier of the monitor itself.
+    ///
+    /// This is the B.5 fact that `signal_target: monitor` compares with.
+    #[serde(default)]
+    pub monitor_pid: Option<i32>,
+    /// The sensor instances that the session started with, when it started
+    /// with any.
+    #[serde(default)]
+    pub sensor_instances: Vec<i32>,
 }

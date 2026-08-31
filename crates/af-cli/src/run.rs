@@ -13,9 +13,13 @@ use af_approval::{ApprovalMode, TerminalApprover};
 use af_core::{
     display, Action, AgentKind, AgentLink, ApprovalOutcome, ApprovalRequest, DetectionInput,
     DetectorRegistry, EvalContext, Event, EventKind, EventSink, MemoryEffect, MonitorCapability,
-    Pid, PolicyEngine, ProcessInfo, SessionMemory, SessionMeta, TimestampNanos, Verdict,
+    Pid, PolicyEngine, ProcessInfo, SensorMeta, SessionMemory, SessionMeta, TamperKind,
+    TimestampNanos, Verdict,
 };
-use af_monitor::{InputSnapshot, Intercept, Monitor, MonitorConfig, MonitorHandler, SyscallFilter};
+use af_monitor::{
+    ExecSensed, InputSnapshot, Intercept, Monitor, MonitorConfig, MonitorHandler, SensedTamper,
+    SyscallFilter, TreeControl,
+};
 use af_provenance::ProcessGraph;
 use af_recorder::{FanoutSink, Retention, StreamSink, TraceWriter};
 use anyhow::{bail, Context, Result};
@@ -61,6 +65,18 @@ pub fn run(args: RunArgs) -> Result<i32> {
             agent.signals.len()
         );
     }
+    // The B.5 facts: the monitor names itself, so a rule can ask whether a
+    // signal goes to the firewall, and the sensor facts name the instances
+    // the firewall itself runs with. Both travel inside the session start
+    // event, so a replay answers the same questions from the trace.
+    session.monitor_pid = std::process::id() as Pid;
+    session.sensor = sensor_facts();
+    if let Some(sensor) = &session.sensor {
+        eprintln!(
+            "agent-firewall: in-process sensor active: {} instance(s) registered at start",
+            sensor.instances.len()
+        );
+    }
 
     let policy = load_policy(&args.policy).context("cannot load the rules")?;
     // A rule with a `threshold` block fires again on every action that
@@ -102,6 +118,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         pending_start: None,
         kernel_rules: BTreeSet::new(),
         kernel_denied: Vec::new(),
+        pending_tamper: None,
     };
 
     let capabilities = Monitor::capabilities(syscall_filter);
@@ -120,6 +137,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         capture_input: !args.no_input_capture,
         syscall_filter,
         landlock,
+        monitor_pid: session.monitor_pid,
         ..MonitorConfig::default()
     };
 
@@ -312,6 +330,13 @@ struct FirewallHandler {
     /// The event waits for the identifier of the root process. The value is
     /// `None` after the event went out, so the event goes out one time only.
     pending_start: Option<Vec<MonitorCapability>>,
+    /// A sensed tamper fact that waits for its ruling.
+    ///
+    /// The graph raises the detachment flag of a descendant while the handler
+    /// records an event, and no process waits at a stop at that moment. The
+    /// handler parks the fact here, and the monitor takes it after the state
+    /// change, suspends the tree and hands it to [`FirewallHandler::rule_tamper`].
+    pending_tamper: Option<SensedTamper>,
 }
 
 impl FirewallHandler {
@@ -384,6 +409,21 @@ impl FirewallHandler {
                     detach,
                 },
             ));
+            // The detach is a sensed fact of the firewall's own tree, so a
+            // rule judges it. The fact waits here because no process is held
+            // at this moment; the monitor suspends the tree before the
+            // ruling. Parking instead of asking keeps the recording path free
+            // of any question, also for a session with no tamper rule.
+            if self.pending_tamper.is_none() {
+                self.pending_tamper = Some(SensedTamper {
+                    kind: TamperKind::DetachedDescendant,
+                    pid: unlinked_pid,
+                    detail: format!(
+                        "process {unlinked_pid} left the session tree (sid {}, root sid {})",
+                        detach.sid, detach.root_sid
+                    ),
+                });
+            }
         }
     }
 
@@ -422,6 +462,83 @@ impl FirewallHandler {
             .collect()
     }
 
+    /// Returns the tamper facts that this exec carries, with the evidence
+    /// line of each.
+    ///
+    /// Two facts can exist at an exec stop, and both are keyed to what the
+    /// firewall itself did or installed:
+    ///
+    /// * the monitor killed the same program under the same parent earlier
+    ///   in this session, and the parent started it again;
+    /// * this session runs with the in-process sensor, and the environment
+    ///   of the new program holds no copy of the sensor's preload.
+    ///
+    /// A session without a sensor can never raise the second fact, and a
+    /// session where the firewall killed nothing can never raise the first —
+    /// which is what keeps both inside the interruption budget.
+    fn sensed_at_exec(&self, process: &ProcessInfo, sensed: &ExecSensed) -> Vec<SensedTamper> {
+        let mut facts: Vec<SensedTamper> = Vec::new();
+        if sensed.respawned_after_kill {
+            let name = process
+                .exe
+                .as_deref()
+                .map(Path::new)
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "the killed program".to_string());
+            let parent = process
+                .ppid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "an unknown parent".to_string());
+            facts.push(SensedTamper {
+                kind: TamperKind::KilledSubtreeReturned,
+                pid: process.pid,
+                detail: format!(
+                    "{name} again under parent {parent}, after the firewall killed it in this session"
+                ),
+            });
+        }
+        if let Some(detail) = self.preload_stripped(process) {
+            facts.push(SensedTamper {
+                kind: TamperKind::PreloadStripped,
+                pid: process.pid,
+                detail,
+            });
+        }
+        facts
+    }
+
+    /// Returns the evidence line when the new program inherits no copy of the
+    /// sensor preload, and `None` otherwise.
+    ///
+    /// The question only exists for a session that runs with the in-process
+    /// sensor — the launcher checked its own environment for it. A normal
+    /// session carries no sensor, answers `None` at once, and can never
+    /// raise the fact. A static binary keeps the variable in its environment
+    /// even though the loader ignores it, so it stays quiet too: the fact is
+    /// the removal of the configuration, not the ignorance of it.
+    fn preload_stripped(&self, process: &ProcessInfo) -> Option<String> {
+        let sensor = self.session.sensor.as_ref()?;
+        let sensor_parts: Vec<&str> = sensor
+            .preload
+            .split(':')
+            .filter(|part| !part.is_empty())
+            .collect();
+        let carries = process
+            .env
+            .get("LD_PRELOAD")
+            .map(|value| value.split(':').any(|part| sensor_parts.contains(&part)))
+            .unwrap_or(false);
+        if carries {
+            return None;
+        }
+        Some(format!(
+            "the environment of the new program holds none of the {} sensor librar{} of this session",
+            sensor_parts.len(),
+            if sensor_parts.len() == 1 { "y" } else { "ies" },
+        ))
+    }
+
     /// Evaluates one action against the rules, with the session memory.
     ///
     /// The engine only reads the memory. It reports what it wants written,
@@ -455,6 +572,7 @@ impl FirewallHandler {
         process: &ProcessInfo,
         ancestry: &[ProcessInfo],
         input: Option<&InputSnapshot>,
+        facts: &[SensedTamper],
         scan_script: bool,
         ts: TimestampNanos,
     ) -> (Action, Verdict, Vec<MemoryEffect>) {
@@ -465,6 +583,19 @@ impl FirewallHandler {
         let (verdict, mut wanted) = self.evaluate_one(&exec_action, process, ancestry, ts);
         effects.append(&mut wanted);
         candidates.push((exec_action.clone(), verdict));
+
+        // The tamper facts of this stop are actions of their own, judged with
+        // the same memory at the same time, so a quarantine holds the program
+        // before it runs.
+        for fact in facts {
+            let action = Action::Tamper {
+                kind: fact.kind,
+                detail: fact.detail.clone(),
+            };
+            let (verdict, mut wanted) = self.evaluate_one(&action, process, ancestry, ts);
+            effects.append(&mut wanted);
+            candidates.push((action, verdict));
+        }
 
         if let Some(snapshot) = input {
             for (source, data) in [
@@ -509,6 +640,171 @@ impl FirewallHandler {
             .unwrap_or(exec_action);
 
         (display_action, combined, effects)
+    }
+
+    /// Runs the ruling over a quarantined session.
+    ///
+    /// The flow of `DIRECTION.md` §6: the tree stands still, the evidence is
+    /// shown, the user rules — allow once, an exception for the session, or
+    /// the end of the tree — and the trace holds every step of it like any
+    /// policy decision. `tree` is `None` when the monitor already suspended
+    /// the tree, which is the case for a fact that rose outside a held stop.
+    fn quarantine(
+        &mut self,
+        process: &ProcessInfo,
+        ancestry: &[ProcessInfo],
+        action: &Action,
+        verdict: &Verdict,
+        mut tree: Option<&mut dyn TreeControl>,
+    ) -> Intercept {
+        let matched = verdict
+            .matches
+            .iter()
+            .find(|matched| matched.quarantine)
+            .or_else(|| verdict.top_match())
+            .cloned();
+        let rule_id = matched
+            .as_ref()
+            .map(|m| m.rule_id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let evidence = match &matched {
+            Some(m) => format!("{} — {}", action.summary(), m.title),
+            None => action.summary(),
+        };
+        self.emit(Event::new(
+            self.session.session_id.clone(),
+            process.pid,
+            EventKind::QuarantineStarted {
+                rule: rule_id.clone(),
+                evidence,
+            },
+        ));
+        if let Some(tree) = tree.as_mut() {
+            tree.suspend();
+        }
+        eprintln!("agent-firewall: quarantine: the session tree is suspended until the ruling");
+        self.emit(Event::new(
+            self.session.session_id.clone(),
+            process.pid,
+            EventKind::ApprovalRequested {
+                action: Box::new(action.clone()),
+                rule_id: rule_id.clone(),
+            },
+        ));
+        let started = std::time::Instant::now();
+        let outcome = {
+            let request = ApprovalRequest {
+                session: &self.session,
+                action,
+                process,
+                ancestry,
+                verdict,
+            };
+            self.approver.request(&request)
+        };
+        let waited_ms = started.elapsed().as_millis() as u64;
+        self.emit(Event::new(
+            self.session.session_id.clone(),
+            process.pid,
+            EventKind::ApprovalResolved {
+                rule_id: rule_id.clone(),
+                outcome,
+                waited_ms,
+            },
+        ));
+        if let Some(tree) = tree {
+            match outcome {
+                ApprovalOutcome::TerminateSession => {}
+                _ => tree.resume(),
+            }
+        }
+        self.emit(Event::new(
+            self.session.session_id.clone(),
+            process.pid,
+            EventKind::QuarantineResolved {
+                rule: rule_id,
+                outcome,
+            },
+        ));
+        match outcome {
+            ApprovalOutcome::Allow | ApprovalOutcome::AllowForSession => Intercept::Continue,
+            ApprovalOutcome::Deny => {
+                self.blocked = true;
+                // A quarantine sits on an action that a refusal can stop
+                // completely: a signal that never runs, a program that never
+                // starts. Deny keeps the same meaning it has everywhere else.
+                Intercept::Refuse
+            }
+            ApprovalOutcome::TerminateSession => {
+                self.blocked = true;
+                Intercept::TerminateSession
+            }
+        }
+    }
+
+    /// Runs the ruling over a sensed tamper fact that rose outside a held
+    /// stop.
+    ///
+    /// The monitor has already suspended the tree. The fact becomes an
+    /// action, the rules judge it, and a verdict that needs a decision gets
+    /// the quarantine of [`FirewallHandler::quarantine`]. A fact that no rule
+    /// matches is still evidence: the tamper event and the decision are in
+    /// the trace, and the session continues.
+    fn judge_tamper(&mut self, sensed: SensedTamper) -> Intercept {
+        let pid = sensed.pid;
+        let process = self
+            .graph
+            .process(pid)
+            .unwrap_or_else(|| ProcessInfo::from_pid(pid));
+        let action = Action::Tamper {
+            kind: sensed.kind,
+            detail: sensed.detail.clone(),
+        };
+        self.emit(Event::new(
+            self.session.session_id.clone(),
+            pid,
+            EventKind::Tamper {
+                kind: sensed.kind,
+                detail: sensed.detail,
+            },
+        ));
+        let ancestry = self.ancestry_of(pid, &[]);
+        let ts = self.last_event_ts;
+        let (verdict, effects) = self.evaluate_one(&action, &process, &ancestry, ts);
+        for effect in effects {
+            self.memory.apply(effect, ts);
+        }
+        if !verdict.matches.is_empty() || self.verbose {
+            self.emit(Event::new(
+                self.session.session_id.clone(),
+                pid,
+                EventKind::PolicyDecision {
+                    action: Box::new(action.clone()),
+                    verdict: Box::new(verdict.clone()),
+                    ancestry: ancestry.clone(),
+                },
+            ));
+        }
+        if !verdict.needs_intervention() {
+            return Intercept::Continue;
+        }
+        if self.explain_on_stderr || verdict.decision != af_core::Decision::ApprovalRequired {
+            eprintln!(
+                "\n{}\n",
+                display::explain(&ancestry, &process, &action, &verdict)
+            );
+        }
+        self.asked += 1;
+        if verdict.quarantine {
+            return self.quarantine(&process, &ancestry, &action, &verdict, None);
+        }
+        match verdict.decision {
+            af_core::Decision::Deny | af_core::Decision::Terminate => {
+                self.blocked = true;
+                Intercept::TerminateSession
+            }
+            _ => Intercept::Continue,
+        }
     }
 
     /// Asks the user and turns the answer into an order for the monitor.
@@ -648,27 +944,15 @@ impl FirewallHandler {
 
     /// Resolves a verdict that needs a decision, and remembers the answer.
     ///
-    /// This is where `on_exec` and `on_syscall` converge. `deny` is the
-    /// intercept that a `Decision::Deny` verdict, and a user's refusal,
-    /// produce at the call site — `on_exec` holds the exec itself, so it
-    /// answers `Intercept::Deny`; `on_syscall` holds a system call that has
-    /// not happened yet, so it answers `Intercept::Refuse`.
-    ///
-    /// `always_cache` says whether a non-threshold match should also use the
-    /// `answered` cache. `on_syscall` passes `true`, because a refused call
-    /// comes back and would otherwise ask the same question again.
-    /// `on_exec` passes `false`, because two different exec actions are two
-    /// different questions, and the caller must keep asking about them —
-    /// only a threshold match is cached there. A threshold match is always
-    /// cached, whatever `always_cache` says.
+    /// This is where `on_exec` and `on_syscall` converge; [`Held`] carries
+    /// what differs between the two stops.
     fn resolve(
         &mut self,
         process: &ProcessInfo,
         ancestry: &[ProcessInfo],
         action: &Action,
         verdict: &Verdict,
-        deny: Intercept,
-        always_cache: bool,
+        held: Held<'_>,
     ) -> Intercept {
         // The kernel floor may already have answered this verdict. A rule
         // whose class the kernel enforces needs no question: the kernel
@@ -697,7 +981,7 @@ impl FirewallHandler {
             return Intercept::Continue;
         }
         let (key, is_threshold) = self.answer_key(action, verdict);
-        let cached = always_cache || is_threshold;
+        let cached = held.caches || is_threshold;
         // Every held action is a decision of this session, whether the session
         // asked about it or repeated an earlier answer. The two counts are
         // separate, because "how many actions needed a decision" and "how many
@@ -716,17 +1000,29 @@ impl FirewallHandler {
                 display::explain(ancestry, process, action, verdict)
             );
         }
+        // A rule that asks for a quarantine gets one: the tree stands still
+        // while the user reads the evidence and rules. One question, one
+        // ruling, and the whole exchange is in the trace like any policy
+        // decision. A remembered answer never suspends anything — the ruling
+        // was taken, and the session repeats it.
+        if verdict.quarantine {
+            let answer = self.quarantine(process, ancestry, action, verdict, Some(held.tree));
+            if cached {
+                self.answered.insert(key, answer);
+            }
+            return answer;
+        }
         let answer = match verdict.decision {
             af_core::Decision::Deny => {
                 self.blocked = true;
-                deny
+                held.deny
             }
             af_core::Decision::Terminate => {
                 self.blocked = true;
                 Intercept::TerminateSession
             }
             _ => match self.ask(process, ancestry, action, verdict) {
-                Intercept::Deny => deny,
+                Intercept::Deny => held.deny,
                 other => other,
             },
         };
@@ -735,6 +1031,21 @@ impl FirewallHandler {
         }
         answer
     }
+}
+
+/// What differs between the two stops that wait for a decision.
+///
+/// `deny` is the intercept that a `Decision::Deny` verdict, and a user's
+/// refusal, produce at the stop — an exec holds the exec itself, so it
+/// answers `Intercept::Deny`; a system call has not happened yet, so it
+/// answers `Intercept::Refuse`. `caches` says whether a non-threshold match
+/// may reuse the answer of the session: a refused call comes back and would
+/// otherwise ask the same question again, while two different exec actions
+/// are two different questions. `tree` carries the orders of a quarantine.
+struct Held<'a> {
+    deny: Intercept,
+    caches: bool,
+    tree: &'a mut dyn TreeControl,
 }
 
 impl MonitorHandler for FirewallHandler {
@@ -750,11 +1061,21 @@ impl MonitorHandler for FirewallHandler {
         self.start_session();
     }
 
+    fn take_tamper(&mut self) -> Option<SensedTamper> {
+        self.pending_tamper.take()
+    }
+
+    fn rule_tamper(&mut self, sensed: SensedTamper) -> Intercept {
+        self.judge_tamper(sensed)
+    }
+
     fn on_exec(
         &mut self,
         process: &ProcessInfo,
         ancestry_pids: &[Pid],
         input: Option<&InputSnapshot>,
+        sensed: &ExecSensed,
+        tree: &mut dyn TreeControl,
     ) -> Intercept {
         // The recorded event keeps the true facts of the process. The policy
         // engine judges the program that the process really runs, which is
@@ -767,6 +1088,20 @@ impl MonitorHandler for FirewallHandler {
         // script can skip. The test must read the true interpreter, because
         // the judged facts name the script and not the shell.
         let scan_script = !normalize::is_shell(process.program_name());
+        // The sensed facts of this stop become events first — the trace holds
+        // the attempt whatever the rules say — and actions right after, so a
+        // quarantine can hold this program before it runs.
+        let facts = self.sensed_at_exec(&judged, sensed);
+        for fact in &facts {
+            self.emit(Event::new(
+                self.session.session_id.clone(),
+                process.pid,
+                EventKind::Tamper {
+                    kind: fact.kind,
+                    detail: fact.detail.clone(),
+                },
+            ));
+        }
         let ancestry = self.ancestry_of(process.pid, ancestry_pids);
         // The exec is judged at the time of its own event, and never at the
         // time of the newest event. The monitor emits the content of standard
@@ -776,7 +1111,8 @@ impl MonitorHandler for FirewallHandler {
             Some((pid, ts)) if pid == process.pid => ts,
             _ => self.last_event_ts,
         };
-        let (action, verdict, effects) = self.evaluate(&judged, &ancestry, input, scan_script, ts);
+        let (action, verdict, effects) =
+            self.evaluate(&judged, &ancestry, input, &facts, scan_script, ts);
         // The engine only reads the memory. The handler writes it, in event
         // order, so the replay of this trace reaches the same state.
         for effect in effects {
@@ -808,12 +1144,21 @@ impl MonitorHandler for FirewallHandler {
             &ancestry,
             &action,
             &verdict,
-            Intercept::Deny,
-            false,
+            Held {
+                deny: Intercept::Deny,
+                caches: false,
+                tree,
+            },
         )
     }
 
-    fn on_syscall(&mut self, pid: Pid, action: &Action, ancestry_pids: &[Pid]) -> Intercept {
+    fn on_syscall(
+        &mut self,
+        pid: Pid,
+        action: &Action,
+        ancestry_pids: &[Pid],
+        tree: &mut dyn TreeControl,
+    ) -> Intercept {
         // The process is already known from its exec event, so the handler
         // reads it from the graph instead of asking `/proc` again. A session
         // makes many of these stops and every one of them holds a process.
@@ -858,8 +1203,11 @@ impl MonitorHandler for FirewallHandler {
             &ancestry,
             action,
             &verdict,
-            Intercept::Refuse,
-            true,
+            Held {
+                deny: Intercept::Refuse,
+                caches: true,
+                tree,
+            },
         )
     }
 }
@@ -1000,6 +1348,68 @@ fn git_remotes(cwd: &Path) -> BTreeSet<String> {
     out
 }
 
+/// Reads what the launcher knows about the in-process sensor of this run.
+///
+/// The sensor of `research/spikes/inprocess/` is a research instrument that
+/// the caller installs through the environment, so the launcher reads its own
+/// environment to learn whether a session runs with one: the `LD_PRELOAD`
+/// that carried the shim in, and the registration record the shim appends
+/// to. The launcher takes one snapshot at start; whether an instance still
+/// speaks is the correlation question of a later milestone.
+///
+/// A run with no sensor returns `None`, and every rule that keys on sensor
+/// instances then answers nothing — the quiet, correct answer for a normal
+/// session.
+fn sensor_facts() -> Option<SensorMeta> {
+    let preload = std::env::var("LD_PRELOAD").ok()?;
+    if !preload.split(':').any(|path| {
+        Path::new(path)
+            .file_name()
+            .is_some_and(|name| name == "libafsensor.so")
+    }) {
+        return None;
+    }
+    let instances = std::env::var_os("AF_SENSOR_REG")
+        .map(PathBuf::from)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| sensor_instances(&text))
+        .unwrap_or_default();
+    Some(SensorMeta { preload, instances })
+}
+
+/// Reads the process identifiers out of a registration record.
+///
+/// The record of the research sensor holds one JSON object per line, and a
+/// line of type `sensor_register` names a live instance in its `pid` field,
+/// while a line of type `sensor_exit` ends one. The reader keeps the order
+/// of the file, so the last word about a process wins. A line that is not
+/// valid JSON is not from the sensor, and the reader skips it.
+fn sensor_instances(record: &str) -> Vec<Pid> {
+    let mut live: Vec<Pid> = Vec::new();
+    for line in record.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(pid) = value
+            .get("pid")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|pid| pid.try_into().ok())
+        else {
+            continue;
+        };
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("sensor_register") => {
+                if !live.contains(&pid) {
+                    live.push(pid);
+                }
+            }
+            Some("sensor_exit") => live.retain(|live| *live != pid),
+            _ => {}
+        }
+    }
+    live
+}
+
 /// Makes an exec action from the facts of a process.
 fn exec_action(process: &ProcessInfo) -> Action {
     Action::Exec {
@@ -1018,6 +1428,15 @@ mod tests {
     use super::*;
     use af_approval::ScriptedApprover;
     use af_policy::PolicySet;
+
+    /// A tree control that records nothing and orders nothing, for the tests
+    /// of the decision path.
+    struct NoTree;
+
+    impl TreeControl for NoTree {
+        fn suspend(&mut self) {}
+        fn resume(&mut self) {}
+    }
 
     /// A sink that keeps every event it receives, for a test to inspect.
     ///
@@ -1168,6 +1587,7 @@ rules:
             pending_start: None,
             kernel_rules: BTreeSet::new(),
             kernel_denied: Vec::new(),
+            pending_tamper: None,
         };
         (handler, events)
     }
@@ -1195,7 +1615,13 @@ rules:
 
         // The first delete does not reach the threshold, so it stays quiet
         // and asks nobody.
-        let first = handler.on_exec(&rm_process(400, "a"), &[], None);
+        let first = handler.on_exec(
+            &rm_process(400, "a"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
         assert_eq!(first, Intercept::Continue);
         assert_eq!(handler.interventions, 0);
         assert_eq!(handler.asked, 0);
@@ -1204,7 +1630,13 @@ rules:
         // path, exactly like a runaway loop. The session must ask about it
         // one time and repeat that answer for the other two fires.
         for (offset, suffix) in ["b", "c", "d"].into_iter().enumerate() {
-            let outcome = handler.on_exec(&rm_process(401 + offset as i32, suffix), &[], None);
+            let outcome = handler.on_exec(
+                &rm_process(401 + offset as i32, suffix),
+                &[],
+                None,
+                &ExecSensed::default(),
+                &mut NoTree,
+            );
             assert_eq!(
                 outcome,
                 Intercept::Continue,
@@ -1226,9 +1658,27 @@ rules:
     fn a_threshold_rule_remembers_a_refusal_too() {
         let (mut handler, _events) = handler_for(THRESHOLD_POLICY, vec![ApprovalOutcome::Deny]);
 
-        let first = handler.on_exec(&rm_process(400, "a"), &[], None);
-        let second = handler.on_exec(&rm_process(401, "b"), &[], None);
-        let third = handler.on_exec(&rm_process(402, "c"), &[], None);
+        let first = handler.on_exec(
+            &rm_process(400, "a"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
+        let second = handler.on_exec(
+            &rm_process(401, "b"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
+        let third = handler.on_exec(
+            &rm_process(402, "c"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
 
         assert_eq!(
             first,
@@ -1257,11 +1707,29 @@ rules:
         let (mut handler, events) = handler_for(THRESHOLD_POLICY, vec![ApprovalOutcome::Allow]);
 
         // The first delete stays below the threshold and matches no rule.
-        handler.on_exec(&rm_process(400, "a"), &[], None);
+        handler.on_exec(
+            &rm_process(400, "a"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
         // The next two fire. The second one repeats the session's answer
         // silently, but the decision itself must still leave a trace.
-        handler.on_exec(&rm_process(401, "b"), &[], None);
-        handler.on_exec(&rm_process(402, "c"), &[], None);
+        handler.on_exec(
+            &rm_process(401, "b"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
+        handler.on_exec(
+            &rm_process(402, "c"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
 
         let events = events.lock().unwrap();
         let policy_decisions = events
@@ -1306,8 +1774,20 @@ rules:
 
         // Two ordinary deletes. The second crosses the threshold and the
         // session answers it one time.
-        handler.on_exec(&rm_process(400, "a"), &[], None);
-        handler.on_exec(&rm_process(401, "b"), &[], None);
+        handler.on_exec(
+            &rm_process(400, "a"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
+        handler.on_exec(
+            &rm_process(401, "b"),
+            &[],
+            None,
+            &ExecSensed::default(),
+            &mut NoTree,
+        );
         assert_eq!(handler.asked, 1, "the burst is one question");
 
         // The third delete removes the state of the agent, so the sharper
@@ -1319,7 +1799,7 @@ rules:
             "-rf".to_string(),
             "/home/dev/.agent-state".to_string(),
         ];
-        let answer = handler.on_exec(&wipe, &[], None);
+        let answer = handler.on_exec(&wipe, &[], None, &ExecSensed::default(), &mut NoTree);
 
         assert_eq!(
             handler.asked, 2,
@@ -1352,6 +1832,7 @@ rules:
                     category: "test".to_string(),
                     risk: af_core::RiskLevel::ApprovalRequired,
                     decision: af_core::Decision::ApprovalRequired,
+                    quarantine: false,
                     reason: "A burst of deletes ran.".to_string(),
                 },
                 af_core::RuleMatch {
@@ -1360,6 +1841,7 @@ rules:
                     category: "test".to_string(),
                     risk: af_core::RiskLevel::ApprovalRequired,
                     decision: af_core::Decision::ApprovalRequired,
+                    quarantine: false,
                     reason: "The command removes the state of the agent itself.".to_string(),
                 },
             ]),
@@ -1382,8 +1864,8 @@ rules:
             path: "/home/dev/.aws/credentials".to_string(),
             write: false,
         };
-        handler.on_syscall(500, &open, &[]);
-        handler.on_syscall(500, &open, &[]);
+        handler.on_syscall(500, &open, &[], &mut NoTree);
+        handler.on_syscall(500, &open, &[], &mut NoTree);
         assert_eq!(
             handler.asked, 1,
             "the same rules and the same action stay one question"
@@ -1404,6 +1886,7 @@ rules:
                 write: false,
             },
             &[],
+            &mut NoTree,
         );
         let second = handler.on_syscall(
             500,
@@ -1412,6 +1895,7 @@ rules:
                 write: false,
             },
             &[],
+            &mut NoTree,
         );
 
         assert_eq!(first, Intercept::Continue);
@@ -1434,8 +1918,8 @@ rules:
             path: "/home/dev/.aws/credentials".to_string(),
             write: false,
         };
-        let first = handler.on_syscall(500, &action, &[]);
-        let second = handler.on_syscall(500, &action, &[]);
+        let first = handler.on_syscall(500, &action, &[], &mut NoTree);
+        let second = handler.on_syscall(500, &action, &[], &mut NoTree);
 
         assert_eq!(first, Intercept::Continue);
         assert_eq!(
@@ -1447,5 +1931,205 @@ rules:
             handler.interventions, 2,
             "both opens needed a decision, and the count of decisions says so"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The tamper facts and the quarantine flow of M4.
+    // ------------------------------------------------------------------
+
+    /// A rule that quarantines, in the shape of `policies/tamper.yaml`.
+    const QUARANTINE_POLICY: &str = "
+version: 1
+name: test.quarantine
+description: A rule that suspends the tree, for the ruling test.
+rules:
+  - id: test.tamper.quarantine
+    title: Test quarantine
+    category: test
+    risk: approval_required
+    decision: approval_required
+    quarantine: true
+    reason: The rule asks for a quarantine.
+    match:
+      action: signal_send
+      signal_target: [monitor]
+    tests:
+      - name: a signal to the monitor quarantines
+        expect: approval_required
+        monitor_pid: 900
+        process: { pid: 100, comm: payload, argv: [payload] }
+        ancestry: [{ pid: 50, comm: bash }]
+        signal_send: { target: 900, signal: 9 }
+      - name: a signal to another process stays quiet
+        expect: allow
+        monitor_pid: 900
+        process: { pid: 100, comm: payload, argv: [payload] }
+        ancestry: [{ pid: 50, comm: bash }]
+        signal_send: { target: 4321, signal: 15 }
+";
+
+    /// A tree control that remembers the orders it carried out.
+    #[derive(Default)]
+    struct RecordingTree {
+        suspended: usize,
+        resumed: usize,
+    }
+
+    impl TreeControl for RecordingTree {
+        fn suspend(&mut self) {
+            self.suspended += 1;
+        }
+        fn resume(&mut self) {
+            self.resumed += 1;
+        }
+    }
+
+    #[test]
+    fn a_quarantine_rule_suspends_the_tree_once_and_takes_one_ruling() {
+        let (mut handler, events) = handler_for(
+            QUARANTINE_POLICY,
+            vec![ApprovalOutcome::Allow, ApprovalOutcome::Deny],
+        );
+        // The B.5 fact: the session names its monitor.
+        handler.session.monitor_pid = 900;
+        let mut tree = RecordingTree::default();
+
+        let signal = Action::SignalSend {
+            target: 900,
+            signal: 9,
+        };
+        let first = handler.on_syscall(100, &signal, &[50], &mut tree);
+        let second = handler.on_syscall(100, &signal, &[50], &mut tree);
+
+        assert_eq!(
+            first,
+            Intercept::Continue,
+            "the allow of the ruling lets the call run"
+        );
+        assert_eq!(handler.asked, 1, "one ruling, one question");
+        assert_eq!(
+            tree.suspended, 1,
+            "the tree stands still exactly while the user rules"
+        );
+        assert_eq!(tree.resumed, 1, "the tree runs again after the ruling");
+        // A repeated fact repeats the ruling without asking and without
+        // suspending anything: the answer of the session holds.
+        assert_eq!(
+            second,
+            Intercept::Continue,
+            "the ruling of the session is the answer of every later fire"
+        );
+        assert_eq!(handler.asked, 1, "the answer of the session holds");
+        assert_eq!(tree.suspended, 1);
+
+        let events = events.lock().unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind_label()).collect();
+        // The monitor writes the `signal_send` event before it calls the
+        // handler, so the trace of a live session opens with it; this test
+        // drives the handler directly and sees the exchange itself.
+        assert_eq!(
+            kinds,
+            vec![
+                "policy_decision",
+                "quarantine_started",
+                "approval_requested",
+                "approval_resolved",
+                "quarantine_resolved",
+                "policy_decision",
+            ],
+            "the whole exchange is in the trace like any policy decision:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn a_signal_to_another_process_never_wakes_the_quarantine() {
+        let (mut handler, events) = handler_for(QUARANTINE_POLICY, vec![]);
+        handler.session.monitor_pid = 900;
+        let mut tree = RecordingTree::default();
+
+        let other = Action::SignalSend {
+            target: 4321,
+            signal: 15,
+        };
+        let answer = handler.on_syscall(100, &other, &[50], &mut tree);
+
+        assert_eq!(answer, Intercept::Continue);
+        assert_eq!(handler.asked, 0, "the rule stays quiet");
+        assert_eq!(tree.suspended, 0);
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|e| e.kind_label() != "quarantine_started"),
+            "no quarantine on a signal the rule does not key on"
+        );
+    }
+
+    #[test]
+    fn the_sensor_registration_record_names_the_live_instances() {
+        let record = "\
+{\"type\":\"sensor_register\",\"instance\":\"a\",\"pid\":100,\"ppid\":1,\"exe\":\"/bin/sh\",\"session\":\"s\",\"ts\":1}
+{\"type\":\"sensor_register\",\"instance\":\"b\",\"pid\":200,\"ppid\":100,\"exe\":\"/bin/sh\",\"session\":\"s\",\"ts\":2}
+{\"type\":\"sensor_heartbeat\",\"instance\":\"a\",\"pid\":100,\"ppid\":1,\"exe\":\"/bin/sh\",\"session\":\"s\",\"ts\":3}
+not json at all
+{\"type\":\"sensor_exit\",\"instance\":\"a\",\"pid\":100,\"ppid\":1,\"exe\":\"/bin/sh\",\"session\":\"s\",\"ts\":4}
+";
+        assert_eq!(sensor_instances(record), vec![200]);
+        assert_eq!(sensor_instances(""), Vec::<Pid>::new());
+    }
+
+    #[test]
+    fn the_preload_fact_only_exists_for_a_session_that_carries_a_sensor() {
+        let (mut handler, _events) = handler_for(QUARANTINE_POLICY, vec![]);
+
+        // No sensor: the question cannot exist.
+        let mut child = rm_process(400, "a");
+        child.env.remove("LD_PRELOAD");
+        assert!(
+            handler.preload_stripped(&child).is_none(),
+            "a session without a sensor never raises the fact"
+        );
+
+        // A sensor, and a child that keeps the preload: quiet.
+        handler.session.sensor = Some(af_core::SensorMeta {
+            preload: "/research/spikes/inprocess/libafsensor.so".to_string(),
+            instances: vec![400],
+        });
+        child.env.insert(
+            "LD_PRELOAD".to_string(),
+            "/research/spikes/inprocess/libafsensor.so".to_string(),
+        );
+        assert!(
+            handler.preload_stripped(&child).is_none(),
+            "a child that carries the preload stays quiet"
+        );
+
+        // A sensor, and a child with no copy of it: the fact with evidence.
+        child.env.remove("LD_PRELOAD");
+        let detail = handler
+            .preload_stripped(&child)
+            .expect("the removal is sensed");
+        assert!(
+            detail.contains("none of the 1 sensor library"),
+            "the evidence names what was removed: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_static_binary_that_ignores_the_preload_still_carries_it() {
+        let (mut handler, _events) = handler_for(QUARANTINE_POLICY, vec![]);
+        handler.session.sensor = Some(af_core::SensorMeta {
+            preload: "/research/spikes/inprocess/libafsensor.so".to_string(),
+            instances: vec![],
+        });
+        // A static binary keeps the variable in its environment even though
+        // the loader never reads it: the removal is the fact, not the
+        // ignorance.
+        let mut child = rm_process(400, "a");
+        child.env.insert(
+            "LD_PRELOAD".to_string(),
+            "/research/spikes/inprocess/libafsensor.so".to_string(),
+        );
+        assert!(handler.preload_stripped(&child).is_none());
     }
 }

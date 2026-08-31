@@ -8,6 +8,21 @@ use af_core::{
 /// How many characters of free text one line shows.
 const MAX_TEXT: usize = 120;
 
+/// Returns the name of a signal number, for the line a person reads.
+fn signal_name(signal: i32) -> String {
+    match signal {
+        1 => "SIGHUP".to_string(),
+        2 => "SIGINT".to_string(),
+        3 => "SIGQUIT".to_string(),
+        6 => "SIGABRT".to_string(),
+        9 => "SIGKILL".to_string(),
+        15 => "SIGTERM".to_string(),
+        18 => "SIGCONT".to_string(),
+        19 => "SIGSTOP".to_string(),
+        other => format!("signal {other}"),
+    }
+}
+
 /// Returns one line that describes an event.
 ///
 /// The line is safe for a terminal: the function removes every control
@@ -118,6 +133,17 @@ fn summary(event: &Event) -> String {
             Some(host) => format!("{host} ({addr}:{port})"),
             None => format!("{addr}:{port}"),
         },
+        EventKind::SignalSend { target, signal } => {
+            let name = signal_name(*signal);
+            format!("send {name} to process {target}")
+        }
+        EventKind::Tamper { kind, detail } => format!("{kind}: {detail}"),
+        EventKind::QuarantineStarted { rule, evidence } => {
+            format!("suspended by {rule}: {evidence}")
+        }
+        EventKind::QuarantineResolved { rule, outcome } => {
+            format!("{rule}: {}", outcome.label())
+        }
         EventKind::FileRead { path, data } => {
             format!("read {path}: {}", af_core::display::truncate(data, 60))
         }

@@ -234,6 +234,17 @@ fn check_rule(rule: &CompiledRule, remembered: &BTreeSet<&str>, out: &mut Vec<Di
         );
     }
 
+    if rule.quarantine && rule.decision != Decision::ApprovalRequired {
+        add(
+            Severity::Error,
+            format!(
+                "the rule asks for a quarantine, but the decision `{}` needs no ruling; \
+                 a quarantine rule decides `approval_required`",
+                rule.decision
+            ),
+        );
+    }
+
     if rule.risk >= RiskLevel::ApprovalRequired && !rule.decision.needs_intervention() {
         add(
             Severity::Warning,

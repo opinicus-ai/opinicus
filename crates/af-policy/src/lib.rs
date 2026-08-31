@@ -72,6 +72,8 @@ pub(crate) struct CompiledRule {
     pub(crate) risk: RiskLevel,
     /// What the rule wants the firewall to do.
     pub(crate) decision: Decision,
+    /// True when the rule wants the session tree suspended for the ruling.
+    pub(crate) quarantine: bool,
     /// Why the rule matched, in words the user can read.
     pub(crate) reason: String,
     /// Links that explain the danger.
@@ -177,6 +179,7 @@ impl CompiledRule {
             risk: self.risk,
             decision: self.decision,
             reason: self.reason.clone(),
+            quarantine: self.quarantine,
         }
     }
 
@@ -435,7 +438,9 @@ fn compile_rule(rule: &RuleSource, source: &str) -> Result<CompiledRule> {
     for test in &rule.tests {
         let count = usize::from(test.file_open.is_some())
             + usize::from(test.connect.is_some())
-            + usize::from(test.input.is_some());
+            + usize::from(test.input.is_some())
+            + usize::from(test.signal_send.is_some())
+            + usize::from(test.tamper.is_some());
         if count > 1 {
             return Err(Error::policy(format!(
                 "{source}: rule `{}`: test `{}` gives more than one action",
@@ -445,7 +450,9 @@ fn compile_rule(rule: &RuleSource, source: &str) -> Result<CompiledRule> {
         for (index, step) in test.history.iter().enumerate() {
             let count = usize::from(step.file_open.is_some())
                 + usize::from(step.connect.is_some())
-                + usize::from(step.input.is_some());
+                + usize::from(step.input.is_some())
+                + usize::from(step.signal_send.is_some())
+                + usize::from(step.tamper.is_some());
             if count > 1 {
                 return Err(Error::policy(format!(
                     "{source}: rule `{}`: test `{}`: history step {index} gives more than one action",
@@ -498,6 +505,7 @@ fn compile_rule(rule: &RuleSource, source: &str) -> Result<CompiledRule> {
         category: rule.category.clone(),
         risk: rule.risk,
         decision: rule.decision,
+        quarantine: rule.quarantine,
         reason: rule.reason.clone(),
         references: rule.references.clone(),
         enabled: rule.enabled,

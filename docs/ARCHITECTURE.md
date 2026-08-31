@@ -178,12 +178,21 @@ running program and the moment the kernel makes that call.
    descendant needs an install of its own.
 
 2. **The kernel decides whether to hold the call.** The BPF program answers
-   `SECCOMP_RET_TRACE` for `connect`, for `creat`, for `openat2`, and for
-   `open` and `openat` when the `flags` argument carries a bit of
-   `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND`. Everything else runs with no
-   supervisor in the loop. **That decision is made in the kernel on the call
-   number and on a scalar, so nothing can race it.** `--syscall-filter
-   all-opens` adds a second rule that holds every open.
+   `SECCOMP_RET_TRACE` for `connect`, for `creat`, for `openat2`, for `kill`,
+   `tkill` and `tgkill` when the target is the monitor itself (or every
+   process, `kill(-1)`), and for `open` and `openat` when the `flags`
+   argument carries a bit of `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND`.
+   Everything else runs with no supervisor in the loop. **That decision is
+   made in the kernel on the call number and on a scalar, so nothing can
+   race it.** `--syscall-filter all-opens` adds a second rule that holds
+   every open.
+
+   The signal rules are the tamper half of this layer (section 3d): the
+   kernel compares the target identifier with the identifier of the monitor
+   **before** the call runs, so a `SIGKILL` aimed at the firewall never
+   happens unobserved. A signal to anything else is not held, which is why
+   the rules cost a normal session nothing — no program signals the monitor
+   unless it looked for it.
 
    The filter never holds `execve`. The exec stop of section 3 already
    reports one, and a filter that held `execve` would break its own first
@@ -354,8 +363,8 @@ that ships with it.
 
 ### What the floor carries, and what it does not
 
-The pack holds 147 rules today; 70 stop the user. The floor answers 6 of the
-61 questions the pack can ask (`filesystem.etc.write`,
+The pack holds 152 rules today; 73 stop the user. The floor answers 6 of the
+64 questions the pack can ask (`filesystem.etc.write`,
 `filesystem.delete.system-path`, `filesystem.delete.mount-root`,
 `filesystem.credentials.write` on the paths it hides,
 `filesystem.device.truncate`, `process.signal.kill-everything`) and backs 3
@@ -387,6 +396,78 @@ a question whose answer cannot take effect.
 * Landlock does not mediate `chmod` or ioctls, sees no program name, no
   argument and no host, and an `execve` from an anonymous file descriptor
   runs (measured). Network rights are not handled at all.
+
+## 3d. The path of one tamper fact
+
+The firewall senses an attempt against its own visibility, a rule judges
+the fact, and a rule that asks for it suspends the whole tree until a
+person rules. The measurement behind this section is
+`research/bypass/tamper.sh` and the M4 section of
+`research/bypass/FINDINGS.md`.
+
+1. **The launcher names itself and its sensor.** The session metadata
+   carries the process identifier of the monitor (`monitor_pid`) and, when a
+   run carries the in-process sensor of `research/spikes/inprocess/`, the
+   preload value and the instances that had registered at launch
+   (`sensor`). These are the B.5 facts: what a tamper rule keys on is always
+   a process of the firewall itself, never the absence of instrumentation on
+   a foreign process.
+
+2. **Four facts are sensed, each at the place that can measure it.**
+
+   | fact | sensed by | sensed at |
+   | --- | --- | --- |
+   | a signal to the monitor | the kernel filter (§3a) | the system-call stop, before the call runs |
+   | a descendant that left the tree | the provenance graph (§3b) | the event that reveals the differing session id |
+   | a killed program that came back | the monitor | the exec stop of the same program under the same parent |
+   | a child with no sensor preload | the launcher's facts and the exec environment | the exec stop |
+
+   A fifth fact — a process that outlived the session root — is liveness,
+   not tamper: the monitor reports it at the end of the session root.
+
+3. **A rule judges every fact.** Each fact becomes an action of the schema
+   (`signal_send` or `tamper`), reaches the same engine as an exec, and the
+   rules of `policies/tamper.yaml` decide. Three of them carry
+   `quarantine: true`. Two report instead, because a normal session makes
+   the same shape: `git maintenance run --detach` detaches on every commit,
+   and the corpus of M1 proved the question wrong — the interruption budget
+   wins over the severity.
+
+4. **A quarantine suspends the tree, shows the evidence and takes one
+   ruling.** The monitor sends `SIGSTOP` to every process of the session and
+   holds the group stops, the session prints the evidence chain, and the
+   user answers once: allow once, an exception for the session, or the end
+   of the tree. A refusal lets the call fail where a call exists — a signal
+   to the monitor returns `EPERM` to the sender, and the monitor lives. The
+   whole exchange is in the trace like any policy decision:
+   `tamper`/`signal_send`, `policy_decision`, `quarantine_started`,
+   `approval_requested`, `approval_resolved`, `quarantine_resolved`.
+
+5. **The recorder writes the evidence through.** Every evidence event and
+   every event that names a process of the session — the fork, the exec, the
+   end — is flushed to the kernel as it happens. A monitor that an attack
+   kills takes no cleanup path with it; the trace keeps what was recorded.
+   Measured with the filter and the floor both off, where the `SIGKILL`
+   succeeds: the trace of the killed monitor holds the `process_exec` of the
+   attacker where M1 measured exactly one line.
+
+### What the tamper layer does not cover
+
+* A signal through `pidfd_send_signal` is not held: the kernel filter
+  cannot follow a file descriptor. The floor's signal scope still refuses
+  it on a machine that offers Landlock ABI 6.
+* A signal to a whole process group is not held: the monitor shares its
+  group with the session, so such a signal kills the sender too, and the
+  command that shaped it is judged at the exec boundary.
+* With `--syscall-filter off` no signal is sensed at all. The kernel floor
+  still refuses a signal from the session to the monitor on a machine with
+  Landlock ABI 6, and the durable recorder keeps the process events, but no
+  tamper event exists in that mode.
+* A killed program that comes back under a **different** parent is a new
+  program, not a respawn: the fact keys on the pair of the parent and the
+  executable, because a process identifier is gone once the process died.
+* The sensor instance list is a snapshot from launch. Whether an instance
+  still speaks is the correlation question of M5.
 
 ## 4. The enforcement boundary
 
@@ -621,14 +702,14 @@ rather than one interception mechanism.
 | sensor | state | what it adds |
 | --- | --- | --- |
 | exec `ptrace` | **ships** (§3) | provenance, hold-at-exec, session tree |
-| `seccomp` `RET_TRACE` filter | **ships** (§3a) | file opens and connections inside a running program |
+| `seccomp` `RET_TRACE` filter | **ships** (§3a) | file opens and connections inside a running program; a signal to the monitor itself, held before it runs (§3d) |
 | in-process instrumentation (`LD_PRELOAD`) | **measured sensor** — spike of 2026-08-31 (`research/spikes/inprocess/`), not product-integrated | semantics close to the agent: about-to-exec, small-file content, delete/rename, dlopen, environment; durable instance registration for M4/M5; never a boundary |
 | correlation of expected vs observed | planned | a discrepancy between the in-process view and this document's sensors is a high-severity signal on its own (DIRECTION.md §3.4) |
 | Landlock | **ships** (§3c) | in-kernel "always no" rules; removes the question ([DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4) |
 | `fanotify` / eBPF | enterprise tier | privileged observation, later (DIRECTION.md §10) |
 | Windows hooks (Win32/`ntdll`) | planned track | the Windows counterpart of the in-process sensor, under the same hook-visibility rule |
 
-Four additions land in this architecture without changing sections 1–7:
+Five additions land in this architecture without changing sections 1–7:
 
 * **The kernel floor — shipped (§3c).** Landlock turns the "always no" rule
   classes of the built-in pack into kernel enforcement before the first
@@ -639,11 +720,16 @@ Four additions land in this architecture without changing sections 1–7:
   graph that already exists, every event carries it, and a descendant that
   detaches is flagged `unlinked` — the B.6 liveness fact — and never as
   foreign (DIRECTION.md §4, §5).
-* **Tamper detection and quarantine.** The fail-closed behaviors that already
-  exist — `PTRACE_O_EXITKILL`, the `ENOSYS` a traced call gets when no
-  monitor answers — become sensed states with their own high-severity events,
-  and the per-action approval flow of §3 grows a tree-level quarantine:
-  suspend, show evidence, let the user rule (DIRECTION.md §6).
+* **Tamper detection and quarantine — shipped (§3d).** A signal to the
+  monitor is held by the kernel filter before it runs; a detached
+  descendant, a killed program that came back, a child with no sensor
+  preload and a process that outlived the session are sensed facts of the
+  schema; the rules of the tamper pack judge them; a rule that asks for it
+  suspends the whole tree, shows the evidence and takes one ruling; and the
+  recorder writes the evidence through, so a killed monitor leaves the
+  record instead of erasing it. The interruption budget governs every rule
+  of the pack: two facts report instead of asking, because normal tooling
+  makes their shape.
 * **Event provenance for research.** The recorder of §5 already writes the
   normalized schema; the telemetry pipeline (DIRECTION.md §7) is a redacting
   packaging step in front of it, not a second event format.

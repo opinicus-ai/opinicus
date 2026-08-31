@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     decision::Verdict,
     identity::{AgentTag, SessionDetach},
-    process::{Action, ProcessInfo},
+    process::{Action, ProcessInfo, TamperKind},
     session::{SessionId, SessionMeta},
     traits::ApprovalOutcome,
     Pid, TimestampNanos,
@@ -197,6 +197,28 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
     },
+    /// A process asked the kernel to send a signal to a process of the
+    /// firewall.
+    ///
+    /// The kernel filter holds this call before it happens, and only when
+    /// the target is the monitor. The call has not run when this event is
+    /// written, so a refusal stops the signal completely.
+    SignalSend {
+        /// Process identifier that receives the signal.
+        target: Pid,
+        /// Signal number.
+        signal: i32,
+    },
+    /// The firewall sensed a state of its own visibility that a rule judges.
+    ///
+    /// The event is evidence, whatever the rules say about it: a trace holds
+    /// the attempt also in a session that carries no tamper rule.
+    Tamper {
+        /// Which shape was sensed.
+        kind: TamperKind,
+        /// The measured facts behind the sense, one line.
+        detail: String,
+    },
     /// A process read the content of a small file into memory.
     ///
     /// The in-process sensor reports this. The shipped monitor does not
@@ -276,6 +298,29 @@ pub enum EventKind {
         #[serde(default)]
         waited_ms: u64,
     },
+    /// The firewall suspended the whole session tree and waits for a ruling.
+    ///
+    /// A quarantine is the most expensive question there is, so only a rule
+    /// that names `quarantine: true` starts one. The event names the rule,
+    /// the evidence line names what was sensed, and the ruling follows as an
+    /// ordinary approval pair.
+    QuarantineStarted {
+        /// Identifier of the rule that holds the session.
+        rule: String,
+        /// The evidence the user rules on, one line.
+        evidence: String,
+    },
+    /// The ruling over a quarantined tree.
+    ///
+    /// The outcome is the answer of the user: allow once, an exception for
+    /// the session, or the end of the tree. After it the tree runs again, or
+    /// is gone.
+    QuarantineResolved {
+        /// Identifier of the rule that held the session.
+        rule: String,
+        /// The ruling.
+        outcome: ApprovalOutcome,
+    },
     /// The kernel floor of this session became active.
     ///
     /// The child enacted a Landlock ruleset before its first program ran, so
@@ -334,6 +379,8 @@ impl EventKind {
             EventKind::ProcessUnlinked { .. } => "process_unlinked",
             EventKind::FileOpen { .. } => "file_open",
             EventKind::NetworkConnect { .. } => "network_connect",
+            EventKind::SignalSend { .. } => "signal_send",
+            EventKind::Tamper { .. } => "tamper",
             EventKind::FileRead { .. } => "file_read",
             EventKind::FileDelete { .. } => "file_delete",
             EventKind::FileRename { .. } => "file_rename",
@@ -345,6 +392,8 @@ impl EventKind {
             EventKind::PolicyDecision { .. } => "policy_decision",
             EventKind::ApprovalRequested { .. } => "approval_requested",
             EventKind::ApprovalResolved { .. } => "approval_resolved",
+            EventKind::QuarantineStarted { .. } => "quarantine_started",
+            EventKind::QuarantineResolved { .. } => "quarantine_resolved",
             EventKind::MonitorWarning { .. } => "monitor_warning",
             EventKind::SessionEnd { .. } => "session_end",
         }
@@ -362,13 +411,42 @@ impl EventKind {
                 | EventKind::SessionEnd { .. }
                 | EventKind::ApprovalRequested { .. }
                 | EventKind::ApprovalResolved { .. }
+                | EventKind::QuarantineStarted { .. }
+                | EventKind::QuarantineResolved { .. }
                 | EventKind::ProcessUnlinked { .. }
+                | EventKind::SignalSend { .. }
+                | EventKind::Tamper { .. }
                 | EventKind::KernelFloor { .. }
                 | EventKind::KernelDenied { .. }
         ) || matches!(
             self,
             EventKind::PolicyDecision { verdict, .. } if verdict.decision != crate::Decision::Allow
         )
+    }
+
+    /// Returns true when the recorder must write this event through to the
+    /// kernel before it takes the next one.
+    ///
+    /// Evidence is one half of the rule. The other half is every event that
+    /// says who ran when: a monitor that an attack kills takes no cleanup
+    /// path with it, so the events that name the processes of the session —
+    /// the fork, the exec, the end — must reach the file as they happen, or
+    /// the attack erases its own record. That failure is measured in
+    /// `research/bypass/FINDINGS.md`: the trace of a killed monitor survived
+    /// with exactly one line.
+    ///
+    /// File opens, connections and input stay buffered: a session makes
+    /// thousands of them, and a write per event would tax every session for
+    /// a fact that the process events already carry.
+    pub fn is_durable(&self) -> bool {
+        self.is_evidence()
+            || matches!(
+                self,
+                EventKind::ProcessFork { .. }
+                    | EventKind::ProcessExec { .. }
+                    | EventKind::ProcessExit { .. }
+                    | EventKind::MonitorWarning { .. }
+            )
     }
 }
 

@@ -138,10 +138,13 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&hits)?);
     } else {
         println!(
-            "\n{} exec, {} file and {} network event(s) evaluated, {} rule match(es)",
+            "\n{} exec, {} file, {} network, {} signal and {} tamper event(s) evaluated, \
+             {} rule match(es)",
             counted.exec,
             counted.file,
             counted.network,
+            counted.signal,
+            counted.tamper,
             hits.len()
         );
     }
@@ -154,6 +157,8 @@ struct Counts {
     exec: usize,
     file: usize,
     network: usize,
+    signal: usize,
+    tamper: usize,
 }
 
 impl Counts {
@@ -162,6 +167,8 @@ impl Counts {
         match action {
             Action::FileOpen { .. } => self.file += 1,
             Action::NetworkConnect { .. } => self.network += 1,
+            Action::SignalSend { .. } => self.signal += 1,
+            Action::Tamper { .. } => self.tamper += 1,
             _ => self.exec += 1,
         }
     }
@@ -244,6 +251,26 @@ fn action_of(event: &Event, graph: &ProcessGraph) -> Option<(ProcessInfo, Action
                     host: host.clone(),
                     addr: addr.clone(),
                     port: *port,
+                },
+            ))
+        }
+        EventKind::SignalSend { target, signal } => {
+            let process = actor(event.pid, graph);
+            Some((
+                process,
+                Action::SignalSend {
+                    target: *target,
+                    signal: *signal,
+                },
+            ))
+        }
+        EventKind::Tamper { kind, detail } => {
+            let process = actor(event.pid, graph);
+            Some((
+                process,
+                Action::Tamper {
+                    kind: *kind,
+                    detail: detail.clone(),
                 },
             ))
         }

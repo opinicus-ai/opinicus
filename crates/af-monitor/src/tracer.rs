@@ -13,7 +13,7 @@
 //! kernel and the loop meets them at a `PTRACE_EVENT_SECCOMP` stop. See
 //! [`crate::seccomp`] for the filter and for the limits of what it proves.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -32,7 +32,7 @@ use af_core::{
 
 use crate::{
     procfs, seccomp, InputSnapshot, Intercept, LandlockMode, MonitorConfig, MonitorHandler,
-    SessionOutcome, SyscallFilter,
+    SensedTamper, SessionOutcome, SyscallFilter, TreeControl,
 };
 
 /// Trace options that the monitor uses for every process of the tree.
@@ -71,8 +71,8 @@ struct Tracer<'a> {
     session: &'a SessionMeta,
     handler: &'a mut dyn MonitorHandler,
     root: Pid,
-    /// Processes that still have to report their end.
-    tracked: HashSet<Pid>,
+    /// The processes of the tree and the suspend state of the session.
+    tree: TreeState,
     /// Every process that the session ever created.
     known: HashSet<Pid>,
     /// Tasks of `known` that are a thread and not a separate process.
@@ -110,6 +110,54 @@ struct Tracer<'a> {
     floor_warning: Option<String>,
     /// The read end of the report pipe of the floor, until the loop read it.
     floor_report: Option<std::fs::File>,
+    /// The parent and the program of each process that the monitor killed.
+    ///
+    /// A parent that starts the same program again answers a refusal by
+    /// repeating it, which is the liveness fact of B.6 that a quarantine
+    /// exists for. The map keys on the parent and the executable, because a
+    /// process identifier is gone once the process died.
+    killed: BTreeSet<(Pid, String)>,
+    /// The parent and the program of each process that the monitor saw.
+    programs: HashMap<Pid, (Pid, String)>,
+    /// True after the loop already reported the processes that outlived the
+    /// session root.
+    outlived_reported: bool,
+}
+
+/// The processes of the tree, and whether the session stands suspended.
+struct TreeState {
+    /// Processes that still have to report their end.
+    tracked: HashSet<Pid>,
+    /// True while a quarantine holds the tree.
+    suspended: bool,
+}
+
+impl TreeControl for TreeState {
+    /// Stops every process of the session that still runs.
+    ///
+    /// A process in the middle of a computation receives `SIGSTOP`. The wait
+    /// loop holds the group stop of a suspended session instead of letting
+    /// the process continue, so the tree stands still. A process that waits
+    /// at a trace stop needs no signal: it holds until the monitor continues
+    /// it.
+    fn suspend(&mut self) {
+        self.suspended = true;
+        for pid in self.tracked.iter().copied().collect::<Vec<_>>() {
+            let _ = kill(NixPid::from_raw(pid), Signal::SIGSTOP);
+        }
+    }
+
+    /// Lets a suspended session run again.
+    ///
+    /// `SIGCONT` also clears a `SIGSTOP` that still pends for a process that
+    /// was at a trace stop when the quarantine began, so no process is left
+    /// with a stop that nobody ordered.
+    fn resume(&mut self) {
+        self.suspended = false;
+        for pid in self.tracked.iter().copied().collect::<Vec<_>>() {
+            let _ = kill(NixPid::from_raw(pid), Signal::SIGCONT);
+        }
+    }
 }
 
 /// Launches the command and follows it until the whole tree ends.
@@ -222,6 +270,7 @@ pub fn run(
     let report_fd = floor_report_writer
         .as_ref()
         .map_or(-1, |file| file.as_raw_fd());
+    let monitor_pid = config.monitor_pid;
     unsafe {
         command.pre_exec(move || {
             ptrace::traceme().map_err(std::io::Error::from)?;
@@ -234,7 +283,7 @@ pub fn run(
                     libc::write(report_fd, &[byte] as *const u8 as *const libc::c_void, 1);
                 }
             }
-            seccomp::install(filter);
+            seccomp::install(filter, monitor_pid);
             Ok(())
         });
     }
@@ -257,7 +306,10 @@ pub fn run(
         session,
         handler,
         root,
-        tracked: HashSet::from([root]),
+        tree: TreeState {
+            tracked: HashSet::from([root]),
+            suspended: false,
+        },
         known: HashSet::from([root]),
         threads: HashSet::new(),
         parents: HashMap::new(),
@@ -273,6 +325,9 @@ pub fn run(
         floor,
         floor_warning,
         floor_report: floor_report_reader,
+        killed: BTreeSet::new(),
+        programs: HashMap::new(),
+        outlived_reported: false,
     };
 
     tracer.run_loop()?;
@@ -297,16 +352,93 @@ impl Tracer<'_> {
         }
         self.check_filter();
         self.check_floor();
-        while !self.tracked.is_empty() {
+        self.drain_tamper();
+        while !self.tree.tracked.is_empty() {
             let Some(status) = wait_any(None)? else {
                 // No child is left. This only happens when another part of the
                 // program reaped a process of the tree.
-                self.tracked.clear();
+                self.tree.tracked.clear();
                 break;
             };
             self.dispatch(status);
+            self.report_outlived();
+            self.drain_tamper();
         }
         Ok(())
+    }
+
+    /// Hands every sensed tamper fact to the handler, one at a time.
+    ///
+    /// A fact that rises while the handler records an event — a descendant
+    /// that detached — names no process that waits at a stop, so the monitor
+    /// takes the fact here: it suspends the tree, lets the handler judge and
+    /// ask, and carries the answer out.
+    fn drain_tamper(&mut self) {
+        while let Some(sensed) = self.handler.take_tamper() {
+            self.tree.suspend();
+            let answer = self.handler.rule_tamper(sensed);
+            if answer == Intercept::TerminateSession {
+                self.terminated = true;
+                self.kill_tree();
+            } else {
+                self.tree.resume();
+            }
+            if self.terminated {
+                return;
+            }
+        }
+    }
+
+    /// Reports the processes that were still alive when the root ended.
+    ///
+    /// This is the B.6 liveness fact. The tracer keeps following every
+    /// process, so nothing escaped — the report names the work that continues
+    /// after the session, and a rule decides what it means. The check runs
+    /// one time, at the first state change after the end of the root.
+    fn report_outlived(&mut self) {
+        if self.outlived_reported {
+            return;
+        }
+        if self.root_code.is_none() && self.root_signal.is_none() {
+            return;
+        }
+        self.outlived_reported = true;
+        let remaining: Vec<Pid> = self
+            .tree
+            .tracked
+            .iter()
+            .copied()
+            .filter(|pid| !self.threads.contains(pid) && !self.exited.contains(pid))
+            .filter(|pid| procfs::read_stat(*pid).is_some())
+            .collect();
+        for pid in remaining {
+            let program = self
+                .programs
+                .get(&pid)
+                .map(|(_, exe)| exe.clone())
+                .unwrap_or_default();
+            let sensed = SensedTamper {
+                kind: af_core::TamperKind::OutlivedSession,
+                pid,
+                detail: format!(
+                    "process {pid}{} was still alive after the session root {} ended",
+                    if program.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({program})")
+                    },
+                    self.root
+                ),
+            };
+            self.tree.suspend();
+            let answer = self.handler.rule_tamper(sensed);
+            if answer == Intercept::TerminateSession {
+                self.terminated = true;
+                self.kill_tree();
+                return;
+            }
+            self.tree.resume();
+        }
     }
 
     /// Waits until the root process holds at its first exec.
@@ -316,7 +448,7 @@ impl Tracer<'_> {
         let root = NixPid::from_raw(self.root);
         loop {
             let Some(status) = wait_any(Some(root))? else {
-                self.tracked.clear();
+                self.tree.tracked.clear();
                 return Ok(false);
             };
             match status {
@@ -332,12 +464,12 @@ impl Tracer<'_> {
                 }
                 WaitStatus::Exited(_, code) => {
                     self.note_exit(self.root, Some(code), None);
-                    self.tracked.clear();
+                    self.tree.tracked.clear();
                     return Ok(false);
                 }
                 WaitStatus::Signaled(_, signal, _) => {
                     self.note_exit(self.root, None, Some(signal as i32));
-                    self.tracked.clear();
+                    self.tree.tracked.clear();
                     return Ok(false);
                 }
                 _ => {}
@@ -437,11 +569,11 @@ impl Tracer<'_> {
         match status {
             WaitStatus::Exited(pid, code) => {
                 self.note_exit(pid.as_raw(), Some(code), None);
-                self.tracked.remove(&pid.as_raw());
+                self.tree.tracked.remove(&pid.as_raw());
             }
             WaitStatus::Signaled(pid, signal, _) => {
                 self.note_exit(pid.as_raw(), None, Some(signal as i32));
-                self.tracked.remove(&pid.as_raw());
+                self.tree.tracked.remove(&pid.as_raw());
             }
             WaitStatus::PtraceEvent(pid, _, event) => {
                 self.handle_ptrace_event(pid.as_raw(), event);
@@ -451,9 +583,15 @@ impl Tracer<'_> {
                 self.adopt(raw);
                 if self.terminated {
                     self.stop_for_ever(raw);
-                } else {
-                    self.resume(raw, forwardable(signal));
+                    return;
                 }
+                // A quarantine holds the tree. A group stop of a suspended
+                // session stays a stop: the process must not run again until
+                // the ruling says so.
+                if self.tree.suspended && is_group_stop(signal) {
+                    return;
+                }
+                self.resume(raw, forwardable(signal));
             }
             WaitStatus::PtraceSyscall(pid) => self.resume(pid.as_raw(), None),
             WaitStatus::Continued(_) | WaitStatus::StillAlive => {}
@@ -541,6 +679,21 @@ impl Tracer<'_> {
             None
         };
 
+        // The liveness fact of B.6: this same program ran under this same
+        // parent before, and the monitor killed it. The fact keys on what
+        // the firewall itself did — a session where the monitor killed
+        // nothing can never raise it.
+        let parent = self.parents.get(&pid).copied().unwrap_or(self.root);
+        if let Some(exe) = info.exe.as_deref() {
+            self.programs.insert(pid, (parent, exe.to_string()));
+        }
+        let sensed = crate::ExecSensed {
+            respawned_after_kill: info
+                .exe
+                .as_deref()
+                .is_some_and(|exe| self.killed.contains(&(parent, exe.to_string()))),
+        };
+
         self.emit(
             pid,
             EventKind::ProcessExec {
@@ -560,7 +713,9 @@ impl Tracer<'_> {
         }
 
         let ancestry = self.ancestry(pid);
-        let answer = self.handler.on_exec(&info, &ancestry, snapshot.as_ref());
+        let answer =
+            self.handler
+                .on_exec(&info, &ancestry, snapshot.as_ref(), &sensed, &mut self.tree);
         match answer {
             Intercept::Continue => self.resume(pid, None),
             // There is no call to fail at an exec stop, so a refusal can only
@@ -655,7 +810,10 @@ impl Tracer<'_> {
         self.emit(pid, event_of(&action));
 
         let ancestry = self.ancestry(pid);
-        match self.handler.on_syscall(pid, &action, &ancestry) {
+        match self
+            .handler
+            .on_syscall(pid, &action, &ancestry, &mut self.tree)
+        {
             Intercept::Continue => {
                 // The call will run, and on a path the floor denies the
                 // kernel will refuse it. That refusal is certain — the
@@ -714,7 +872,7 @@ impl Tracer<'_> {
             return;
         }
         self.known.insert(pid);
-        self.tracked.insert(pid);
+        self.tree.tracked.insert(pid);
         // A child inherits the options of its parent. A process that the
         // monitor did not expect may not have them, so set them again.
         let _ = ptrace::setoptions(NixPid::from_raw(pid), TRACE_OPTIONS);
@@ -743,7 +901,7 @@ impl Tracer<'_> {
     fn note_child(&mut self, parent: Pid, child: Pid, is_thread: bool) {
         self.parents.entry(child).or_insert(parent);
         if self.known.insert(child) {
-            self.tracked.insert(child);
+            self.tree.tracked.insert(child);
         }
         if is_thread {
             self.threads.insert(child);
@@ -788,7 +946,7 @@ impl Tracer<'_> {
             Ok(()) => {}
             Err(Errno::ESRCH) => {
                 if procfs::read_stat(pid).is_none() {
-                    self.tracked.remove(&pid);
+                    self.tree.tracked.remove(&pid);
                 }
             }
             Err(error) => {
@@ -798,13 +956,19 @@ impl Tracer<'_> {
                         message: format!("cannot continue process {pid}: {error}"),
                     },
                 );
-                self.tracked.remove(&pid);
+                self.tree.tracked.remove(&pid);
             }
         }
     }
 
     /// Stops one process for ever.
     fn kill_one(&mut self, pid: Pid) {
+        // The kill is a fact of the session: a parent that starts the same
+        // program again answers the refusal by repeating it, and the monitor
+        // names that on the next exec of the same pair.
+        if let Some((parent, exe)) = self.programs.get(&pid).cloned() {
+            self.killed.insert((parent, exe));
+        }
         let _ = kill(NixPid::from_raw(pid), Signal::SIGKILL);
     }
 
@@ -819,7 +983,7 @@ impl Tracer<'_> {
 
     /// Stops every process of the tree, the deepest child first.
     fn kill_tree(&mut self) {
-        let mut order: Vec<Pid> = self.tracked.iter().copied().collect();
+        let mut order: Vec<Pid> = self.tree.tracked.iter().copied().collect();
         order.sort_by_key(|pid| std::cmp::Reverse(self.depth(*pid)));
         for pid in order {
             self.kill_one(pid);
@@ -904,6 +1068,19 @@ fn report_pipe() -> Result<(std::fs::File, std::fs::File)> {
     })
 }
 
+/// Returns true when the signal stops a process group instead of ending or
+/// resuming it.
+///
+/// A quarantine sends these signals itself. When the wait loop then meets
+/// the group stop of a suspended session, it holds the stop: the process
+/// must not run again before the ruling.
+fn is_group_stop(signal: Signal) -> bool {
+    matches!(
+        signal,
+        Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU
+    )
+}
+
 /// Returns the signal that the monitor gives back to a stopped process.
 ///
 /// A group stop uses the same wait status as a normal signal. Without
@@ -933,6 +1110,10 @@ fn event_of(action: &Action) -> EventKind {
             addr: addr.clone(),
             port: *port,
             host: host.clone(),
+        },
+        Action::SignalSend { target, signal } => EventKind::SignalSend {
+            target: *target,
+            signal: *signal,
         },
         // `seccomp::observe` makes no other shape. A future call would have
         // to bring its own event, and until then the monitor says what it saw

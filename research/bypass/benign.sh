@@ -9,6 +9,8 @@
 # tag. The corpus runs with the agent markers of the ambient environment as
 # they are: a lone marker below the tagging line stays quiet, which is the
 # quiet rule of identity, not a scrubbed environment.
+#
+# Since [af-4] the corpus also counts quarantines and tamper facts.
 set -euo pipefail
 DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd -- "$DIR/../.." && pwd)"
@@ -65,13 +67,17 @@ print(n)
 PY
 )
 NOTES=$(grep -c '"type": *"policy_decision"' "$OUT/trace.jsonl" || true)
+# Since [af-4]: a quarantine is the most expensive question there is, and the
+# gate of M4 is the negative test. A normal session must produce zero.
+QUARANTINES=$(grep -c '"type": *"quarantine_started"' "$OUT/trace.jsonl" || true)
+TAMPERS=$(grep -c '"type": *"tamper"' "$OUT/trace.jsonl" || true)
 
-echo "mode=$MODE fw_exit=$FW_EXIT session_exit=$SESSION_EXIT questions=$QUESTIONS agent_tags=$AGENT_TAGS decision_events=$NOTES"
-if [ "$FW_EXIT" = "0" ] && [ "$QUESTIONS" = "0" ] && [ "$AGENT_TAGS" = "0" ]; then
-    echo "PASS: the corpus ran clean with zero questions and zero agent tags"
-    echo "mode=$MODE questions=$QUESTIONS agent_tags=$AGENT_TAGS fw_exit=$FW_EXIT" >> "$DIR/results/benign-summary.txt"
+echo "mode=$MODE fw_exit=$FW_EXIT session_exit=$SESSION_EXIT questions=$QUESTIONS agent_tags=$AGENT_TAGS decision_events=$NOTES quarantines=$QUARANTINES tamper_events=$TAMPERS"
+if [ "$FW_EXIT" = "0" ] && [ "$QUESTIONS" = "0" ] && [ "$AGENT_TAGS" = "0" ] && [ "$QUARANTINES" = "0" ]; then
+    echo "PASS: the corpus ran clean with zero questions, zero agent tags and zero quarantines"
+    echo "mode=$MODE questions=$QUESTIONS agent_tags=$AGENT_TAGS quarantines=$QUARANTINES fw_exit=$FW_EXIT" >> "$DIR/results/benign-summary.txt"
 else
     echo "FAIL: the corpus triggered something; look in $OUT"
-    echo "mode=$MODE questions=$QUESTIONS agent_tags=$AGENT_TAGS fw_exit=$FW_EXIT FAIL" >> "$DIR/results/benign-summary.txt"
+    echo "mode=$MODE questions=$QUESTIONS agent_tags=$AGENT_TAGS quarantines=$QUARANTINES fw_exit=$FW_EXIT FAIL" >> "$DIR/results/benign-summary.txt"
     exit 1
 fi

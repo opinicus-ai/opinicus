@@ -186,6 +186,71 @@ pub enum Action {
         /// The content itself, cut to a safe length.
         data: String,
     },
+    /// A process asks the kernel to send a signal.
+    ///
+    /// The kernel filter holds this call only when the target is a process
+    /// of the firewall itself, so a normal signal of a normal session never
+    /// reaches the engine. Both facts of the action are scalars from the
+    /// registers, so nothing can race them.
+    SignalSend {
+        /// Process identifier that receives the signal.
+        ///
+        /// For a `tgkill` this is the thread group; for a `kill` to a process
+        /// group the value is negative.
+        target: Pid,
+        /// Signal number.
+        signal: i32,
+    },
+    /// The firewall sensed a state of its own visibility that a rule judges.
+    ///
+    /// The monitor raises these facts, and only these: a descendant that
+    /// detached from the session tree, a program that came back after the
+    /// firewall killed it, a child whose environment dropped the preload of
+    /// the in-process sensor, and a process that was still alive after the
+    /// session root ended. Every fact is keyed to what the firewall itself
+    /// installed or did, never to the absence of instrumentation on a
+    /// foreign process.
+    Tamper {
+        /// Which shape was sensed.
+        kind: TamperKind,
+        /// The measured facts behind the sense, one line for the evidence.
+        detail: String,
+    },
+}
+
+/// Which sensed shape a [`Action::Tamper`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TamperKind {
+    /// A descendant left the session tree, by `setsid` or a detaching parent.
+    DetachedDescendant,
+    /// A program the firewall killed in this session came back.
+    KilledSubtreeReturned,
+    /// A child of the session inherited no copy of the sensor preload.
+    PreloadStripped,
+    /// A process was still alive after the session root ended.
+    ///
+    /// This is the B.6 liveness fact. It is judged at report level, because
+    /// a background job of a normal session has the same shape.
+    OutlivedSession,
+}
+
+impl TamperKind {
+    /// Returns the label that the rule file and the trace use.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TamperKind::DetachedDescendant => "detached_descendant",
+            TamperKind::KilledSubtreeReturned => "killed_subtree_returned",
+            TamperKind::PreloadStripped => "preload_stripped",
+            TamperKind::OutlivedSession => "outlived_session",
+        }
+    }
+}
+
+impl std::fmt::Display for TamperKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 impl Action {
@@ -204,6 +269,8 @@ impl Action {
             Action::FileOpen { .. } => "file_open",
             Action::NetworkConnect { .. } => "network_connect",
             Action::Input { .. } => "input",
+            Action::SignalSend { .. } => "signal_send",
+            Action::Tamper { .. } => "tamper",
         }
     }
 
@@ -231,6 +298,10 @@ impl Action {
                     crate::display::truncate(data, 160)
                 )
             }
+            Action::SignalSend { target, signal } => {
+                format!("signal {signal} to process {target}")
+            }
+            Action::Tamper { kind, detail } => format!("{kind}: {detail}"),
         }
     }
 }

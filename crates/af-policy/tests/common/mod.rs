@@ -91,6 +91,8 @@ pub fn session(cwd: &str) -> SessionMeta {
         },
         schema_version: EVENT_SCHEMA_VERSION,
         detection: None,
+        monitor_pid: 0,
+        sensor: None,
         baseline: Default::default(),
     }
 }

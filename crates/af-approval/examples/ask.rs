@@ -55,6 +55,7 @@ fn main() {
         category: "database".to_string(),
         risk: RiskLevel::ApprovalRequired,
         decision: Decision::ApprovalRequired,
+        quarantine: false,
         reason: "the statement removes a whole database".to_string(),
     }]);
 

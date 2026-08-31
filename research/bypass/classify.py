@@ -240,7 +240,14 @@ def verdict_for(record, action):
             f"rules={rules or 'none'}"
         )
         seen_scan = has_file_open(events, "/proc/self/status", False) if mode == "all-opens" else False
-        if not seen_scan and mode == "write-only":
+        # Since [af-4] the filter holds a signal whose target is the monitor,
+        # so the call never runs: the tamper rule fires, the session is
+        # quarantined and the ruling (here the auto-deny of the harness)
+        # refuses the call. The kill did not happen and the monitor lived.
+        if any(r.startswith("tamper.") for r in rules):
+            notes.append("the signal was held before it ran; the tamper rule quarantined")
+            return ("held", True, rules, notes)
+        if not seen_scan and mode in ("write-only", "off"):
             notes.append("the /proc scan and the kill left no event at all")
         return ("silent (fail-closed outcome)", seen_scan, rules, notes)
 

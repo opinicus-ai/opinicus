@@ -111,6 +111,7 @@ fn hold_verdict() -> Verdict {
         category: "database".to_string(),
         risk: RiskLevel::ApprovalRequired,
         decision: Decision::ApprovalRequired,
+        quarantine: false,
         reason: "the command removes a database".to_string(),
     }])
 }
@@ -341,6 +342,56 @@ fn the_writer_numbers_every_event() {
     let numbers: Vec<u64> = back.iter().map(|event| event.seq).collect();
     let wanted: Vec<u64> = (1..=events.len() as u64).collect();
     assert_eq!(numbers, wanted);
+}
+
+/// A process event reaches the file without a flush of the writer.
+///
+/// This is the M4 answer to the finding of M1: a monitor that an attack
+/// kills takes no cleanup path with it, so the events that name who ran
+/// must be on the kernel side of the buffer as they happen. The test reads
+/// the file behind the back of the writer, before it goes away.
+#[test]
+fn a_process_event_reaches_the_file_without_a_flush() {
+    let dir = temp_dir();
+    let path = dir.path().join("durable.jsonl");
+    let mut writer = TraceWriter::create(&path, Retention::All).expect("create");
+
+    let exec = event(
+        EventKind::ProcessExec {
+            process: Box::new(process(
+                41,
+                40,
+                "/tmp/kill-monitor",
+                &["kill-monitor", "m"],
+                7,
+            )),
+        },
+        41,
+    );
+    writer.record(&exec).expect("record");
+
+    // No flush, no drop: the line must already be in the file.
+    let text = std::fs::read_to_string(&path).expect("read behind the writer");
+    assert!(
+        text.contains("kill-monitor"),
+        "a process event is durable, but the file holds only {text:?}"
+    );
+
+    // A file open is not durable: it waits for its decision. The file keeps
+    // only the exec line until the writer flushes.
+    writer
+        .record(&event(
+            EventKind::FileOpen {
+                path: "/tmp/scratch".to_string(),
+                write: true,
+            },
+            41,
+        ))
+        .expect("record");
+    let text = std::fs::read_to_string(&path).expect("read behind the writer");
+    assert_eq!(text.lines().count(), 1, "an open is buffered: {text:?}");
+
+    drop(writer);
 }
 
 /// One event is one line, and a line always parses back to the same event.
@@ -618,13 +669,32 @@ fn the_writer_flushes_the_evidence() {
     writer.record(&fork(1001, 1002)).expect("record");
     assert_eq!(
         read_trace(&path).expect("read").len(),
-        1,
-        "normal activity waits in the buffer"
+        3,
+        "the process events reach the file at once: they name who ran, and a \
+         monitor that dies takes no cleanup path with it (M4)"
+    );
+    writer
+        .record(&event(
+            EventKind::FileOpen {
+                path: "/tmp/scratch".to_string(),
+                write: true,
+            },
+            1002,
+        ))
+        .expect("record");
+    assert_eq!(
+        read_trace(&path).expect("read").len(),
+        3,
+        "an open waits in the buffer"
     );
 
     // The session goes away without a call to flush.
     drop(writer);
-    assert_eq!(read_trace(&path).expect("read").len(), 3);
+    assert_eq!(
+        read_trace(&path).expect("read").len(),
+        4,
+        "the drop writes what still waited in the buffer"
+    );
 }
 
 /// A replay of a trace must draw the same tree as the live session.
@@ -833,6 +903,7 @@ fn info_match(rule_id: &str) -> RuleMatch {
         category: "memory".to_string(),
         risk: RiskLevel::Info,
         decision: Decision::Allow,
+        quarantine: false,
         reason: "the session read a stored credential".to_string(),
     }
 }

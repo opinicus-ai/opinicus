@@ -6,6 +6,33 @@ otherwise. Each entry names its evidence.
 
 ---
 
+## 2026-08-31 — The budget outranks the severity, measured on the detach
+
+The first shipped form of the M4 detach rule quarantined: a descendant that
+left the session tree suspended everything and asked. The benign corpus of
+M1 refused it in the same run — `git maintenance run --auto --quiet
+--detach`, which `git init` and `git commit` start on every normal session,
+raises exactly that fact. The rule now reports and never asks
+(`tamper.process.detached`, decision `allow`), and so does the outlived
+liveness fact.
+
+* **Binding for later work:** a tamper or correlation rule that fires on a
+  shape a normal tool makes is wrong, whatever its severity. The kill of
+  the monitor, the killed program that came back and the stripped sensor
+  preload keep their quarantine, because each keys on an act that only an
+  attacker performs: nobody signals the monitor by accident, nothing
+  respawns a program the firewall just killed, and no tool removes the
+  sensor preload.
+* **The quarantine is not a severity level.** It is the most expensive
+  question there is and needs its own negative test per rule, in the rule
+  file and on the corpus.
+
+Evidence: `research/bypass/FINDINGS.md` (After M4),
+`research/bypass/results/benign-write-only/` (the git-maintenance detach in
+the corpus trace), `policies/tamper.yaml` (the tests of every rule).
+
+---
+
 ## 2026-08-30 — Correlation and tamper signals obey the interruption budget
 
 A tightening of the direction adopted earlier the same day

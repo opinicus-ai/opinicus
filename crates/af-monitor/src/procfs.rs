@@ -38,6 +38,10 @@ pub const DEFAULT_ENV_ALLOWLIST: &[&str] = &[
     "ENV",
     "DEPLOY_ENV",
     "TERM",
+    // The preload configuration names the sensor a session runs with. A
+    // child whose environment holds no copy of it has answered a question by
+    // removing the instrument, which is a tamper fact and not a secret.
+    "LD_PRELOAD",
 ];
 
 /// Word parts that mark an environment name as a secret.

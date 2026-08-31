@@ -130,6 +130,8 @@ impl MonitorHandler for Recorder {
         process: &ProcessInfo,
         ancestry: &[Pid],
         input: Option<&InputSnapshot>,
+        _sensed: &crate::ExecSensed,
+        _tree: &mut dyn crate::TreeControl,
     ) -> Intercept {
         let program = process.program_name().to_string();
         self.execs.push(process.clone());
@@ -146,7 +148,13 @@ impl MonitorHandler for Recorder {
         Intercept::Continue
     }
 
-    fn on_syscall(&mut self, _pid: Pid, action: &Action, _ancestry: &[Pid]) -> Intercept {
+    fn on_syscall(
+        &mut self,
+        _pid: Pid,
+        action: &Action,
+        _ancestry: &[Pid],
+        _tree: &mut dyn crate::TreeControl,
+    ) -> Intercept {
         self.actions.push(action.clone());
         match action {
             Action::FileOpen { path, .. } => {
@@ -1289,6 +1297,10 @@ fn a_program_that_raises_privilege_gets_an_explanation() {
 
 #[test]
 fn the_capability_report_follows_the_filter_mode() {
+    // The probe of the capability report starts a traced child of its own,
+    // and a tracer of a session that runs at the same time would reap its
+    // exit. The lock keeps the two apart.
+    let _guard = lock();
     let detail_of = |caps: &[af_core::MonitorCapability], name: &str| {
         caps.iter()
             .find(|cap| cap.name == name)

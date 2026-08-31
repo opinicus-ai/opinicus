@@ -145,6 +145,8 @@ impl ProcessGraph {
             }
             EventKind::FileOpen { .. }
             | EventKind::NetworkConnect { .. }
+            | EventKind::SignalSend { .. }
+            | EventKind::Tamper { .. }
             | EventKind::FileRead { .. }
             | EventKind::FileDelete { .. }
             | EventKind::FileRename { .. }
@@ -155,6 +157,8 @@ impl ProcessGraph {
             | EventKind::KernelDenied { .. }
             | EventKind::ApprovalRequested { .. }
             | EventKind::ApprovalResolved { .. }
+            | EventKind::QuarantineStarted { .. }
+            | EventKind::QuarantineResolved { .. }
             | EventKind::MonitorWarning { .. } => {}
         }
     }
@@ -737,6 +741,8 @@ fn empty_session(session_id: SessionId) -> SessionMeta {
         schema_version: af_core::EVENT_SCHEMA_VERSION,
         baseline: Default::default(),
         detection: None,
+        monitor_pid: 0,
+        sensor: None,
     }
 }
 

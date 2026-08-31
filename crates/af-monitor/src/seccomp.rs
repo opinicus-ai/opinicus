@@ -29,6 +29,22 @@
 //! | `creat` | always, because it always changes the file |
 //! | `openat2` | always, see below |
 //! | `connect` | always |
+//! | `kill` | the target is the monitor itself, or every process (`-1`) |
+//! | `tkill`, `tgkill` | the target is the monitor itself |
+//!
+//! The signal rules are what makes an attack on the monitor visible: the
+//! kernel compares the target identifier with the identifier of the monitor
+//! **before** the call runs, so a `SIGKILL` of the firewall never happens
+//! unobserved — the monitor judges it while the sender still waits. A signal
+//! to any other process is not held, which is why these rules cost a normal
+//! session nothing: no program signals the monitor unless it looked for it,
+//! and the comparison runs in the kernel where nothing can race it.
+//!
+//! `pidfd_send_signal` names its target by a file descriptor, and a BPF
+//! filter cannot follow one, so that call is not held — a named gap. A
+//! signal to a whole process group is not held either, because the monitor
+//! shares its group with the session: such a signal kills the sender too,
+//! and the command that shaped it is judged at the exec boundary.
 //!
 //! [`crate::SyscallFilter::AllOpens`] adds a second rule for `open` and
 //! `openat` with no test on the flags, so a read is held too.
@@ -143,18 +159,18 @@ fn action_available() -> Result<(), String> {
 /// `/proc/<pid>/status` of the root at the first stop and tells the user
 /// itself. A child that returned an error here would fail the whole session,
 /// which is the one outcome that must never happen.
-pub(crate) fn install(filter: SyscallFilter) {
+pub(crate) fn install(filter: SyscallFilter, monitor_pid: Pid) {
     if filter == SyscallFilter::Off {
         // `no_new_privs` is only set when a filter is really installed, so a
         // session with the layer switched off behaves exactly as before.
         return;
     }
-    install_filter(filter);
+    install_filter(filter, monitor_pid);
 }
 
 #[cfg(target_arch = "x86_64")]
-fn install_filter(filter: SyscallFilter) {
-    let program = build_program(filter);
+fn install_filter(filter: SyscallFilter, monitor_pid: Pid) {
+    let program = build_program(filter, monitor_pid);
     let prog = libc::sock_fprog {
         len: program.len() as libc::c_ushort,
         filter: program.as_ptr() as *mut libc::sock_filter,
@@ -180,7 +196,7 @@ fn install_filter(filter: SyscallFilter) {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn install_filter(_filter: SyscallFilter) {}
+fn install_filter(_filter: SyscallFilter, _monitor_pid: Pid) {}
 
 /// Returns true when the kernel really holds a filter for this process.
 ///
@@ -205,22 +221,31 @@ pub(crate) fn is_active(pid: Pid) -> bool {
 
 /// One rule of the filter.
 ///
-/// `arg_mask` of zero means that the rule tests the call number alone. A rule
-/// with a mask also tests one scalar argument, which is all that a BPF filter
-/// can do, because it cannot follow a pointer.
+/// A rule tests the call number and, when it has a test for an argument,
+/// one scalar argument — which is all that a BPF filter can do, because it
+/// cannot follow a pointer.
 #[cfg(target_arch = "x86_64")]
 struct Rule {
     /// System call number.
     nr: u32,
-    /// Index of the argument to test, when there is a mask.
-    arg_index: u32,
-    /// Bits that must be set in that argument, or zero for "do not test".
-    arg_mask: u32,
+    /// The test on one argument, when there is one.
+    test: ArgTest,
+}
+
+/// What a rule asks of one scalar argument.
+#[cfg(target_arch = "x86_64")]
+enum ArgTest {
+    /// Do not test the argument at all.
+    None,
+    /// These bits must be set in the low word.
+    MaskSet { arg_index: u32, mask: u32 },
+    /// The low word must equal this value.
+    Equals { arg_index: u32, value: u32 },
 }
 
 /// Returns the rules of one filter mode.
 #[cfg(target_arch = "x86_64")]
-fn rules_of(filter: SyscallFilter) -> Vec<Rule> {
+fn rules_of(filter: SyscallFilter, monitor_pid: Pid) -> Vec<Rule> {
     let openat = libc::SYS_openat as u32;
     let open = libc::SYS_open as u32;
     let openat2 = libc::SYS_openat2 as u32;
@@ -231,13 +256,17 @@ fn rules_of(filter: SyscallFilter) -> Vec<Rule> {
     let mut rules = vec![
         Rule {
             nr: openat,
-            arg_index: 2,
-            arg_mask: WRITE_FLAGS,
+            test: ArgTest::MaskSet {
+                arg_index: 2,
+                mask: WRITE_FLAGS,
+            },
         },
         Rule {
             nr: open,
-            arg_index: 1,
-            arg_mask: WRITE_FLAGS,
+            test: ArgTest::MaskSet {
+                arg_index: 1,
+                mask: WRITE_FLAGS,
+            },
         },
     ];
     if filter == SyscallFilter::AllOpens {
@@ -246,13 +275,11 @@ fn rules_of(filter: SyscallFilter) -> Vec<Rule> {
         // what the monitor sees.
         rules.push(Rule {
             nr: openat,
-            arg_index: 0,
-            arg_mask: 0,
+            test: ArgTest::None,
         });
         rules.push(Rule {
             nr: open,
-            arg_index: 0,
-            arg_mask: 0,
+            test: ArgTest::None,
         });
     }
     // `creat` is an open that always changes the file, so it needs no test
@@ -260,21 +287,47 @@ fn rules_of(filter: SyscallFilter) -> Vec<Rule> {
     // the number itself.
     rules.push(Rule {
         nr: libc::SYS_creat as u32,
-        arg_index: 0,
-        arg_mask: 0,
+        test: ArgTest::None,
     });
     // `openat2` hides its flags in a structure behind a pointer, so the
     // kernel cannot classify it. Every one of them must reach the monitor.
     rules.push(Rule {
         nr: openat2,
-        arg_index: 0,
-        arg_mask: 0,
+        test: ArgTest::None,
     });
     rules.push(Rule {
         nr: connect,
-        arg_index: 0,
-        arg_mask: 0,
+        test: ArgTest::None,
     });
+    // A signal whose target is the monitor. The identifier fits in the low
+    // word of the argument, so the kernel can compare it before the call
+    // runs. `kill(-1, ...)` reaches every process the user can signal, the
+    // monitor included, so it is held as well. Nothing else is: a signal to
+    // a child, a job or a process group of the session never wakes the
+    // monitor, and a normal session sends many of those.
+    if monitor_pid > 0 {
+        let monitor = monitor_pid as u32;
+        for nr in [
+            libc::SYS_kill as u32,
+            libc::SYS_tkill as u32,
+            libc::SYS_tgkill as u32,
+        ] {
+            rules.push(Rule {
+                nr,
+                test: ArgTest::Equals {
+                    arg_index: 0,
+                    value: monitor,
+                },
+            });
+        }
+        rules.push(Rule {
+            nr: libc::SYS_kill as u32,
+            test: ArgTest::Equals {
+                arg_index: 0,
+                value: u32::MAX,
+            },
+        });
+    }
     rules
 }
 
@@ -331,7 +384,7 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 /// through to the next block when it does not match, so no jump ever has to
 /// count the instructions of another block.
 #[cfg(target_arch = "x86_64")]
-fn build_program(filter: SyscallFilter) -> Vec<libc::sock_filter> {
+fn build_program(filter: SyscallFilter, monitor_pid: Pid) -> Vec<libc::sock_filter> {
     let mut insns = vec![
         // A system call number belongs to one architecture. A program that
         // runs under another one is allowed rather than judged by a wrong
@@ -346,18 +399,27 @@ fn build_program(filter: SyscallFilter) -> Vec<libc::sock_filter> {
         stmt(bpf::RET_K, libc::SECCOMP_RET_ALLOW),
     ];
 
-    for rule in rules_of(filter) {
+    for rule in rules_of(filter, monitor_pid) {
         insns.push(stmt(bpf::LD_W_ABS, OFF_NR));
-        if rule.arg_mask == 0 {
-            insns.push(jump(bpf::JMP_JEQ_K, rule.nr, 0, 1));
-            insns.push(stmt(bpf::RET_K, libc::SECCOMP_RET_TRACE));
-        } else {
-            insns.push(jump(bpf::JMP_JEQ_K, rule.nr, 0, 3));
-            // The machine is little endian and a flags argument never needs
-            // more than 32 bits, so the low word is enough.
-            insns.push(stmt(bpf::LD_W_ABS, OFF_ARGS + 8 * rule.arg_index));
-            insns.push(jump(bpf::JMP_JSET_K, rule.arg_mask, 0, 1));
-            insns.push(stmt(bpf::RET_K, libc::SECCOMP_RET_TRACE));
+        match rule.test {
+            ArgTest::None => {
+                insns.push(jump(bpf::JMP_JEQ_K, rule.nr, 0, 1));
+                insns.push(stmt(bpf::RET_K, libc::SECCOMP_RET_TRACE));
+            }
+            ArgTest::MaskSet { arg_index, mask } => {
+                insns.push(jump(bpf::JMP_JEQ_K, rule.nr, 0, 3));
+                // The machine is little endian and a flags argument never
+                // needs more than 32 bits, so the low word is enough.
+                insns.push(stmt(bpf::LD_W_ABS, OFF_ARGS + 8 * arg_index));
+                insns.push(jump(bpf::JMP_JSET_K, mask, 0, 1));
+                insns.push(stmt(bpf::RET_K, libc::SECCOMP_RET_TRACE));
+            }
+            ArgTest::Equals { arg_index, value } => {
+                insns.push(jump(bpf::JMP_JEQ_K, rule.nr, 0, 3));
+                insns.push(stmt(bpf::LD_W_ABS, OFF_ARGS + 8 * arg_index));
+                insns.push(jump(bpf::JMP_JEQ_K, value, 0, 1));
+                insns.push(stmt(bpf::RET_K, libc::SECCOMP_RET_TRACE));
+            }
         }
     }
 
@@ -405,6 +467,24 @@ pub(crate) fn observe(pid: Pid) -> Option<Action> {
     }
     if nr == libc::SYS_connect {
         return network_connect(pid, args[1], args[2] as usize);
+    }
+    if nr == libc::SYS_kill {
+        return Some(Action::SignalSend {
+            target: args[0] as i32,
+            signal: args[1] as i32,
+        });
+    }
+    if nr == libc::SYS_tkill {
+        return Some(Action::SignalSend {
+            target: args[0] as i32,
+            signal: args[1] as i32,
+        });
+    }
+    if nr == libc::SYS_tgkill {
+        return Some(Action::SignalSend {
+            target: args[0] as i32,
+            signal: args[2] as i32,
+        });
     }
     None
 }
@@ -664,11 +744,12 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn the_write_only_program_holds_four_calls() {
-        let program = build_program(SyscallFilter::WriteOnly);
+    fn the_write_only_program_holds_the_expected_calls() {
+        let program = build_program(SyscallFilter::WriteOnly, 0);
         // The prologue is 6 instructions, a rule with a mask is 5, a rule
         // without one is 3, and the program ends with one allow. The rules
-        // are openat, open, creat, openat2 and connect.
+        // are openat, open, creat, openat2 and connect. A monitor that does
+        // not name itself adds no signal rule.
         assert_eq!(program.len(), 6 + 5 + 5 + 3 + 3 + 3 + 1);
         assert!(program.len() < u16::MAX as usize);
     }
@@ -676,9 +757,30 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn the_all_opens_program_adds_the_two_read_rules() {
-        let write_only = build_program(SyscallFilter::WriteOnly).len();
-        let all_opens = build_program(SyscallFilter::AllOpens).len();
+        let write_only = build_program(SyscallFilter::WriteOnly, 0).len();
+        let all_opens = build_program(SyscallFilter::AllOpens, 0).len();
         assert_eq!(all_opens, write_only + 3 + 3);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn a_monitor_that_names_itself_holds_the_signals_to_itself() {
+        // Four rules: kill, tkill and tgkill against the monitor, and kill
+        // against every process. A monitor that does not name itself gets
+        // none of them.
+        let named = build_program(SyscallFilter::WriteOnly, 4242);
+        let unnamed = build_program(SyscallFilter::WriteOnly, 0);
+        assert_eq!(named.len(), unnamed.len() + 4 * 5);
+        for filter in [SyscallFilter::WriteOnly, SyscallFilter::AllOpens] {
+            for rule in rules_of(filter, 4242) {
+                if let ArgTest::Equals { value, .. } = rule.test {
+                    assert!(
+                        value == 4242 || value == u32::MAX,
+                        "a signal rule may only name the monitor or every process, not {value}"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -688,7 +790,7 @@ mod tests {
         let execve = libc::SYS_execve as u32;
         let execveat = libc::SYS_execveat as u32;
         for filter in [SyscallFilter::WriteOnly, SyscallFilter::AllOpens] {
-            for rule in rules_of(filter) {
+            for rule in rules_of(filter, 0) {
                 assert_ne!(rule.nr, execve);
                 assert_ne!(rule.nr, execveat);
             }
@@ -702,7 +804,7 @@ mod tests {
         let write = libc::SYS_write as u32;
         let sendto = libc::SYS_sendto as u32;
         for filter in [SyscallFilter::WriteOnly, SyscallFilter::AllOpens] {
-            for rule in rules_of(filter) {
+            for rule in rules_of(filter, 0) {
                 assert_ne!(rule.nr, write);
                 assert_ne!(rule.nr, sendto);
             }

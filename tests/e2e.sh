@@ -427,6 +427,117 @@ assert_contains "K8 the write names the write rule" \
     "$(file_text "$WORK_DIR/kw.stderr")" "filesystem.credentials.write"
 
 # ---------------------------------------------------------------------------
+# T. Tamper and quarantine: the seeded techniques of the bypass harness fire
+#    every time, the ruling is one question, and the quarantine holds the
+#    tree. The techniques are the sources of research/bypass/techniques,
+#    compiled here so the test needs nothing but a C compiler.
+#
+#    The negative side of this section is the benign corpus of the harness
+#    (research/bypass/benign.sh), which must produce zero quarantines in
+#    all three filter modes.
+# ---------------------------------------------------------------------------
+
+printf '\n%sT — tamper sensing and the quarantine flow%s\n' "$AFW_BOLD" "$AFW_RESET"
+
+TECH="$REPO_ROOT/research/bypass/techniques"
+for src in kill-monitor escape-setsid respawn strip-preload; do
+    cc -O2 -o "$WORK_DIR/$src" "$TECH/$src.c"
+done
+SENSOR="$REPO_ROOT/research/spikes/inprocess/libafsensor.so"
+[ -f "$SENSOR" ] || { printf 'error: %s is missing; run research/spikes/inprocess/build.sh\n' "$SENSOR" >&2; exit 2; }
+
+# T1–T4: a program that signals the monitor is held, judged and quarantined
+# before the signal runs. The auto-deny of this harness refuses the call, so
+# the monitor survives what was a blind spot of M1.
+TRACE_T="$WORK_DIR/trace-t.jsonl"
+status_t=0
+"$BINARY" run --approve deny --retention all --trace "$TRACE_T" \
+    -- "$WORK_DIR/kill-monitor" "$WORK_DIR/t-marker.txt" \
+    >"$WORK_DIR/t.stdout" 2>"$WORK_DIR/t.stderr" || status_t=$?
+
+assert_exit_nonzero "T1 the monitor-kill session is stopped by the ruling" "$status_t"
+assert_eq "T2 the trace holds the held signal" \
+    "1" "$(afw_trace_matches "$TRACE_T" '"type" *: *"signal_send"')"
+assert_eq "T3 the tamper rule fired" \
+    "1" "$(afw_trace_matches "$TRACE_T" '"type" *: *"policy_decision".*"rule_id" *: *"tamper.monitor.signal"')"
+assert_eq "T4 the tree was quarantined exactly once" \
+    "1" "$(afw_trace_matches "$TRACE_T" '"type" *: *"quarantine_started"')"
+assert_eq "T5 one ruling, one answer" \
+    "1" "$(afw_trace_matches "$TRACE_T" '"type" *: *"quarantine_resolved"')"
+assert_contains "T6 the kill never ran" "$(file_text "$WORK_DIR/t.stdout")" "blocked"
+
+# T7–T9: a descendant that leaves the session tree is a sensed fact and a
+# report. It must not quarantine, because git maintenance makes the same
+# shape on every commit of a normal session.
+TRACE_TE="$WORK_DIR/trace-te.jsonl"
+status_te=0
+"$BINARY" run --approve deny --retention all --trace "$TRACE_TE" \
+    -- "$WORK_DIR/escape-setsid" "$WORK_DIR/te-marker.txt" \
+    >"$WORK_DIR/te.stdout" 2>"$WORK_DIR/te.stderr" || status_te=$?
+
+assert_exit "T7 the detached session still runs to its end" 0 "$status_te"
+assert_contains "T8 the detach fact fired" \
+    "$(file_text "$TRACE_TE")" '"kind":"detached_descendant"'
+assert_eq "T9 the detach reports and never asks" \
+    "0" "$(afw_trace_matches "$TRACE_TE" '"type" *: *"quarantine_started"')"
+
+# T10–T12: a program the firewall killed that comes back quarantines the
+# tree. The respawn loop runs a command the built-in pack denies; every
+# round after the first kill is the sensed fact.
+TRACE_TR="$WORK_DIR/trace-tr.jsonl"
+status_tr=0
+"$BINARY" run --approve deny --retention all --trace "$TRACE_TR" \
+    -- "$WORK_DIR/respawn" 3 \
+    >"$WORK_DIR/tr.stdout" 2>"$WORK_DIR/tr.stderr" || status_tr=$?
+
+assert_exit_nonzero "T10 the respawn loop is stopped by a ruling" "$status_tr"
+assert_contains "T11 the killed program that came back fired" \
+    "$(file_text "$TRACE_TR")" '"kind":"killed_subtree_returned"'
+assert_contains "T12 the quarantine suspended the tree" \
+    "$(file_text "$WORK_DIR/tr.stderr")" "the session tree is suspended"
+
+# T13–T15: a child that inherits no copy of the sensor preload is sensed at
+# the exec boundary and quarantined. Without the sensor in the environment
+# the same session must stay quiet, which the T16 run proves.
+TRACE_TS="$WORK_DIR/trace-ts.jsonl"
+status_ts=0
+LD_PRELOAD="$SENSOR" \
+    AF_SENSOR_TRACE="$WORK_DIR/ts-sensor.jsonl" \
+    AF_SENSOR_REG="$WORK_DIR/ts-sensor.reg" \
+    AF_SENSOR_SESSION=afw-e2e-strip \
+    "$BINARY" run --approve deny --retention all --trace "$TRACE_TS" \
+    -- "$WORK_DIR/strip-preload" "$WORK_DIR/ts-marker.txt" \
+    >"$WORK_DIR/ts.stdout" 2>"$WORK_DIR/ts.stderr" || status_ts=$?
+
+assert_exit_nonzero "T13 the stripped-preload session is stopped by a ruling" "$status_ts"
+assert_contains "T14 the preload fact fired" \
+    "$(file_text "$TRACE_TS")" '"kind":"preload_stripped"'
+assert_contains "T15 the session carries the sensor facts" \
+    "$(file_text "$TRACE_TS")" "libafsensor.so"
+
+TRACE_TN="$WORK_DIR/trace-tn.jsonl"
+status_tn=0
+"$BINARY" run --approve deny --retention all --trace "$TRACE_TN" \
+    -- sh -c 'echo quiet' \
+    >"$WORK_DIR/tn.stdout" 2>"$WORK_DIR/tn.stderr" || status_tn=$?
+assert_exit "T16 a session without the sensor stays quiet" 0 "$status_tn"
+assert_eq "T17 no tamper fact of any kind fired" \
+    "0" "$(afw_trace_matches "$TRACE_TN" '"type" *: *"tamper"')"
+
+# T18: the recorder writes the process events through, so the death of the
+# monitor leaves the evidence instead of erasing it — the M1 finding. With
+# no filter and no floor there is nothing to hold or refuse the kill, so the
+# monitor dies with the tree, and the trace must still name the program.
+TRACE_TD="$WORK_DIR/trace-td.jsonl"
+status_td=0
+"$BINARY" run --approve deny --retention all --syscall-filter off --landlock off \
+    --trace "$TRACE_TD" \
+    -- "$WORK_DIR/kill-monitor" "$WORK_DIR/td-marker.txt" \
+    >"$WORK_DIR/td.stdout" 2>"$WORK_DIR/td.stderr" || status_td=$?
+assert_contains "T18 a killed monitor leaves the evidence of what ran" \
+    "$(file_text "$TRACE_TD")" "kill-monitor"
+
+# ---------------------------------------------------------------------------
 # Summary.
 # ---------------------------------------------------------------------------
 

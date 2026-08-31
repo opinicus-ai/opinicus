@@ -13,6 +13,7 @@ attacks arrive on purpose? The numbers live in [FINDINGS.md](FINDINGS.md).
 | `orchestrate.py` | runs every cell: baseline (no firewall), builtin (product posture), probe (capability), across the three filter modes; `--preload` adds the `[af-2]` pass that re-runs the product posture with the in-process sensor active |
 | `classify.py` | verifies effects from the filesystem and the listener log, parses traces structurally, prints the matrix; the sensor columns show which silent cells the in-process sensor moved to seen |
 | `benign.sh` + `corpus.sh` | the scripted normal dev session that must run with zero questions; `corpus.sh` is shared with the in-process sensor spike |
+| `tamper.sh` | the `[af-4]` gate: the four seeded tamper techniques must fire every time, the quarantine rules must hold the tree, and the report rules must not ask; the negative side is `benign.sh` |
 | `run.sh` | everything, then the classification, then the corpus |
 | `results/` | raw runs (regenerable, not committed) |
 
@@ -23,6 +24,7 @@ attacks arrive on purpose? The numbers live in [FINDINGS.md](FINDINGS.md).
 python3 orchestrate.py  # the runs only
 python3 classify.py     # re-print the matrix from results/
 ./benign.sh all-opens   # the corpus at one filter mode
+./tamper.sh             # the tamper gate of [af-4]
 ```
 
 Requires the release build (`cargo build --release`), `cc`, `go`, and the

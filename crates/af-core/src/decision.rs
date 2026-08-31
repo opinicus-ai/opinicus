@@ -107,6 +107,15 @@ pub struct RuleMatch {
     /// Why the rule matched, in words the user can read.
     #[serde(default)]
     pub reason: String,
+    /// True when the rule wants the whole session tree suspended while the
+    /// user rules on the action.
+    ///
+    /// A quarantine is the most expensive question there is, so the flag
+    /// never comes from a rule that fires on normal work: every rule that
+    /// carries it ships with a negative test that proves a normal session
+    /// stays quiet.
+    #[serde(default)]
+    pub quarantine: bool,
 }
 
 /// The result of a policy evaluation.
@@ -116,6 +125,10 @@ pub struct Verdict {
     pub decision: Decision,
     /// The highest risk level of all matched rules.
     pub risk: RiskLevel,
+    /// True when a matched rule wants the session tree suspended while the
+    /// user rules on the action.
+    #[serde(default)]
+    pub quarantine: bool,
     /// Every rule that matched, strongest first.
     #[serde(default)]
     pub matches: Vec<RuleMatch>,
@@ -127,6 +140,7 @@ impl Verdict {
         Self {
             decision: Decision::Allow,
             risk: RiskLevel::Info,
+            quarantine: false,
             matches: Vec::new(),
         }
     }
@@ -155,9 +169,11 @@ impl Verdict {
             .map(|m| m.risk)
             .max()
             .unwrap_or(RiskLevel::Info);
+        let quarantine = matches.iter().any(|m| m.quarantine);
         Self {
             decision,
             risk,
+            quarantine,
             matches,
         }
     }
@@ -235,6 +251,7 @@ mod tests {
             risk,
             decision,
             reason: String::new(),
+            quarantine: false,
         }
     }
 
@@ -255,5 +272,20 @@ mod tests {
         let verdict = Verdict::from_matches(Vec::new());
         assert_eq!(verdict.decision, Decision::Allow);
         assert!(!verdict.needs_intervention());
+        assert!(!verdict.quarantine);
+    }
+
+    #[test]
+    fn one_quarantine_rule_suspends_the_verdict() {
+        let mut with_flag = rule("tamper", RiskLevel::Blocked, Decision::ApprovalRequired);
+        with_flag.quarantine = true;
+        let verdict = Verdict::from_matches(vec![
+            with_flag,
+            rule("plain", RiskLevel::Low, Decision::Allow),
+        ]);
+        assert!(
+            verdict.quarantine,
+            "one rule that asks for a quarantine is enough"
+        );
     }
 }

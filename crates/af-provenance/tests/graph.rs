@@ -89,6 +89,7 @@ fn verdict(decision: Decision, risk: RiskLevel, rule: &str) -> Verdict {
         category: "database".to_string(),
         risk,
         decision,
+        quarantine: false,
         reason: "test".to_string(),
     }])
 }
