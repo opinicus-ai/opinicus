@@ -14,7 +14,10 @@
 //! [`crate::seccomp`] for the filter and for the limits of what it proves.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::Command;
 
 use nix::errno::Errno;
@@ -28,8 +31,8 @@ use af_core::{
 };
 
 use crate::{
-    procfs, seccomp, InputSnapshot, Intercept, MonitorConfig, MonitorHandler, SessionOutcome,
-    SyscallFilter,
+    procfs, seccomp, InputSnapshot, Intercept, LandlockMode, MonitorConfig, MonitorHandler,
+    SessionOutcome, SyscallFilter,
 };
 
 /// Trace options that the monitor uses for every process of the tree.
@@ -94,6 +97,19 @@ struct Tracer<'a> {
     ///
     /// The loop reports it one time, as a warning event, before it starts.
     filter_warning: Option<String>,
+    /// The kernel floor of this session, when one was enacted.
+    ///
+    /// The plan is `None` when the mode said off, when the machine cannot
+    /// carry Landlock, or when the child reported that the kernel refused the
+    /// ruleset. Only a session that really enacted the floor explains its
+    /// denials and lets the kernel answer the questions the floor carries.
+    floor: Option<crate::landlock::Plan>,
+    /// Why the session got no kernel floor.
+    ///
+    /// The loop reports it one time, as a warning event, before it starts.
+    floor_warning: Option<String>,
+    /// The read end of the report pipe of the floor, until the loop read it.
+    floor_report: Option<std::fs::File>,
 }
 
 /// Launches the command and follows it until the whole tree ends.
@@ -117,6 +133,57 @@ pub fn run(
         },
     };
 
+    // The kernel floor is built here, in the monitor, from the working
+    // directory and the home directory of the user. The child only enacts a
+    // plan that already exists, so no directory is read between fork and
+    // execve.
+    let (floor, floor_warning) = match config.landlock {
+        LandlockMode::Off => (None, None),
+        LandlockMode::On => match crate::landlock::availability() {
+            Ok(abi) => {
+                let work_tree = config
+                    .cwd
+                    .clone()
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let home = config
+                    .landlock_home
+                    .clone()
+                    .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+                let plan = crate::landlock::Plan::build(&work_tree, home.as_deref(), abi);
+                if plan.rule_count() == 0 {
+                    (
+                        None,
+                        Some("no path of this machine could be granted for the floor".to_string()),
+                    )
+                } else {
+                    (Some(plan), None)
+                }
+            }
+            Err(reason) => (None, Some(reason)),
+        },
+    };
+
+    // The child cannot report through the return value of the closure, so it
+    // writes one byte into this pipe right before its `execve`: zero when it
+    // enacted the floor, the errno otherwise. The write end closes at
+    // `execve`, and the monitor reads the byte after the first exec stop.
+    let mut floor_report_writer = None;
+    let mut floor_report_reader = None;
+    if floor.is_some() {
+        match report_pipe() {
+            Ok((read, write)) => {
+                floor_report_writer = Some(write);
+                floor_report_reader = Some(read);
+            }
+            Err(error) => {
+                return Err(Error::os(format!(
+                    "cannot make the report pipe of the kernel floor: {error}"
+                )))
+            }
+        }
+    }
+
     let mut command = Command::new(program);
     command.args(&config.command[1..]);
     if let Some(cwd) = config.cwd.as_ref() {
@@ -131,17 +198,42 @@ pub fn run(
     // monitor thread for ever. The kernel raises SIGTRAP after `execve`
     // instead, which gives the monitor the same first stop.
     //
-    // The kernel filter is installed here, in the child, after the request to
-    // be traced and before `execve`. A filter is inherited by every child and
-    // it survives `execve`, so this one install covers the whole session and
-    // no descendant can escape it. The install never fails the session: see
-    // `seccomp::install`.
+    // The kernel floor is enacted here, in the child, after the request to
+    // be traced and before the filter. It survives `fork` and `execve`, and
+    // no descendant can relax it. It never fails the session: the child
+    // writes one status byte into the report pipe and the monitor tells the
+    // user itself when the floor is absent.
     //
-    // SAFETY: the closure only calls ptrace, prctl and seccomp, which all act
-    // on the forked child alone and are safe between fork and exec.
+    // The kernel filter is installed last, because its own install must be
+    // the last thing before `execve`: the filter holds file opens, and the
+    // floor needs one open per rule. With the filter first, every one of
+    // those opens answers `ENOSYS` in the `all-opens` mode, because no tracer
+    // answers a `RET_TRACE` stop of a child that has not reached its first
+    // exec yet (measured: that was the errno 38 the report pipe carried).
+    // The filter is inherited by every child and it survives `execve`, so
+    // this one install covers the whole session and no descendant can escape
+    // it. Its install never fails the session: see `seccomp::install`.
+    //
+    // SAFETY: the closure only calls ptrace, prctl, seccomp and landlock,
+    // which all act on the forked child alone and are safe between fork and
+    // exec. It allocates nothing and reads no directory: the plan and the
+    // pipe descriptor already exist.
+    let install_plan = floor.clone();
+    let report_fd = floor_report_writer
+        .as_ref()
+        .map_or(-1, |file| file.as_raw_fd());
     unsafe {
         command.pre_exec(move || {
             ptrace::traceme().map_err(std::io::Error::from)?;
+            if let Some(plan) = install_plan.as_ref() {
+                let byte = match plan.install() {
+                    Ok(()) => 0u8,
+                    Err(error) => error.raw_os_error().unwrap_or(1) as u8,
+                };
+                if report_fd >= 0 {
+                    libc::write(report_fd, &[byte] as *const u8 as *const libc::c_void, 1);
+                }
+            }
             seccomp::install(filter);
             Ok(())
         });
@@ -152,6 +244,10 @@ pub fn run(
         Error::monitor(format!("cannot start {shown}: {error}"))
     })?;
     let root = child.id() as Pid;
+    // The write end must be gone before the loop reads the report, or a read
+    // could wait for a writer that never comes. The child's own copy closed
+    // at `execve`.
+    drop(floor_report_writer);
     // The caller learns the root process before the first event, so the
     // session metadata that it records can carry the identifier.
     handler.on_session_root(root);
@@ -174,6 +270,9 @@ pub fn run(
         root_signal: None,
         filter,
         filter_warning,
+        floor,
+        floor_warning,
+        floor_report: floor_report_reader,
     };
 
     tracer.run_loop()?;
@@ -197,6 +296,7 @@ impl Tracer<'_> {
             return Ok(());
         }
         self.check_filter();
+        self.check_floor();
         while !self.tracked.is_empty() {
             let Some(status) = wait_any(None)? else {
                 // No child is left. This only happens when another part of the
@@ -263,6 +363,73 @@ impl Tracer<'_> {
                     .to_string(),
             },
         );
+    }
+
+    /// Reads what the child reported about the kernel floor.
+    ///
+    /// The child wrote one byte into the report pipe right before its
+    /// `execve`. Zero means the floor is active: the loop tells the handler
+    /// which rule classes the kernel now answers, so the session stops asking
+    /// them. Anything else is a refusal, and the session goes on without the
+    /// floor exactly as it did before the floor existed.
+    fn check_floor(&mut self) {
+        if let Some(reason) = self.floor_warning.take() {
+            self.emit(
+                self.root,
+                EventKind::MonitorWarning {
+                    message: format!("this session runs without the kernel floor: {reason}"),
+                },
+            );
+            return;
+        }
+        let Some(mut report) = self.floor_report.take() else {
+            return;
+        };
+        let mut byte = [0u8; 1];
+        let reported = report.read(&mut byte).ok().filter(|got| *got == 1);
+
+        match reported {
+            Some(_) if byte[0] == 0 => {
+                let plan = self.floor.as_ref();
+                let rules = plan.map(|plan| plan.enforced_rules()).unwrap_or_default();
+                let denied = plan
+                    .map(|plan| {
+                        plan.denied_prefixes()
+                            .into_iter()
+                            .map(|(prefix, rule)| af_core::KernelDeniedPath {
+                                prefix,
+                                rule: rule.to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.emit(self.root, EventKind::KernelFloor { rules, denied });
+            }
+            Some(_) => {
+                self.floor = None;
+                self.emit(
+                    self.root,
+                    EventKind::MonitorWarning {
+                        message: format!(
+                            "the kernel refused the kernel floor (errno {}), so this session \
+                             runs without it and its rule classes keep asking",
+                            byte[0]
+                        ),
+                    },
+                );
+            }
+            None => {
+                self.floor = None;
+                self.emit(
+                    self.root,
+                    EventKind::MonitorWarning {
+                        message: "the child reported nothing about the kernel floor, so this \
+                                  session runs without it"
+                            .to_string(),
+                    },
+                );
+            }
+        }
     }
 
     /// Handles one state change of one process of the tree.
@@ -489,7 +656,28 @@ impl Tracer<'_> {
 
         let ancestry = self.ancestry(pid);
         match self.handler.on_syscall(pid, &action, &ancestry) {
-            Intercept::Continue => self.resume(pid, None),
+            Intercept::Continue => {
+                // The call will run, and on a path the floor denies the
+                // kernel will refuse it. That refusal is certain — the
+                // ruleset was fixed before the program started and can never
+                // be relaxed — so the monitor explains it now, with the rule
+                // class the kernel enforces. Without this, the program sees
+                // a bare `EACCES` and the user blames the file.
+                if let Some(plan) = self.floor.as_ref() {
+                    if let Action::FileOpen { path, write } = &action {
+                        if let Some(denial) = plan.denies(path, *write) {
+                            self.emit(
+                                pid,
+                                EventKind::KernelDenied {
+                                    rule: denial.rule.map(str::to_string),
+                                    path: denial.path,
+                                },
+                            );
+                        }
+                    }
+                }
+                self.resume(pid, None);
+            }
             Intercept::Refuse => {
                 if let Err(error) = seccomp::refuse(pid) {
                     // The monitor could not write the registers, so it cannot
@@ -689,6 +877,31 @@ fn wait_any(pid: Option<NixPid>) -> Result<Option<WaitStatus>> {
             Err(error) => return Err(Error::os(format!("waitpid failed: {error}"))),
         }
     }
+}
+
+/// Makes the pipe through which the child reports the fate of the floor.
+///
+/// Both ends close themselves at `execve`, because a descriptor that the
+/// child never needed would leak into every program of the session.
+fn report_pipe() -> Result<(std::fs::File, std::fs::File)> {
+    use std::os::unix::io::FromRawFd;
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `pipe2` writes two descriptors into `fds` and touches nothing
+    // else.
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+    if rc != 0 {
+        return Err(Error::os(format!(
+            "pipe2 failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: both descriptors are fresh and owned from here on.
+    Ok(unsafe {
+        (
+            std::fs::File::from_raw_fd(fds[0]),
+            std::fs::File::from_raw_fd(fds[1]),
+        )
+    })
 }
 
 /// Returns the signal that the monitor gives back to a stopped process.

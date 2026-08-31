@@ -105,6 +105,19 @@ pub struct RunArgs {
     #[arg(long, value_name = "MODE", default_value = "write-only")]
     pub syscall_filter: String,
 
+    /// Selects the kernel floor: on or off.
+    ///
+    /// `on` enacts a Landlock ruleset before the first program runs, which
+    /// makes the "always no" rule classes of the built-in pack impossible in
+    /// the kernel: a credential store cannot be opened, a system tree cannot
+    /// be written, a raw disk cannot be reached, and no signal leaves the
+    /// session. The questions those rules asked disappear, and a denial the
+    /// kernel makes is explained. The floor cannot be relaxed for a running
+    /// session; a session that must touch a path the floor denies needs
+    /// `--landlock off`.
+    #[arg(long, value_name = "MODE", default_value = "on")]
+    pub landlock: String,
+
     /// The program to run, after `--`.
     #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
     pub command: Vec<String>,

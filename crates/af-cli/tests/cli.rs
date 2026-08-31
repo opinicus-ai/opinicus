@@ -872,3 +872,81 @@ fn one_process_that_writes_and_connects_is_now_held() {
         "the rule about the connection must fire:\n{recorded}"
     );
 }
+
+/// The kernel floor carries rule classes of the built-in pack, so the table
+/// in the monitor and the pack itself must agree: every class the floor
+/// names exists, and the classes that remove a question are rules that stop
+/// the user today. `research/spikes/landlock/tests/count-rules.py` guards
+/// the other side of the deal, against the rule files.
+#[test]
+fn the_kernel_floor_names_rules_that_the_pack_really_carries() {
+    use af_core::PolicyEngine as _;
+
+    let policy = af_policy::PolicySet::builtin().expect("the built-in pack loads");
+    let decisions: std::collections::HashMap<_, _> = policy
+        .rules()
+        .into_iter()
+        .map(|rule| (rule.rule_id, rule.decision))
+        .collect();
+
+    // The classes of the floor are not exported through the public API of
+    // the monitor, so the test reads them the way a session does: from a
+    // kernel_floor event of a real session.
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let trace = dir.path().join("floor.jsonl");
+    let (code, out, err) = firewall(&[
+        "run",
+        "--approve",
+        "deny",
+        "--landlock",
+        "on",
+        "--trace",
+        trace.to_str().unwrap(),
+        "--",
+        "/bin/true",
+    ]);
+    assert_eq!(code, 0, "the session runs:\n{out}\n{err}");
+
+    let floors: Vec<_> = std::fs::read_to_string(&trace)
+        .expect("the trace file")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["type"] == "kernel_floor")
+        .collect();
+    assert_eq!(floors.len(), 1, "one kernel floor per session");
+    let rules = floors[0]["rules"]
+        .as_array()
+        .expect("the floor names its rule classes");
+    assert!(!rules.is_empty(), "the floor carries at least one class");
+
+    for rule in rules {
+        let id = rule.as_str().expect("a rule identifier");
+        let decision = decisions.get(id).unwrap_or_else(|| {
+            panic!("the floor names {id}, which the built-in pack does not carry")
+        });
+        assert_eq!(
+            *decision,
+            af_core::Decision::ApprovalRequired,
+            "the floor may only remove a question, and {id} does not ask one today"
+        );
+    }
+
+    // A machine without Landlock keeps the questions, and says so.
+    let (code, out, err) = firewall(&[
+        "run",
+        "--approve",
+        "deny",
+        "--landlock",
+        "off",
+        "--trace",
+        dir.path().join("nofloor.jsonl").to_str().unwrap(),
+        "--",
+        "/bin/true",
+    ]);
+    assert_eq!(code, 0, "the session runs:\n{out}\n{err}");
+    let nofloor = std::fs::read_to_string(dir.path().join("nofloor.jsonl")).expect("trace");
+    assert!(
+        !nofloor.contains("\"type\":\"kernel_floor\""),
+        "a session with the floor switched off records no floor event"
+    );
+}

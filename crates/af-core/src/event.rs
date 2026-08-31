@@ -64,6 +64,16 @@ impl MonitorCapability {
     }
 }
 
+/// One path prefix that the kernel floor denies, with the rule it answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KernelDeniedPath {
+    /// The absolute prefix. An open whose path begins with it fails with
+    /// `EACCES`.
+    pub prefix: String,
+    /// The rule class the kernel enforces on this prefix.
+    pub rule: String,
+}
+
 /// One normalized event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
@@ -266,6 +276,37 @@ pub enum EventKind {
         #[serde(default)]
         waited_ms: u64,
     },
+    /// The kernel floor of this session became active.
+    ///
+    /// The child enacted a Landlock ruleset before its first program ran, so
+    /// the rule classes the event names are enforced by the kernel for the
+    /// rest of the session: their actions fail with `EACCES`, no approval can
+    /// allow them, and the session never needs to ask them.
+    KernelFloor {
+        /// The rule classes the kernel enforces for this session, whose
+        /// questions the session no longer asks.
+        rules: Vec<String>,
+        /// The absolute path prefixes the kernel denies on a file open, each
+        /// with the rule class it answers. The prefixes are facts of the
+        /// enacted ruleset, which no approval can relax.
+        #[serde(default)]
+        denied: Vec<KernelDeniedPath>,
+    },
+    /// The kernel refused an action that the firewall had let continue.
+    ///
+    /// The floor denied the open, so the call failed with `EACCES` and the
+    /// program saw an ordinary permission error. The event names the rule
+    /// class the kernel enforced, because a bare `EACCES` names nobody — the
+    /// user would blame the file mode or the firewall for something a rule
+    /// class chose on purpose.
+    KernelDenied {
+        /// The rule whose class the kernel enforced, when one maps to the
+        /// denied path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule: Option<String>,
+        /// The path that the program asked for.
+        path: String,
+    },
     /// The monitor could not observe something.
     MonitorWarning {
         /// What went wrong.
@@ -299,6 +340,8 @@ impl EventKind {
             EventKind::LibraryLoad { .. } => "library_load",
             EventKind::EnvChange { .. } => "env_change",
             EventKind::StdinWrite { .. } => "stdin_write",
+            EventKind::KernelFloor { .. } => "kernel_floor",
+            EventKind::KernelDenied { .. } => "kernel_denied",
             EventKind::PolicyDecision { .. } => "policy_decision",
             EventKind::ApprovalRequested { .. } => "approval_requested",
             EventKind::ApprovalResolved { .. } => "approval_resolved",
@@ -320,6 +363,8 @@ impl EventKind {
                 | EventKind::ApprovalRequested { .. }
                 | EventKind::ApprovalResolved { .. }
                 | EventKind::ProcessUnlinked { .. }
+                | EventKind::KernelFloor { .. }
+                | EventKind::KernelDenied { .. }
         ) || matches!(
             self,
             EventKind::PolicyDecision { verdict, .. } if verdict.decision != crate::Decision::Allow

@@ -62,6 +62,7 @@
 pub mod inspect;
 
 mod caps;
+mod landlock;
 mod procfs;
 mod seccomp;
 mod tracer;
@@ -154,6 +155,45 @@ impl SyscallFilter {
     }
 }
 
+/// Whether the session installs the kernel floor.
+///
+/// The floor is the Landlock layer of `research/spikes/landlock/`: the
+/// "always no" rule classes of the built-in pack, enacted in the kernel
+/// before the first program runs, with no supervisor in the loop and at a
+/// measured cost of 1.0×. It removes the question instead of asking it, so
+/// it is on by default. It cannot be relaxed for a running session; a
+/// session that must touch a path the floor denies needs `--landlock off`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LandlockMode {
+    /// Enact the kernel floor: the "always no" rule classes of the pack,
+    /// enforced by the kernel before the program starts.
+    #[default]
+    On,
+    /// Install no kernel floor. The rule classes it carries keep asking
+    /// exactly as they did before it existed.
+    Off,
+}
+
+impl LandlockMode {
+    /// Reads a mode from a command-line value.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "on" | "landlock" => Some(Self::On),
+            "off" | "none" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Returns the name of the mode, as the command line spells it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// What the monitor must launch and how much it must read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorConfig {
@@ -177,6 +217,19 @@ pub struct MonitorConfig {
     /// first program runs. It is inherited by every child and it survives
     /// `execve`, so the whole session is covered.
     pub syscall_filter: SyscallFilter,
+    /// Whether the session installs the kernel floor.
+    ///
+    /// The floor is enacted one time, in the root process, right after the
+    /// request to be traced and before the filter. Like the filter it is
+    /// inherited by every child and it survives `execve`, and no descendant
+    /// can drop it.
+    pub landlock: LandlockMode,
+    /// The home directory whose credential stores the floor hides.
+    ///
+    /// `None` reads `HOME` of the monitor. The field exists so a caller with
+    /// its own notion of the home directory — and a test with a temporary
+    /// one — can name it.
+    pub landlock_home: Option<PathBuf>,
 }
 
 impl Default for MonitorConfig {
@@ -188,6 +241,8 @@ impl Default for MonitorConfig {
             capture_input: true,
             max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             syscall_filter: SyscallFilter::default(),
+            landlock: LandlockMode::default(),
+            landlock_home: None,
         }
     }
 }

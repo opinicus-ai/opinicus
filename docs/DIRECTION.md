@@ -146,7 +146,7 @@ more:
 | --- | --- | --- |
 | exec `ptrace` — provenance, hold-at-exec | ships | [ARCHITECTURE.md](ARCHITECTURE.md) §3, [RESEARCH.md](RESEARCH.md) |
 | `seccomp` `RET_TRACE` filter — file opens, connections | ships | [ARCHITECTURE.md](ARCHITECTURE.md) §3a |
-| Landlock — in-kernel "always no" rules | recommended, not built | [DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4 |
+| Landlock — in-kernel "always no" rules | ships | [ARCHITECTURE.md](ARCHITECTURE.md) §3c |
 | `fanotify` / eBPF — privileged tier | later, enterprise | [DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4 |
 
 The measurements of [DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) stand, and

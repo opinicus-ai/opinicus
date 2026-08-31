@@ -99,6 +99,8 @@ pub fn capabilities(filter: SyscallFilter) -> Vec<MonitorCapability> {
 
     caps.extend(probe_syscall_filter(filter));
 
+    caps.push(probe_kernel_floor());
+
     caps.push(probe_unprivileged());
     caps
 }
@@ -148,6 +150,28 @@ fn probe_syscall_filter(filter: SyscallFilter) -> Vec<MonitorCapability> {
             "every outgoing connection of a 64-bit program to an IPv4 or an IPv6 address reaches the firewall; a local socket is passed by",
         ),
     ]
+}
+
+/// Reports whether this machine can carry the kernel floor.
+///
+/// The floor is independent of the filter mode: it enforces the "always no"
+/// rule classes of the built-in pack in the kernel, whatever else the session
+/// observes. A machine that says no keeps asking those rules exactly as
+/// before, and the probe says so.
+fn probe_kernel_floor() -> MonitorCapability {
+    match crate::landlock::availability() {
+        Ok(abi) => available_with(
+            "kernel_floor",
+            &format!(
+                "Landlock ABI {abi}: the always-no rule classes of the built-in pack are \
+                 enforced by the kernel before the first program runs, with no question"
+            ),
+        ),
+        Err(reason) => MonitorCapability::missing(
+            "kernel_floor",
+            format!("{reason}; the rule classes it carries keep asking as before"),
+        ),
+    }
 }
 
 /// Reads the Yama setting and reports whether a normal user can trace.

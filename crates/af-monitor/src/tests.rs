@@ -1068,9 +1068,22 @@ fn the_off_mode_installs_no_filter_and_takes_no_privilege() {
     let status = dir.path().join("status.txt");
     let script = format!("/bin/cat /proc/self/status > {}", status.display());
 
-    let (outcome, handler) = run_filtered(&script, SyscallFilter::Off, Recorder::default(), 20);
+    // The kernel floor needs the same promise as the filter, so a session
+    // that keeps the floor also keeps `NoNewPrivs`. A session that switches
+    // both off keeps the right to raise a privilege, exactly as before the
+    // floor existed.
+    let config = |landlock| MonitorConfig {
+        syscall_filter: SyscallFilter::Off,
+        landlock,
+        landlock_home: Some(dir.path().to_path_buf()),
+        ..MonitorConfig::new(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            script.clone(),
+        ])
+    };
+    let (outcome, handler) = run_config(config(crate::LandlockMode::Off), Recorder::default(), 20);
     assert_eq!(outcome.exit_code, Some(0));
-
     assert!(
         handler.actions.is_empty(),
         "a session with no filter observes no action, but it saw {:?}",
@@ -1087,9 +1100,130 @@ fn the_off_mode_installs_no_filter_and_takes_no_privilege() {
     assert_eq!(
         field("NoNewPrivs:"),
         "0",
-        "the monitor only takes the right to raise privilege when it really installs a filter"
+        "a session with no filter and no floor keeps the right to raise a privilege"
     );
     assert_eq!(field("Seccomp:"), "0", "no filter is installed");
+
+    let (outcome, _) = run_config(config(crate::LandlockMode::On), Recorder::default(), 20);
+    assert_eq!(outcome.exit_code, Some(0));
+    let text = std::fs::read_to_string(&status).expect("the child wrote its own state");
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(|value| value.trim().to_string())
+            .unwrap_or_else(|| panic!("the field {name} is in /proc/<pid>/status"))
+    };
+    assert_eq!(
+        field("NoNewPrivs:"),
+        "1",
+        "the kernel floor needs the no-new-privileges promise, whatever the filter mode"
+    );
+    assert_eq!(field("Seccomp:"), "0", "no filter is installed");
+}
+
+/// The kernel floor denies a credential read two shells deep and explains it.
+///
+/// The path is an invented key name under the real `.ssh` of the user: the
+/// floor hides the whole directory, so the denial happens whether or not the
+/// file exists, and no real credential is ever read. The test needs a real
+/// home directory because the carve-out is what hides the store — a home
+/// under `/tmp` or under the work tree would be writable there, which is
+/// exactly the soundness rule the last test of this group proves.
+#[test]
+fn the_floor_denies_a_credential_read_two_shells_deep_and_explains_it() {
+    let Some(home) = std::env::var_os("HOME") else {
+        eprintln!("no HOME on this machine, so the floor test cannot run");
+        return;
+    };
+    let key = Path::new(&home).join(".ssh").join("id_afw_floor_test");
+
+    let script = format!("sh -c 'cat {}'", key.display());
+    let config = MonitorConfig {
+        syscall_filter: SyscallFilter::AllOpens,
+        landlock: crate::LandlockMode::On,
+        ..MonitorConfig::new(vec!["/bin/sh".to_string(), "-c".to_string(), script])
+    };
+    let (outcome, handler) = run_config(config, Recorder::default(), 20);
+
+    // The read failed, and the session said why.
+    assert_ne!(outcome.exit_code, Some(0), "the credential read must fail");
+    let denials = handler.of_kind("kernel_denied");
+    assert_eq!(
+        denials.len(),
+        1,
+        "one kernel denial is reported:\n{:?}",
+        handler.events
+    );
+    let EventKind::KernelDenied { rule, path } = &denials[0].kind else {
+        panic!("wrong event kind");
+    };
+    assert_eq!(rule.as_deref(), Some("filesystem.credentials.read"));
+    assert_eq!(path, &key.display().to_string());
+
+    // The floor became a fact of the session before the first program ran.
+    assert_eq!(
+        handler.of_kind("kernel_floor").len(),
+        1,
+        "the session records its kernel floor"
+    );
+}
+
+/// The same session without the floor reads the path without a kernel
+/// denial, so the refusal is the floor and nothing else.
+#[test]
+fn a_session_without_the_floor_reports_no_kernel_denial() {
+    let Some(home) = std::env::var_os("HOME") else {
+        eprintln!("no HOME on this machine, so the floor test cannot run");
+        return;
+    };
+    let target = Path::new(&home).join(".ssh").join("id_afw_floor_test");
+
+    let script = format!("cat {}", target.display());
+    let config = MonitorConfig {
+        syscall_filter: SyscallFilter::AllOpens,
+        landlock: crate::LandlockMode::Off,
+        ..MonitorConfig::new(vec!["/bin/sh".to_string(), "-c".to_string(), script])
+    };
+    let (outcome, handler) = run_config(config, Recorder::default(), 20);
+    assert_eq!(
+        outcome.exit_code,
+        Some(1),
+        "the invented key does not exist, so the read fails with an ordinary error"
+    );
+    assert!(
+        handler.of_kind("kernel_denied").is_empty(),
+        "no kernel denial is reported without the floor"
+    );
+}
+
+/// The floor hides the credential stores of the home directory and nothing
+/// else: a `.ssh` inside the work tree stays writable, because a sandbox that
+/// stopped the work would stop the work.
+#[test]
+fn the_floor_leaves_a_ssh_directory_of_the_work_tree_alone() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("make the home directory");
+    std::fs::create_dir_all(dir.path().join(".ssh")).expect("make a project ssh directory");
+    let target = dir.path().join(".ssh").join("known_hosts");
+
+    let script = format!("echo host > {}", target.display());
+    let config = MonitorConfig {
+        landlock: crate::LandlockMode::On,
+        landlock_home: Some(home),
+        cwd: Some(dir.path().to_path_buf()),
+        ..MonitorConfig::new(vec!["/bin/sh".to_string(), "-c".to_string(), script])
+    };
+    let (outcome, _) = run_config(config, Recorder::default(), 20);
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "the write inside the work tree works"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("the file was written"),
+        "host\n"
+    );
 }
 
 #[test]

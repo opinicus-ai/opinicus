@@ -640,21 +640,31 @@ those programs in `program` and asks for the real command with `argv_matches`:
 
 | File | Rules | What it protects |
 | --- | --- | --- |
-| `policies/filesystem.yaml` | 28 | Deletion outside the work tree, credential files, system files, disks. |
+| `policies/filesystem.yaml` | 29 | Deletion outside the work tree, credential files, system files, disks. |
 | `policies/git.yaml` | 16 | Force push, protected branches, lost work, rewritten history. |
 | `policies/database.yaml` | 16 | Drop, truncate, statements with no `where`, production servers. |
 | `policies/cloud.yaml` | 23 | Kubernetes, Terraform, AWS, Azure, Google Cloud, containers, Helm. |
 | `policies/network.yaml` | 18 | Downloads that run at once, administration ports, reverse shells, data that leaves. |
 | `policies/process.yaml` | 33 | Programs from temporary places, hidden payloads, deep shell chains. |
-| `policies/memory.yaml` | 5 | Chains, bursts, sweeps and a remote that the session did not know. |
+| `policies/memory.yaml` | 7 | Chains, bursts, sweeps and a remote that the session did not know. |
 | `policies/allowlist.yaml` | 5 | Known safe forms of commands that look dangerous. |
-| **Total** | **144** | |
+| **Total** | **147** | |
 
-Of the 144 rules, 9 answer `deny`, 59 answer `approval_required` and 76 stay
+Of the 147 rules, 9 answer `deny`, 61 answer `approval_required` and 77 stay
 quiet with `allow`. The rules that stop an action only look at commands that
 destroy data. A normal development session — `git status`, `cargo build`,
 `npm test`, `psql -c "SELECT ..."`, `kubectl get pods` — matches no rule at
 all and produces no note.
+
+Six of the 61 questions are answered by the kernel instead of the user. When
+the Landlock floor of the monitor is active (the default), the session does
+not ask `filesystem.etc.write`, `filesystem.delete.system-path`,
+`filesystem.delete.mount-root`, `filesystem.device.truncate`,
+`process.signal.kill-everything`, and `filesystem.credentials.write` on the
+paths the floor hides: the kernel refuses those actions whatever the answer
+would be, and the session says so instead of asking.
+`research/spikes/landlock/tests/count-rules.py` holds the full measurement
+and fails when the pack and the floor drift apart.
 
 `policies/memory.yaml` is the only file whose rules need more than one
 action. It holds the chain of a credential read and an upload, a burst of

@@ -381,6 +381,52 @@ assert_eq "J3 the trace holds no strong decision" \
     "0" "$(afw_trace_matches "$TRACE_J" '"decision" *: *"(approval_required|deny|terminate)"')"
 
 # ---------------------------------------------------------------------------
+# K. The kernel floor: a credential read two shells deep fails with no
+#    prompt, and the session explains why.
+#
+# The floor is the Landlock layer of research/spikes/landlock: the "always
+# no" rule classes of the built-in pack, enacted in the kernel before the
+# first program runs. The key path below is an invented name inside the real
+# .ssh directory: the floor hides the whole directory, the denial happens
+# whether or not the file exists, and no real credential is ever read.
+# ---------------------------------------------------------------------------
+
+printf '\n%sK — the kernel floor answers without asking%s\n' "$AFW_BOLD" "$AFW_RESET"
+
+TRACE_K="$WORK_DIR/trace-k.jsonl"
+
+status_k=0
+"$BINARY" run --approve deny --syscall-filter all-opens --trace "$TRACE_K" \
+    -- sh -c "sh -c \"cat ~/.ssh/id_afw_e2e_key\"" \
+    >"$WORK_DIR/k.stdout" 2>"$WORK_DIR/k.stderr" || status_k=$?
+
+assert_exit_nonzero "K1 the credential read two shells deep fails" "$status_k"
+assert_eq "K2 the trace holds no approval question" \
+    "0" "$(afw_trace_matches "$TRACE_K" '"type" *: *"approval_requested"')"
+assert_contains "K3 the session names the rule the kernel enforced" \
+    "$(file_text "$WORK_DIR/k.stderr")" "filesystem.credentials.read"
+assert_contains "K4 the trace records the kernel denial" \
+    "$(file_text "$TRACE_K")" "kernel_denied"
+assert_contains "K5 the trace records the kernel floor" \
+    "$(file_text "$TRACE_K")" "kernel_floor"
+
+# The write side runs in the default mode: an open that asks to change a
+# credential file is held by the kernel filter, matches the write rule, and
+# the kernel answers it — no question, and the same explanation.
+TRACE_KW="$WORK_DIR/trace-kw.jsonl"
+
+status_kw=0
+"$BINARY" run --approve deny --trace "$TRACE_KW" \
+    -- sh -c "sh -c \"printf backdoor >> ~/.ssh/id_afw_e2e_key\"" \
+    >"$WORK_DIR/kw.stdout" 2>"$WORK_DIR/kw.stderr" || status_kw=$?
+
+assert_exit_nonzero "K6 the credential write two shells deep fails" "$status_kw"
+assert_eq "K7 the write asks no question either" \
+    "0" "$(afw_trace_matches "$TRACE_KW" '"type" *: *"approval_requested"')"
+assert_contains "K8 the write names the write rule" \
+    "$(file_text "$WORK_DIR/kw.stderr")" "filesystem.credentials.write"
+
+# ---------------------------------------------------------------------------
 # Summary.
 # ---------------------------------------------------------------------------
 

@@ -865,3 +865,118 @@ useful without it. For a company that accepts an installer, in order:
 4. Treat the 12 class B rules as a second switch, "strict mode". Start with
    `process.exec.from-temp`, because write-xor-execute for `/tmp` is free and
    it removes a whole class of attack.
+
+---
+
+## The shipped floor (ML, 2026-08-31)
+
+The recommendation above became product code. The floor lives in
+`crates/af-monitor/src/landlock.rs`, is on by default (`--landlock off` turns
+it off), and ARCHITECTURE.md section 3c describes it as built. This section
+holds the re-measurement of the pack and the numbers of the shipping change.
+Everything comes from a command in this directory (`make rules`, `make
+check`, `make bench`) or from the repository
+(`research/bench/floor.sh`, `tests/e2e.sh`, `research/bypass/benign.sh`).
+
+### The grant list, as it ships
+
+The spike's floor granted the work tree, `/usr`, `/etc`, `/tmp` and
+`/dev/null`. The shipped floor grants more, because the benign corpus must
+run under it: `cargo build` writes `/tmp` and locks `~/.cargo`, `npm` reads
+`~/.npmrc`, `git` reads `~/.gitconfig`, and `node` itself lives under
+`~/.local` on this machine. The shipped grants:
+
+| Path | Rights |
+| --- | --- |
+| the work tree, `/tmp`, `/var/tmp`, `/var/cache` | everything |
+| the entries of `$HOME` | everything, except the hidden stores below |
+| `/usr`, `/etc`, `/opt`, `/srv`, `/boot`, `/bin`, `/sbin`, `/lib`, `/lib64` | read, list, execute |
+| `/proc`, `/sys`, `/run`, `/var` | read, list |
+| `/dev/null`, `/dev/full`, `/dev/tty`, `/dev/ptmx`, `/dev/pts`, `/dev/shm` | read, write, execute, truncate |
+| `/dev/zero`, `/dev/random`, `/dev/urandom` | read, execute |
+| `$HOME/.ssh`, `$HOME/.aws/credentials`, `$HOME/.netrc`, `$HOME/.git-credentials` | no rule at all |
+| `$HOME/.npmrc`, `$HOME/.pypirc`, `$HOME/.kube/config`, `$HOME/.docker/config.json`, `$HOME/.config/gh/hosts.yml` | read and execute, no write |
+| the raw devices of `/dev`, `/mnt`, `/media`, `/run/media`, `/Volumes` | no rule at all |
+
+plus the signal scope of ABI 6. The tool configuration files keep their read
+and lose their write — the spike's all-or-nothing hide would have broken
+every `kubectl` and `npm` session, and file-granularity rules can do better.
+
+Two kernel facts that the port measured and the spike had not needed:
+
+* A rule that names a file, a device or a socket may not carry a directory
+  right; the kernel rejects the whole rule with `EINVAL`. The floor trims
+  the rights to the object it names.
+* The bit numbers of `linux/landlock.h` start with `EXECUTE` at bit 0. A
+  hand-written table that starts with `READ_FILE` at bit 0 builds a ruleset
+  that lists nothing and explains nothing, and the failure looks like five
+  other bugs before it looks like a table. The port measured every one of
+  them on the way to the fix.
+
+### The pack, re-measured
+
+`make rules` (`tests/count-rules.py`, rewritten for this) reads the pack the
+way the product sees it — `policy list --json` — and classifies all rules
+against the floor that really ships. It fails when a rule has no class, so
+the count cannot drift.
+
+| | Rules |
+| --- | ---: |
+| the pack | 147 |
+| stop the user (`deny` or `approval_required`) | 70 |
+| questions the pack can ask (`approval_required`) | 61 |
+| **A — the kernel answers, the question disappears** | **6** |
+| A' — `deny` rules the kernel backs | 3 |
+| B — the floor denies part of the ground | 20 |
+| C — the floor is blind | 118 |
+
+**6 of 61 questions disappear (10%).** The spike's headline was "10 of 69
+rules move, 24% of the budget" — the spike counted every rule that could
+move **on paper**. The shipped count is smaller because the bar moved with
+the code: a class rides on the floor only when no session shape exists in
+which the rule matches and the kernel still allows the action. The test that
+forced the bar up is real: a `.ssh` under the work tree is writable there,
+so `filesystem.credentials.write` skips its question only on the paths the
+floor hides; a sweep over the home still runs when the work tree **is** the
+home, so `filesystem.find.delete-wide` keeps its question. Three classes
+that the spike moved (`delete.home`, `find.delete-wide`,
+`interpreter.delete-system-path`) came back for exactly that reason — the
+floor stops the shape that destroys the directory but not the contents of
+its entries.
+
+### The corpus and the bench
+
+The benign corpus ran under the floor in all three filter modes
+(`research/bypass/benign.sh`): `cargo build` in `/tmp`, `npm`, `git`,
+`python3`, `find`, `grep` all completed, with **zero questions, zero agent
+tags, exit 0** in `write-only`, `all-opens` and `off`.
+
+`research/bench/floor.sh` (new) measures the product with the floor off and
+on against the same baseline, medians of 7 on the shared benchmark:
+
+| Workload | baseline | floor off | floor on | on ÷ off |
+| --- | ---: | ---: | ---: | ---: |
+| W1 exec | 147 ms | 345 ms | 355 ms | 1.03× |
+| W2 file | 13 ms | 143 ms | 143 ms | 1.00× |
+| W3 mixed | 83 ms | 250 ms | 245 ms | 0.98× |
+
+**No measurable cost.** The one-time build of the ruleset — 326 rules on
+this machine, the enumeration of the home directory — sits inside the
+run-to-run spread (the on/off ratio moved from 0.99× to 1.03× between two
+runs of the same build), exactly as the spike predicted for a 322-rule
+ruleset (1.0–1.7 ms).
+
+### The explainer
+
+The spike offered three ways to explain a denial. The shipped one is the
+fourth, and it needed a measurement of its own: the monitor probed continuing
+a held open with `PTRACE_SYSCALL` and reading `rax` at the syscall-exit stop,
+and **the kernel delivers no exit stop after a seccomp stop** — the next
+stop is the next seccomp event. It does not matter: the ruleset was fixed
+before the program started and can never be relaxed, so the denial of an
+open on a hidden path is certain, and the monitor explains it from the
+certain fact instead of from an observation. `tests/e2e.sh` proves the whole
+chain (K1–K8): a credential read two shells deep fails with no prompt, the
+stderr names `filesystem.credentials.read`, the trace records the
+`kernel_denied` event and the `kernel_floor` fact, and the write side answers
+`filesystem.credentials.write` the same way in the default filter mode.

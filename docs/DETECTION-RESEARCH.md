@@ -146,6 +146,16 @@ It carries **10 of the 69 rules**, and all 10 are rules that stop the user
 today. That removes **24% of the interruption budget**. This kernel gives ABI
 8, so all filesystem rights and both TCP rights are available.
 
+> **Shipped, 2026-08-31.** The floor now ships in `af-monitor` (section 3c
+> of [ARCHITECTURE.md](ARCHITECTURE.md)), and the pack was re-measured
+> against it: of the 147 rules of today's pack, the floor answers 6 of the
+> 61 questions and backs 3 of the 9 `deny` rules. The number is smaller than
+> the spike's 24% because the bar moved: the spike counted every rule that
+> *could* move on paper, and the shipped floor only carries a class when no
+> session shape exists in which the rule matches and the kernel still allows
+> the action. The cost claim held exactly: 0.99× to 1.03× of the product's
+> own time on the shared benchmark.
+
 Its limits are hard and must be stated: it cannot ask, it cannot be relaxed
 after it is applied, and it sees no program name, argument or SQL text. It
 carries the rules whose answer is always no, and nothing else.

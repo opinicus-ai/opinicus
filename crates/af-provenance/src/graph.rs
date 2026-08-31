@@ -151,6 +151,8 @@ impl ProcessGraph {
             | EventKind::LibraryLoad { .. }
             | EventKind::EnvChange { .. }
             | EventKind::StdinWrite { .. }
+            | EventKind::KernelFloor { .. }
+            | EventKind::KernelDenied { .. }
             | EventKind::ApprovalRequested { .. }
             | EventKind::ApprovalResolved { .. }
             | EventKind::MonitorWarning { .. } => {}

@@ -24,7 +24,7 @@ pub mod traits;
 
 pub use decision::{Decision, RiskLevel, RuleInfo, RuleMatch, Verdict};
 pub use error::{Error, Result};
-pub use event::{Event, EventKind, InputStream, MonitorCapability};
+pub use event::{Event, EventKind, InputStream, KernelDeniedPath, MonitorCapability};
 pub use identity::{
     AgentLink, AgentTag, Assessment, DetectionInput, DetectionSignal, Detector, DetectorRegistry,
     IdentifiedAgent, SessionDetach, TAG_THRESHOLD,

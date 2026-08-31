@@ -129,6 +129,13 @@ fn summary(event: &Event) -> String {
             None => format!("unset {name}"),
         },
         EventKind::StdinWrite { stream, data } => format!("{stream:?} {data}"),
+        EventKind::KernelFloor { rules, .. } => {
+            format!("the kernel enforces {} rule class(es)", rules.len())
+        }
+        EventKind::KernelDenied { rule, path } => match rule {
+            Some(rule) => format!("the kernel denied {path}: {rule}"),
+            None => format!("the kernel denied {path}: the sandbox grants nothing there"),
+        },
         EventKind::PolicyDecision {
             action, verdict, ..
         } => {

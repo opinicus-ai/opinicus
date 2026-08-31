@@ -241,7 +241,12 @@ Does not work yet:
   connects, and not the statement that the program sends over a connection
   that is already open. Watching that costs 8.8× and is not worth it.
 * No delete and no rename event. The schema has no shape for them yet, so a
-  delete is still judged at the command that does it.
+  delete inside the work tree is still judged at the command that does it;
+  a delete outside the granted trees is impossible in the kernel.
+* The kernel floor cannot be relaxed and it carves the home directory: `ls ~`
+  and `ls /` fail with `EACCES` under it, and the session explains every
+  denial it causes. A session that must touch a path the floor denies starts
+  with `--landlock off`.
 * A path that a rule reads is **not proof**. The firewall reads it out of
   the memory of the program that it judges, and a second thread of that
   program can change it in the meantime. It is good enough to report, to
@@ -264,7 +269,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 | Path | Function |
 | --- | --- |
 | `crates/af-core` | The shared contract: normalized events, process facts, decisions and the traits between the layers. |
-| `crates/af-monitor` | The Linux collector. It starts a command under `ptrace`, follows every descendant, holds a process at the exec boundary, and holds a chosen system call with a `seccomp` filter. |
+| `crates/af-monitor` | The Linux collector. It starts a command under `ptrace`, follows every descendant, holds a process at the exec boundary, holds a chosen system call with a `seccomp` filter, and enacts a Landlock ruleset that makes the "always no" rule classes of the pack impossible in the kernel. |
 | `crates/af-provenance` | The provenance graph. It answers which process started which process. |
 | `crates/af-policy` | The deterministic policy engine, the rule format and the rule pack inside the binary. |
 | `crates/af-approval` | The approval layer. It asks the user on the terminal and remembers a session decision. |

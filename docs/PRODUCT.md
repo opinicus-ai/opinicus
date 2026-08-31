@@ -78,8 +78,13 @@ So the rule pack is deliberately unbalanced:
 
 | Behaviour | Rules |
 | --- | --- |
-| Stop the action and ask, or block it | 41 |
-| Report only, and stay quiet | 28 |
+| Stop the action and ask, or block it | 70 |
+| Report only, and stay quiet | 77 |
+
+Six of the questions are not asked at all any more: the Landlock kernel
+floor answers them in the kernel, before the program starts, with no
+supervisor in the loop and at a measured cost of 1.0×. Quiet by
+construction is the cheapest quiet there is.
 
 Only an operation that destroys data or infrastructure with no simple way back
 may stop the user. A `kubectl delete pod`, a `git branch -D` and a

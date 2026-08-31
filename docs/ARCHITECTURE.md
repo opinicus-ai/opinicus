@@ -16,7 +16,7 @@ The system has seven layers and one shared contract.
 | Layer | Crate | Function |
 | --- | --- | --- |
 | Session launcher | `af-cli`, `af-monitor` | Makes the session, starts the command and keeps the root of the process tree. |
-| OS event collector | `af-monitor` | Reads process events from the kernel with `ptrace`, holds a chosen system call with a `seccomp` filter, and reads facts from `/proc`. |
+| OS event collector | `af-monitor` | Reads process events from the kernel with `ptrace`, holds a chosen system call with a `seccomp` filter, enacts the Landlock kernel floor, and reads facts from `/proc`. |
 | Event normalization | `af-core`, `af-monitor` | Converts every platform event into one `Event` value. |
 | Provenance engine | `af-provenance` | Builds the causal graph of the processes, answers ancestry questions, and carries the agent identity of the session through the graph. |
 | Policy engine | `af-policy` | Matches deterministic rules against an action and returns a verdict, and what the session must remember. |
@@ -306,10 +306,94 @@ manifest, a presence-only marker — stays below the line. Measured on the
 benign corpus of M1: zero questions and zero agent tags in all three filter
 modes.
 
+## 3c. The path of one kernel denial
+
+The two boundaries of sections 3 and 3a hold a process **while the firewall
+asks**. A third mechanism removes the question instead: before the first
+program of the session runs, the child enacts a Landlock ruleset that makes
+the "always no" rule classes of the built-in pack impossible, in the kernel,
+with no supervisor in the loop. The measurement behind this section is
+`research/spikes/landlock/FINDINGS.md` and the re-measurement of the pack
+that ships with it.
+
+1. **The monitor builds a plan, before the child exists.** From the working
+   directory and the home directory it computes every grant: the work tree,
+   `/tmp`, `/var/tmp` and `/var/cache` with every right; the entries of the
+   home directory with every right except the credential stores; `/usr`,
+   `/etc`, `/opt`, `/srv`, `/boot` with read and execute; `/proc`, `/sys`,
+   `/run`, `/var` with read; the safe device files of `/dev`; nothing on the
+   raw devices, the media trees and the credential stores themselves. The
+   walk over the home directory happens here, in the monitor, so the child
+   never reads a directory between `fork` and `execve`.
+
+2. **The child enacts the plan.** In the same `pre_exec` closure where it
+   asks to be traced, before the `seccomp` filter, it creates the ruleset,
+   adds one rule per grant and calls `landlock_restrict_self`. The filter is
+   installed after it, because the floor needs one file open per rule and
+   the filter holds file opens. The child reports the fate of the enactment
+   through one pipe byte; the monitor reads it after the first exec stop and
+   tells the user when the floor is absent. A machine without Landlock, or a
+   session with `--landlock off`, keeps exactly the behaviour of the
+   versions before the floor existed.
+
+3. **The ruleset is immutable for the session.** It survives `fork` and
+   `execve`, no descendant can relax it, and no approval can open it. This
+   is why only rule classes whose answer is **always no** ride on it: a rule
+   where the user sometimes says yes keeps its question.
+
+4. **The kernel answers, and the session explains.** When a rule class the
+   floor carries matches, the session does not ask: the kernel refuses the
+   action with `EACCES` whatever the user would answer, and the session says
+   so. When a held file open targets a path the floor denies, the monitor
+   reports a `kernel_denied` event that names the rule class — the denial is
+   certain, because the ruleset was fixed before the program started, so the
+   monitor explains it without waiting for the failed call. The rules the
+   floor carries are named in a `kernel_floor` event at session start, and
+   `research/spikes/landlock/tests/count-rules.py` keeps the list and the
+   pack in step.
+
+### What the floor carries, and what it does not
+
+The pack holds 147 rules today; 70 stop the user. The floor answers 6 of the
+61 questions the pack can ask (`filesystem.etc.write`,
+`filesystem.delete.system-path`, `filesystem.delete.mount-root`,
+`filesystem.credentials.write` on the paths it hides,
+`filesystem.device.truncate`, `process.signal.kill-everything`) and backs 3
+of the 9 `deny` rules with the same guarantee. Twenty classes are denied in
+part and keep their question; 118 are blind to Landlock, which sees a path
+and a TCP port and nothing else.
+
+The floor is deliberately conservative about which questions it removes. A
+class rides on the floor only when **no session shape** exists in which the
+rule matches and the kernel still allows the action: a `.ssh` under the work
+tree or under `/tmp` stays writable there, so `filesystem.credentials.write`
+skips its question only for a path under a hidden store; a sweep over the
+home directory cannot start in the common session and still can when the
+work tree is the home itself, so `filesystem.find.delete-wide` keeps its
+question. The negative test is the point: a question removed by mistake is
+a question whose answer cannot take effect.
+
+### The price
+
+* `ls /` and `ls ~` fail with `EACCES`, because a directory that holds a
+  hidden path gets no rule of its own (`ls ~/devel` still works). The
+  carve-out enumerates the home directory once, at session start: 326 rules
+  on the machine of the measurement, a build the spike timed at 1.0–1.7 ms
+  for the same shape.
+* The floor needs the `no_new_privs` promise that the filter needs, so a
+  session with `--syscall-filter off` now also carries the promise. A
+  session with both switched off keeps the right to raise a privilege,
+  exactly as before.
+* Landlock does not mediate `chmod` or ioctls, sees no program name, no
+  argument and no host, and an `execve` from an anonymous file descriptor
+  runs (measured). Network rights are not handled at all.
+
 ## 4. The enforcement boundary
 
-**The firewall has two enforcement boundaries: the entry of the `execve`
-system call, and the `seccomp` stop of a held system call.**
+**The firewall has two decision boundaries — the entry of the `execve`
+system call and the `seccomp` stop of a held system call — and one kernel
+floor under them that makes the "always no" rule classes impossible before
+the program starts (section 3c).**
 
 The firewall is strong at the exec boundary:
 
@@ -333,6 +417,16 @@ It is strong at the system-call boundary for a different reason:
 * `PTRACE_O_EXITKILL` still holds: a process that waits at a system-call stop
   dies with the rest of the tree when the firewall dies.
 
+The kernel floor is strong in its own way:
+
+* it decides in the LSM hook, with no supervisor in the loop, at a measured
+  cost of 1.0× on the benchmark of the spike;
+* it was fixed before the program started, so nothing the program does can
+  race it, and 0 of 6 escape attempts worked in the spike, a new user
+  namespace included;
+* it covers actions the boundaries never see — a delete inside a running
+  program, a read of a key in a program that never starts a second process.
+
 ### What the boundaries cannot stop
 
 * **Content that leaves through a connection that is already open.** The
@@ -341,11 +435,20 @@ It is strong at the system-call boundary for a different reason:
   a chatty program, which is the same order as the full system-call tracing
   that this design rejected. Seeing that content needs a proxy for the
   protocol, not a system-call filter.
-* **A delete and a rename.** The kernel filter could hold them. The
-  normalized schema has the event kinds (`file_delete`, `file_rename`);
+* **A delete and a rename inside a granted tree.** The kernel filter holds
+  neither. The floor makes a delete outside the granted trees impossible,
+  and a delete inside the work tree is judged at the command that does it.
+  The normalized schema has the event kinds (`file_delete`, `file_rename`);
   only the in-process research sensor produces them today
-  (`research/spikes/inprocess/`), and no shipped rule can act on them. A
-  delete is still judged at the command that does it.
+  (`research/spikes/inprocess/`), and no shipped rule can act on them.
+* **A write to a credential store under the work tree or under `/tmp`.** The
+  floor hides the stores of the home directory; a `.ssh` created inside the
+  work tree is normal writable space, and the rule keeps its question there.
+* **An `execve` from an anonymous file descriptor.** Measured: a program
+  exec'd from a `memfd` runs under the floor. `process.exec.fileless` keeps
+  its question.
+* **`chmod` and ioctls.** Landlock mediates neither, and the floor handles
+  no network right at all.
 * **An open that only reads, in the default mode.** The kernel drops it, on
   purpose, because a read is 99.7% of the file traffic of a normal build.
   `--syscall-filter all-opens` holds it and costs more.
@@ -521,12 +624,16 @@ rather than one interception mechanism.
 | `seccomp` `RET_TRACE` filter | **ships** (§3a) | file opens and connections inside a running program |
 | in-process instrumentation (`LD_PRELOAD`) | **measured sensor** — spike of 2026-08-31 (`research/spikes/inprocess/`), not product-integrated | semantics close to the agent: about-to-exec, small-file content, delete/rename, dlopen, environment; durable instance registration for M4/M5; never a boundary |
 | correlation of expected vs observed | planned | a discrepancy between the in-process view and this document's sensors is a high-severity signal on its own (DIRECTION.md §3.4) |
-| Landlock | recommended, unbuilt | in-kernel "always no" rules; removes questions ([DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4) |
+| Landlock | **ships** (§3c) | in-kernel "always no" rules; removes the question ([DETECTION-RESEARCH.md](DETECTION-RESEARCH.md) §4) |
 | `fanotify` / eBPF | enterprise tier | privileged observation, later (DIRECTION.md §10) |
 | Windows hooks (Win32/`ntdll`) | planned track | the Windows counterpart of the in-process sensor, under the same hook-visibility rule |
 
-Three additions land in this architecture without changing sections 1–7:
+Four additions land in this architecture without changing sections 1–7:
 
+* **The kernel floor — shipped (§3c).** Landlock turns the "always no" rule
+  classes of the built-in pack into kernel enforcement before the first
+  program runs, at a measured cost of 1.0×, with an explainer that names the
+  rule class behind every `EACCES` it causes.
 * **Agent detection and identity — shipped (§3b).** A detector subsystem
   tags the session root at launch, the tag propagates through the provenance
   graph that already exists, every event carries it, and a descendant that

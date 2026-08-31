@@ -74,6 +74,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         .map(|rule| rule.rule_id)
         .collect();
     let syscall_filter = parse_syscall_filter(&args.syscall_filter)?;
+    let landlock = parse_landlock_mode(&args.landlock)?;
     let mode = approval_mode(&args)?;
     let approver = TerminalApprover::new(mode)
         .with_timeout(args.approval_timeout.map(std::time::Duration::from_secs));
@@ -99,6 +100,8 @@ pub fn run(args: RunArgs) -> Result<i32> {
         answered: HashMap::new(),
         threshold_rules,
         pending_start: None,
+        kernel_rules: BTreeSet::new(),
+        kernel_denied: Vec::new(),
     };
 
     let capabilities = Monitor::capabilities(syscall_filter);
@@ -116,6 +119,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         env_allowlist: Vec::new(),
         capture_input: !args.no_input_capture,
         syscall_filter,
+        landlock,
         ..MonitorConfig::default()
     };
 
@@ -166,6 +170,14 @@ pub fn parse_syscall_filter(text: &str) -> Result<SyscallFilter> {
         None => {
             bail!("`--syscall-filter` accepts write-only, all-opens or off, but it got `{text}`")
         }
+    }
+}
+
+/// Reads the kernel-floor mode from a command-line value.
+fn parse_landlock_mode(text: &str) -> Result<af_monitor::LandlockMode> {
+    match af_monitor::LandlockMode::parse(text) {
+        Some(mode) => Ok(mode),
+        None => bail!("`--landlock` accepts on or off, but it got `{text}`"),
     }
 }
 
@@ -281,6 +293,20 @@ struct FirewallHandler {
     ///
     /// Built once, from `policy.rules()`, when the handler is made.
     threshold_rules: BTreeSet<String>,
+    /// The rule classes the kernel floor enforces for this session.
+    ///
+    /// Filled from the `KernelFloor` event of the monitor. While it holds a
+    /// rule, the kernel already answers that rule with a refusal: asking the
+    /// user would offer a choice that no answer can make real, so the session
+    /// explains instead of asking.
+    kernel_rules: BTreeSet<String>,
+    /// The path prefixes the kernel denies on a file open, with the rule
+    /// class each answers.
+    ///
+    /// A rule that judges a file open rides on the floor only for a path
+    /// under one of these prefixes: a credential store under the work tree or
+    /// under `/tmp` is writable there, and its question stays a question.
+    kernel_denied: Vec<(String, String)>,
     /// What the monitor can observe, until the session start event goes out.
     ///
     /// The event waits for the identifier of the root process. The value is
@@ -313,6 +339,31 @@ impl FirewallHandler {
             eprintln!(
                 "agent-firewall: process {pid} detached from the session tree; flagged unlinked"
             );
+        }
+        match &event.kind {
+            EventKind::KernelFloor { rules, denied } => {
+                self.kernel_rules = rules.iter().cloned().collect();
+                self.kernel_denied = denied
+                    .iter()
+                    .map(|path| (path.prefix.clone(), path.rule.clone()))
+                    .collect();
+                eprintln!(
+                    "agent-firewall: the kernel floor is active: {} rule class(es) enforced by \
+                     the kernel, no approval can lift them (`--landlock off` starts without it)",
+                    rules.len()
+                );
+            }
+            EventKind::KernelDenied { rule, path } => match rule {
+                Some(rule) => eprintln!(
+                    "agent-firewall: the kernel denied opening {path}: rule {rule} is enforced \
+                     by the kernel floor, and no approval can allow it in this session"
+                ),
+                None => eprintln!(
+                    "agent-firewall: the kernel denied opening {path}: the floor grants no \
+                     access there, and no approval can allow it in this session"
+                ),
+            },
+            _ => {}
         }
         if let Err(error) = self.sink.record(&event) {
             eprintln!("agent-firewall: cannot record an event: {error}");
@@ -573,6 +624,28 @@ impl FirewallHandler {
         (parts.join(" + "), has_threshold)
     }
 
+    /// Returns true when the kernel floor really refuses every action of
+    /// this rule, so the session needs no answer from anybody.
+    ///
+    /// A rule that judges an **exec** rides on the floor when its class is in
+    /// [`Self::kernel_rules`]: the classes there name trees the floor never
+    /// grants, whatever the session. A rule that judges a **file open** needs
+    /// the path on top: a rule about credential stores matches a `.ssh`
+    /// under the work tree as well as the real one, and only the real one is
+    /// hidden. The path comes from the seccomp stop and is advisory, and the
+    /// worst case of a raced path is a question that the session did not ask
+    /// while the kernel still decides on the real object — the refusal itself
+    /// is never wrong, because the kernel makes it.
+    fn kernel_answers(&self, rule_id: &str, action: &Action) -> bool {
+        match action {
+            Action::FileOpen { path, .. } => self
+                .kernel_denied
+                .iter()
+                .any(|(prefix, rule)| rule == rule_id && path.starts_with(prefix.as_str())),
+            _ => true,
+        }
+    }
+
     /// Resolves a verdict that needs a decision, and remembers the answer.
     ///
     /// This is where `on_exec` and `on_syscall` converge. `deny` is the
@@ -597,6 +670,32 @@ impl FirewallHandler {
         deny: Intercept,
         always_cache: bool,
     ) -> Intercept {
+        // The kernel floor may already have answered this verdict. A rule
+        // whose class the kernel enforces needs no question: the kernel
+        // refuses the action whatever the user says, so asking would offer a
+        // choice that no answer can make real. Only when **every** rule that
+        // holds the action rides on the floor may the session stay quiet —
+        // one rule that still needs a person keeps the whole question.
+        let intervening: Vec<_> = verdict
+            .matches
+            .iter()
+            .filter(|matched| matched.decision.needs_intervention())
+            .collect();
+        if !intervening.is_empty()
+            && intervening.iter().all(|matched| {
+                self.kernel_rules.contains(&matched.rule_id)
+                    && self.kernel_answers(&matched.rule_id, action)
+            })
+        {
+            for matched in &intervening {
+                eprintln!(
+                    "agent-firewall: the kernel floor enforces {} ({}): the action fails with \
+                     EACCES and no approval can allow it in this session",
+                    matched.rule_id, matched.title
+                );
+            }
+            return Intercept::Continue;
+        }
         let (key, is_threshold) = self.answer_key(action, verdict);
         let cached = always_cache || is_threshold;
         // Every held action is a decision of this session, whether the session
@@ -1067,6 +1166,8 @@ rules:
             answered: HashMap::new(),
             threshold_rules,
             pending_start: None,
+            kernel_rules: BTreeSet::new(),
+            kernel_denied: Vec::new(),
         };
         (handler, events)
     }
