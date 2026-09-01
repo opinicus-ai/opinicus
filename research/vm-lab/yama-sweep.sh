@@ -39,6 +39,7 @@ for round in $(seq 1 "$ROUNDS"); do
     printf 'vm-lab: yama sweep round %d of %d\n' "$round" "$ROUNDS"
     RESEARCH_VM_LAB=1 "$LAB_DIR/vm-run.sh" sh -c '
         set -euo pipefail
+        cd /root   # the driver cds into the repo; move it out from under no shell
         echo "vm: $(uname -r), yama=$(cat /proc/sys/kernel/yama/ptrace_scope)"
         dnf -q install -y gcc git python3 tar make perl golang sudo >/dev/null 2>&1 || true
         # The measurement must run UNPRIVILEGED: yama exempts CAP_SYS_PTRACE
