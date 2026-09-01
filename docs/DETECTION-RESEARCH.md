@@ -148,8 +148,9 @@ today. That removes **24% of the interruption budget**. This kernel gives ABI
 
 > **Shipped, 2026-08-31.** The floor now ships in `af-monitor` (section 3c
 > of [ARCHITECTURE.md](ARCHITECTURE.md)), and the pack was re-measured
-> against it: of the 147 rules of today's pack, the floor answers 6 of the
-> 61 questions and backs 3 of the 9 `deny` rules. The number is smaller than
+> against it: of the 155 rules of today's pack, the floor answers 6 of the
+> 66 questions and backs 3 of the 9 `deny` rules
+> (`research/spikes/landlock/tests/count-rules.py`). The number is smaller than
 > the spike's 24% because the bar moved: the spike counted every rule that
 > *could* move on paper, and the shipped floor only carries a class when no
 > session shape exists in which the rule matches and the kernel still allows

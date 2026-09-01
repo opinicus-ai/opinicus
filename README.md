@@ -283,7 +283,10 @@ Does not work yet:
 * No content of an open connection. The firewall sees that a program
   connects, and not the statement that the program sends over a connection
   that is already open. Watching that costs 8.8× and is not worth it.
-* No delete and no rename event. The schema has no shape for them yet, so a
+* No delete and no rename event from the observer. The event schema has a
+  shape for both and the in-process sensor can emit them (`FileDelete`,
+  `FileRename` in `crates/af-core/src/event.rs`), but the shipped monitor
+  holds no delete and no rename, so no product rule acts on one yet: a
   delete inside the work tree is still judged at the command that does it;
   a delete outside the granted trees is impossible in the kernel.
 * No visibility into `io_uring`. A program can submit file and network

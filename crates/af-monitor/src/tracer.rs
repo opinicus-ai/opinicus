@@ -825,12 +825,15 @@ impl Tracer<'_> {
             .on_syscall(pid, &action, &ancestry, &mut self.tree)
         {
             Intercept::Continue => {
-                // The call will run, and on a path the floor denies the
-                // kernel will refuse it. That refusal is certain — the
-                // ruleset was fixed before the program started and can never
-                // be relaxed — so the monitor explains it now, with the rule
-                // class the kernel enforces. Without this, the program sees
-                // a bare `EACCES` and the user blames the file.
+                // The call will run, and the kernel decides on the path it
+                // resolves itself: a call that really targets a path the
+                // floor denies is refused — the ruleset was fixed before the
+                // program started and can never be relaxed. The path here is
+                // the one read from the memory of the judged program,
+                // though, and a second thread can race it: this event
+                // explains the refusal the monitor expects, it is not proof
+                // of the kernel's own decision. Without this, the program
+                // sees a bare `EACCES` and the user blames the file.
                 if let Some(plan) = self.floor.as_ref() {
                     if let Action::FileOpen { path, write } = &action {
                         if let Some(denial) = plan.denies(path, *write) {

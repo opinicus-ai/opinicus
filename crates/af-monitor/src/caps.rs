@@ -233,8 +233,42 @@ fn probe_launch() -> Result<(), String> {
     let result = probe_steps(pid);
 
     let _ = kill(pid, Signal::SIGKILL);
-    let _ = wait_bounded(pid, PROBE_TIMEOUT);
+    reap_probe(pid);
     result
+}
+
+/// Walks the probe process to its final exit and reaps that exit.
+///
+/// The trace options carry `PTRACE_O_TRACEEXIT`, so a probe that reached its
+/// own end stops once more before it dies. Taking that stop without letting
+/// the process continue would leave it half-dead: the next monitor session
+/// of the same process — the test program — would reap its exit with
+/// `waitpid(-1)` and report a process that never belonged to it. The loop
+/// answers an exit stop with a continue and waits for the real exit, so no
+/// state of the probe outlives the probe.
+fn reap_probe(pid: NixPid) {
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::__WALL)) {
+            Ok(WaitStatus::StillAlive) => {}
+            Ok(WaitStatus::PtraceEvent(_, _, event))
+                if event == ptrace::Event::PTRACE_EVENT_EXIT as i32 =>
+            {
+                // The stop before the end. Only a continue lets the process
+                // die, and only the exit after it is the final status.
+                let _ = ptrace::cont(pid, None);
+            }
+            Ok(_) => return,
+            Err(Errno::EINTR) => {}
+            // No child left: something else reaped the exit already.
+            Err(Errno::ECHILD) => return,
+            Err(_) => return,
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        sleep(Duration::from_millis(1));
+    }
 }
 
 /// Runs the single steps of the probe on the test process.

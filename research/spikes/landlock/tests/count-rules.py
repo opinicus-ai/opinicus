@@ -209,6 +209,11 @@ CLASSIFICATION = {
     "tamper.process.respawned": ("C", "the sensed fact is an act of the monitor itself"),
     "tamper.sensor.preload-stripped": ("C", "the sensed fact is the environment of an exec"),
     "tamper.process.outlived": ("C", "the sensed fact is liveness at the end of the session root"),
+
+    # ---------------- correlation (M5) ----------------
+    "correlation.sensor.silent-subtree": ("C", "the judged fact is a discrepancy event replayed from two finished views; a sensor that stopped talking is not a filesystem action, and the floor mediates filesystem rights and the signal scope only"),
+    "correlation.action.contradicted": ("C", "the judged fact is a discrepancy event: a connect that crossed the process without crossing libc; the floor handles no network right, and the event is judged after the run, not at a kernel boundary"),
+    "correlation.spawn.unreported": ("C", "the judged fact is a discrepancy event: the preload an exec carried and the sensor instance that never registered; an exec's environment and the sensor's registry are nothing the floor sees"),
 }
 
 

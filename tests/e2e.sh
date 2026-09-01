@@ -5,6 +5,10 @@
 # A person or a continuous-integration job can run this test. The test builds
 # the workspace, runs three sessions and checks ten assertions. The test
 # writes a summary and returns a non-zero code when one assertion fails.
+# The summary goes to standard error, so a caller that pipes standard output
+# away (`| tee`, `| head`) still sees the verdict; such a caller reads the
+# exit code with PIPESTATUS, because the code of a pipeline is the code of
+# its last command.
 #
 # The test touches no real database. The fake psql client in demo/bin only
 # prints. The git steps use a throwaway repository. Every temporary file
@@ -111,22 +115,30 @@ assert_exit_nonzero() {
 }
 
 # Checks that a text holds a fixed string.
+#
+# The grep reads the haystack from a temporary file of the shell, not from a
+# pipe: `printf | grep -q` answers the match by leaving the pipe early, and
+# under load a writer that still has more bytes than the pipe holds can die of
+# SIGPIPE. With `pipefail` on, that turned a found match into a failed
+# assertion (measured: five false failures in 3000 probes under load, writer
+# status 141, grep status 0). The here-string form has no pipe and no such
+# failure mode.
 assert_contains() {
     local name="$1" haystack="$2" needle="$3"
-    if printf '%s\n' "$haystack" | grep -q -F -- "$needle"; then
+    if grep -q -F -- "$needle" <<<"$haystack"; then
         pass "$name"
     else
         fail "$name" "the text holds no [$needle]"
-        printf '%s\n' "$haystack" | head -n 20 | sed -e 's/^/       | /'
+        head -n 20 <<<"$haystack" | sed -e 's/^/       | /'
     fi
 }
 
 # Checks that a text does not hold a fixed string.
 assert_not_contains() {
     local name="$1" haystack="$2" needle="$3"
-    if printf '%s\n' "$haystack" | grep -q -F -- "$needle"; then
+    if grep -q -F -- "$needle" <<<"$haystack"; then
         fail "$name" "the text holds [$needle], but it must not"
-        printf '%s\n' "$haystack" | grep -F -- "$needle" | head -n 5 | sed -e 's/^/       | /'
+        grep -F -- "$needle" <<<"$haystack" | head -n 5 | sed -e 's/^/       | /' || true
     else
         pass "$name"
     fi
@@ -135,11 +147,11 @@ assert_not_contains() {
 # Checks that a text matches an extended regular expression.
 assert_matches() {
     local name="$1" haystack="$2" pattern="$3"
-    if printf '%s\n' "$haystack" | grep -q -E -- "$pattern"; then
+    if grep -q -E -- "$pattern" <<<"$haystack"; then
         pass "$name"
     else
         fail "$name" "the text matches no [$pattern]"
-        printf '%s\n' "$haystack" | head -n 20 | sed -e 's/^/       | /'
+        head -n 20 <<<"$haystack" | sed -e 's/^/       | /'
     fi
 }
 
@@ -591,17 +603,24 @@ assert_contains "T22 the discrepancy trace replays with the rules" \
 # Summary.
 # ---------------------------------------------------------------------------
 
-printf '\n%sSummary%s\n' "$AFW_BOLD" "$AFW_RESET"
-printf 'passed: %d\n' "$PASS_COUNT"
-printf 'failed: %d\n' "$FAIL_COUNT"
+# The summary goes to standard error on purpose. Standard output is what a
+# caller pipes away (`tests/e2e.sh | tee log`), and a reader that leaves the
+# pipe early can kill the writes — the verdict must not depend on the health
+# of that pipe. The exit code stays the contract: non-zero when any assertion
+# failed. A caller that pipes the output reads the code with `PIPESTATUS`
+# (measured: piped through `head -1`, the script died with 141 before its own
+# exit, and the bare `$?` of the pipeline was the reader's 0).
+printf '\n%sSummary%s\n' "$AFW_BOLD" "$AFW_RESET" >&2
+printf 'passed: %d\n' "$PASS_COUNT" >&2
+printf 'failed: %d\n' "$FAIL_COUNT" >&2
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    printf '\nthe following assertions failed:\n'
+    printf '\nthe following assertions failed:\n' >&2
     for name in "${FAILED_NAMES[@]}"; do
-        printf '  %s%s%s\n' "$AFW_RED" "$name" "$AFW_RESET"
+        printf '  %s%s%s\n' "$AFW_RED" "$name" "$AFW_RESET" >&2
     done
     exit 1
 fi
 
-printf '%severy assertion passed%s\n' "$AFW_GREEN" "$AFW_RESET"
+printf '%severy assertion passed%s\n' "$AFW_GREEN" "$AFW_RESET" >&2
 exit 0

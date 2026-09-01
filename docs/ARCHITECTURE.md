@@ -363,13 +363,13 @@ that ships with it.
 
 ### What the floor carries, and what it does not
 
-The pack holds 152 rules today; 73 stop the user. The floor answers 6 of the
-64 questions the pack can ask (`filesystem.etc.write`,
+The pack holds 155 rules today; 75 stop the user. The floor answers 6 of the
+66 questions the pack can ask (`filesystem.etc.write`,
 `filesystem.delete.system-path`, `filesystem.delete.mount-root`,
 `filesystem.credentials.write` on the paths it hides,
 `filesystem.device.truncate`, `process.signal.kill-everything`) and backs 3
-of the 9 `deny` rules with the same guarantee. Twenty classes are denied in
-part and keep their question; 118 are blind to Landlock, which sees a path
+of the 9 `deny` rules with the same guarantee. Twenty-one classes are denied in
+part and keep their question; 125 are blind to Landlock, which sees a path
 and a TCP port and nothing else.
 
 The floor is deliberately conservative about which questions it removes. A
@@ -645,7 +645,8 @@ It is strong at the system-call boundary for a different reason:
 The kernel floor is strong in its own way:
 
 * it decides in the LSM hook, with no supervisor in the loop, at a measured
-  cost of 1.0× on the benchmark of the spike;
+  cost of 0.98×–1.07× on the benchmark of the spike — zero within the
+noise;
 * it was fixed before the program started, so nothing the program does can
   race it, and 0 of 6 escape attempts worked in the spike, a new user
   namespace included;
@@ -868,7 +869,8 @@ Five additions land in this architecture without changing sections 1–7:
 
 * **The kernel floor — shipped (§3c).** Landlock turns the "always no" rule
   classes of the built-in pack into kernel enforcement before the first
-  program runs, at a measured cost of 1.0×, with an explainer that names the
+  program runs, at a measured cost of 0.98×–1.07× — zero within the noise —
+with an explainer that names the
   rule class behind every `EACCES` it causes.
 * **Agent detection and identity — shipped (§3b).** A detector subsystem
   tags the session root at launch, the tag propagates through the provenance

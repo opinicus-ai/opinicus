@@ -6,6 +6,23 @@ otherwise. Each entry names its evidence.
 
 ---
 
+
+## 2026-09-01 — L0 is built: the kernel floor ships in the monitor
+
+Supersedes one line of the 2026-08-28 stack entry below, which says "L0 is
+recommended and unbuilt." L0 is built: the Landlock kernel floor enacted by
+the monitor (`crates/af-monitor/src/landlock.rs`, the ML milestone) denies
+filesystem writes outside the granted trees and scopes signals before the
+first program runs, with no supervisor in the loop. It answers 6 of the 68
+questions the pack can ask (160 rules, counted 2026-09-01 after the
+audit-trail rules of M8) and backs 3 of the 9 `deny` rules, and
+`research/spikes/landlock/tests/count-rules.py` holds that count and fails
+when the pack and the floor drift apart. The floor is a boundary for
+filesystem rights and signals only — it holds no network right, and it is a
+boundary, not a sensor. L3 still waits for the enterprise edition
+([DIRECTION.md](DIRECTION.md) §10).
+
+---
 ## 2026-08-31 — Correlation ships post-hoc, and the budget refused the write comparison
 
 The M5 gate measured the correlation engine
