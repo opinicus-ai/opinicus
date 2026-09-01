@@ -25,4 +25,7 @@ rule, and the value of measuring where the dial is disposable.
 Matches the reference-host evidence of [af-12] at scopes 0–1; scopes 2–3
 now carry a second, independent measurement.
 
-Exit gate status (AF-fnejbc): round 1 of 3 green; cold boot 26–34 s.
+Exit gate status (AF-fnejbc): **three green rounds, identical matrices**
+(round1/round2/round3 in evidence/; the host's scope asserted unchanged
+before and after every round); cold boot 26–34 s. The remaining gate
+item is one full abort-hunt iteration inside the lab (AF-a5xn5s).

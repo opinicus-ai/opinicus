@@ -1,0 +1,31 @@
+yama ptrace_scope: 0 -> 0
+yama ptrace_scope: 0 -> 1
+yama ptrace_scope: 0 -> 2
+yama ptrace_scope: 0 -> 3
+warning: yama ptrace_scope sits at 3, and the kernel refuses to lower it
+warning: (measured: sudo sysctl -w answers Invalid argument even as root)
+warning: the machine stays at 3 until it reboots; the original value was 0
+| technique | yama | attack errno | monitor | tree | fw exit | trace lines | session_end | tamper | verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| hostile-ptrace | 0 | attach=ok poketext=ok | alive | dead | 0 | 34 | 1 | 0 | succeeded-unsensed |
+| hostile-ptrace | 1 | attach=EPERM | alive | dead | 0 | 34 | 1 | 0 | denied-by-kernel |
+| hostile-ptrace | 2 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-ptrace | 3 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-vmem | 0 | readv=ok writev=ok | alive | dead | 0 | 34 | 1 | 0 | succeeded-unsensed |
+| hostile-vmem | 1 | readv=EPERM writev=EPERM | alive | dead | 0 | 34 | 1 | 0 | denied-by-kernel |
+| hostile-vmem | 2 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-vmem | 3 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-procmem | 0 | open=ok pread=ok pwrite=ok | alive | dead | 0 | 34 | 1 | 0 | succeeded-unsensed |
+| hostile-procmem | 1 | open=EACCES | alive | dead | 0 | 34 | 1 | 0 | denied-by-kernel |
+| hostile-procmem | 2 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-procmem | 3 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-pidfd | 0 | pidfd_open=ok pidfd_getfd=ok pidfd_send_signal=ok | dead | dead | 137 | 10 | 0 | 0 | succeeded-fail-closed |
+| hostile-pidfd | 1 | pidfd_open=ok pidfd_getfd=EPERM pidfd_send_signal=ok | dead | dead | 137 | 10 | 0 | 0 | succeeded-fail-closed |
+| hostile-pidfd | 2 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-pidfd | 3 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-extkill | 0 | kill=errno ? | dead | dead | 137 | 10 | 0 | 0 | succeeded-fail-closed |
+| hostile-extkill | 1 | kill=errno ? | dead | dead | 137 | 10 | 0 | 0 | succeeded-fail-closed |
+| hostile-extkill | 2 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+| hostile-extkill | 3 | no session: PTRACE_TRACEME refused, the monitor never started | - | - | 2 | 1 | 0 | 0 | no-session |
+
+yama ptrace_scope now: 3 (original: 0)
