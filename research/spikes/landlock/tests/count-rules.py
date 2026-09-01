@@ -3,9 +3,10 @@
 
 ML, 2026-08-31: the re-measurement of the pack against the floor that SHIPS
 in af-monitor (crates/af-monitor/src/landlock.rs). The spike of 2026-08-28
-measured 10 of the 69-rule pack on paper; the pack now holds 147 rules and
-the floor is real code, so every class below says what the enacted ruleset
-does, not what it could do.
+measured 10 of the 69-rule pack on paper; the pack has grown with every
+milestone since (161 rules after the io_uring deny of [af-12], 2026-09-01)
+and the floor is real code, so every class below says what the enacted
+ruleset does, not what it could do.
 
 Classes:
 
@@ -210,15 +211,18 @@ CLASSIFICATION = {
     "tamper.sensor.preload-stripped": ("C", "the sensed fact is the environment of an exec"),
     "tamper.process.outlived": ("C", "the sensed fact is liveness at the end of the session root"),
 
-    # ---------------- correlation (M5) ----------------
-    "correlation.sensor.silent-subtree": ("C", "the judged fact is a discrepancy event replayed from two finished views; a sensor that stopped talking is not a filesystem action, and the floor mediates filesystem rights and the signal scope only"),
-    "correlation.action.contradicted": ("C", "the judged fact is a discrepancy event: a connect that crossed the process without crossing libc; the floor handles no network right, and the event is judged after the run, not at a kernel boundary"),
-    "correlation.spawn.unreported": ("C", "the judged fact is a discrepancy event: the preload an exec carried and the sensor instance that never registered; an exec's environment and the sensor's registry are nothing the floor sees"),
+    # ---------------- tamper, audit trail (M8, [af-9], 2026-09) ----------------
     "tamper.evidence.trace-write": ("C", "the trace file is a launcher fact on a user-writable path — wherever the user pointed --trace — and the floor mediates no such fact; the write-open is held by the seccomp filter before it runs, which is what makes the refusal pre-loss"),
     "tamper.evidence.sensor-record-write": ("C", "the sensor's records are launcher facts on user-writable paths, and the sensor itself writes them from inside instrumented children; the floor sees no fact, and the rule reports"),
     "tamper.evidence.rohrpost-erase": ("C", "the rule matches the erase verbs and the rohrpost file names in an argument; the floor sees no argument"),
     "tamper.evidence.rohrpost-write": ("C", "the store sits inside the writable work tree, so the floor grants the write; the rule reports anyway"),
     "tamper.evidence.transcript-write": ("C", "the transcript stores and history files live under the home, outside the floor's hidden stores; the rule reports anyway"),
+    "tamper.bypass.io-uring": ("C", "the ring road is not a path right, so the floor is blind to it; the seccomp hold of io_uring_setup and io_uring_enter makes every call visible, the shipped rule reports because a normal node session makes the calls on its own (36 in one npm ci), and the enforcement posture is the host sysctl or a local deny override (DECISIONS.md, 2026-09-01)"),
+
+    # ---------------- correlation (M5, 2026-08-31) ----------------
+    "correlation.sensor.silent-subtree": ("C", "the judged fact is a discrepancy event replayed from two finished views; a sensor that stopped talking is not a filesystem action, and the floor mediates filesystem rights and the signal scope only"),
+    "correlation.action.contradicted": ("C", "the judged fact is a discrepancy event: a connect that crossed the process without crossing libc; the floor handles no network right, and the event is judged after the run, not at a kernel boundary"),
+    "correlation.spawn.unreported": ("C", "the judged fact is a discrepancy event: the preload an exec carried and the sensor instance that never registered; an exec's environment and the sensor's registry are nothing the floor sees"),
 }
 
 

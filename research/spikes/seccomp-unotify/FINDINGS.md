@@ -401,3 +401,41 @@ descriptor again.
 itself. It does not see a statement that a program sends over a connection
 that is already open. A user who needs that must use a guard in the database,
 and not a guard in the process.
+
+---
+
+## The policy-side invariant, after the race
+
+The race above is a property of the sensor: nothing in the supervisor can
+tell a stable buffer from a raced one, so the product answer is not a better
+read — it is a rule about what such a read may decide. That rule was prose
+for a while ("a path read out of the memory of the judged program is never
+the reason to allow"); since the `[af-12]` pointer-derived-facts change it
+is carried by the types of the engine
+(`crates/af-policy/src/facts.rs`, `docs/DECISIONS.md` 2026-09-01):
+
+* The path of a held open enters matching as `AdvisoryPath`; the paths of
+  the exec boundary enter as `GroundPath`; no conversion exists between
+  them. A rule that refuses, asks or reports reads every fact — the
+  measured rows above are exactly why that is sound (a refusal never ran;
+  0 of 936, 0 of 993). Every position that lets a held action continue
+  reads ground facts only: an exception that names a file path is dead
+  (it never holds, and the lint names it), and a path condition under an
+  odd number of `not`s quiets the rule when it matches, so it reads ground
+  facts only there too. A `compile_fail` doctest proves an allow consuming
+  an `AdvisoryPath` does not compile.
+* The race mutation harness (`crates/af-policy/src/matcher.rs`, test
+  `the_invariant_catches_every_flipped_marking_of_the_race`) replays this
+  spike's shape — one shared buffer, `f_a.txt`/`f_b.txt`, either side
+  picked per round by a fixed xorshift — and flips the advisory marking to
+  ground on every read. Measured by that run: the runtime guard caught
+  **1000 of 1000** flipped markings in the `not`-block shape, the dead
+  exception held the rule in the exception shape, and **1000 of 1000**
+  honest markings left the refusal standing (`cargo test -p af-policy`,
+  deterministic, no random source). The guard is belt and braces behind
+  the types: an allow that consults a fact whose marking was flipped fires
+  instead of deciding.
+
+The 47.6% row above stays the number that explains why the types exist; the
+harness adds the complementary number — the invariant catches the drift the
+measurement warned about, every time it is tried.

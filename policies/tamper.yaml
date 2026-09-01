@@ -437,3 +437,43 @@ rules:
   # close it writes a local file with this identifier and `decision: deny`
   # — the filter already holds the calls, so the deny is complete
   # (tests/e2e.sh, section U, proves it end to end).
+
+  - id: tamper.bypass.io-uring
+    title: io_uring use inside the session
+    category: tamper
+    risk: suspicious
+    decision: allow
+    reason: A process of the session called io_uring_setup or io_uring_enter. An io_uring ring performs file and network operations inside the kernel through one call, so no per-operation system call ever crosses a boundary the firewall holds — before the hold, this road was measured as a complete bypass (research/bypass/FINDINGS.md, gap 1). The rule reports the attempt and never asks, because a normal node session makes these calls on its own (36 in one npm ci, 27 in an earlier identical run) and completes when they are refused, so a question would stand on everyday work. Closing the road is a host requirement — set kernel.io_uring_disabled to 2 and the kernel refuses the ring at its own grade, or write a local rule file with this identifier and decision deny and the firewall refuses every call for the sessions that load it.
+    references:
+      - "https://docs.kernel.org/io_uring/io_uring.html"
+    match:
+      action: io_uring
+      io_uring: [io_uring_setup, io_uring_enter]
+    tests:
+      - name: a request for a ring is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        io_uring: { call: setup }
+      - name: an enter on a ring the session never set up is reported too
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        io_uring: { call: enter }
+      - name: the ring attempt of a normal node session is the report's honest writer
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: node, exe: /usr/bin/node, argv: [node, /usr/bin/npm, ci] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        io_uring: { call: setup }
+      - name: a program that opens its files with a call of its own stays quiet
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /work/app/target/debug/tool, write: true }
+      - name: a plain program start stays quiet
+        expect: allow
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]

@@ -3,6 +3,11 @@
 //! The loop launches one command, follows every descendant, and holds each
 //! process at two moments.
 //!
+//! The launch itself is clean beyond stdio: the root's first `execve`
+//! closes every descriptor above two ([`close_beyond_stdio`]), so a
+//! capability that a launcher held open — a writable file, a connected
+//! socket, a `memfd` — cannot enter the session already live.
+//!
 //! The first is the moment the kernel loaded a new program but did not yet
 //! run one instruction of it. That is the point where the firewall can still
 //! stop a dangerous program.
@@ -262,10 +267,17 @@ pub fn run(
     // this one install covers the whole session and no descendant can escape
     // it. Its install never fails the session: see `seccomp::install`.
     //
-    // SAFETY: the closure only calls ptrace, prctl, seccomp and landlock,
-    // which all act on the forked child alone and are safe between fork and
-    // exec. It allocates nothing and reads no directory: the plan and the
-    // pipe descriptor already exist.
+    // After the filter, the child marks every descriptor beyond stdio as
+    // close-on-exec, so the `execve` that follows closes them all: no
+    // capability that a launcher held open — a writable file, a connected
+    // socket, a `memfd`, a `pidfd` — enters the session already live. That
+    // is [`close_beyond_stdio`]; it opens nothing and closes nothing yet, so
+    // it cannot break the steps before it.
+    //
+    // SAFETY: the closure only calls ptrace, prctl, seccomp, landlock and
+    // close_range/fcntl on flags, which all act on the forked child alone
+    // and are safe between fork and exec. It allocates nothing and reads no
+    // directory: the plan and the pipe descriptor already exist.
     let install_plan = floor.clone();
     let report_fd = floor_report_writer
         .as_ref()
@@ -284,6 +296,7 @@ pub fn run(
                 }
             }
             seccomp::install(filter, monitor_pid);
+            close_beyond_stdio();
             Ok(())
         });
     }
@@ -1091,6 +1104,78 @@ fn report_pipe() -> Result<(std::fs::File, std::fs::File)> {
     })
 }
 
+/// Marks every descriptor of the calling process beyond the three of
+/// standard input, output and error as close-on-exec.
+///
+/// The call happens inside the `pre_exec` closure of the child, as the
+/// last step before `execve`. Nothing is closed yet: the machinery that
+/// still needs a descriptor before the exec — the floor report pipe, the
+/// error pipe of `std`, the rule opens of the floor — keeps working. At
+/// the `execve` boundary the kernel then closes every descriptor above
+/// two, whatever opened it and whatever flag it carried.
+///
+/// That is the launch half of the live-descriptor gap
+/// (`docs/THREAT-MODEL.md` §5.3). The observation points of the monitor
+/// are `open` and `connect`, so a capability that arrives already open —
+/// a launcher that holds a writable file, a connected socket, a `memfd`
+/// or a `pidfd` and execs the firewall — would otherwise enter the session
+/// without crossing either point, and every write through it is a write
+/// no filter holds. `std::process::Command` does not close inherited
+/// descriptors: a measurement on this machine (`research/bypass/`, the
+/// `inherit-fd` gate) held parent pipes open in the exec'd child on both
+/// the `posix_spawn` and the `pre_exec` path, so the monitor closes the
+/// gap itself.
+///
+/// The three descriptors that stay are standard input, output and error:
+/// the child keeps the terminal of the user, which an interactive agent
+/// needs. Every other descriptor is closed — write-xor-nothing: no
+/// descriptor beyond stdio survives the first program of the session.
+///
+/// `close_range` with `CLOSE_RANGE_CLOEXEC` (Linux 5.11) is the cheap
+/// whole-range answer. A kernel without it gets an `fcntl` walk up to the
+/// file-descriptor limit, which misses nothing below that limit and
+/// leaves descriptors above it open when the limit is `RLIM_INFINITY`
+/// (the walk then stops at 65 536). The measured host of the harness
+/// (kernel 7.0.9) takes the `close_range` path.
+pub(crate) fn close_beyond_stdio() {
+    // `libc` exports no constant for the flag yet.
+    const CLOSE_RANGE_CLOEXEC: libc::c_int = 4;
+    // SAFETY: `close_range` only changes the close-on-exec flag of
+    // descriptors of the calling process, which is the forked child before
+    // its `execve`. The fallback touches nothing but the same flags.
+    if unsafe { libc::close_range(3, libc::c_uint::MAX, CLOSE_RANGE_CLOEXEC) } == 0 {
+        return;
+    }
+    // The walk of the fallback ends at the file-descriptor limit, and at
+    // 65 536 when the limit is unlimited — the honest bound of this path.
+    let mut end: libc::c_int = 65_536;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes into `limit` and touches nothing else.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+        && limit.rlim_cur != libc::RLIM_INFINITY as libc::rlim_t
+    {
+        end = limit.rlim_cur.min(end as libc::rlim_t) as libc::c_int;
+    }
+    for fd in 3..=end {
+        // SAFETY: `fcntl` with `F_SETFD` sets one flag of one descriptor
+        // and reads no memory of the process.
+        unsafe {
+            if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
+                // A descriptor that is not open answers `EBADF`; that is
+                // the normal case and the walk goes on. Any other error
+                // leaves the flag as it is — the walk is the fallback of a
+                // kernel that refused `close_range`, and the worst outcome
+                // is a descriptor that stays open, which is the state the
+                // kernel would have had without this function at all.
+                continue;
+            }
+        }
+    }
+}
+
 /// Returns true when the signal stops a process group instead of ending or
 /// resuming it.
 ///
@@ -1138,6 +1223,7 @@ fn event_of(action: &Action) -> EventKind {
             target: *target,
             signal: *signal,
         },
+        Action::IoUring { call } => EventKind::IoUring { call: *call },
         // `seccomp::observe` makes no other shape. A future call would have
         // to bring its own event, and until then the monitor says what it saw
         // rather than reporting the wrong kind.

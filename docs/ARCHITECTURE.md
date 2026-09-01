@@ -194,10 +194,13 @@ running program and the moment the kernel makes that call.
 
    The signal rules are the tamper half of this layer (section 3d): the
    kernel compares the target identifier with the identifier of the monitor
-   **before** the call runs, so a `SIGKILL` aimed at the firewall never
-   happens unobserved. A signal to anything else is not held, which is why
-   the rules cost a normal session nothing — no program signals the monitor
-   unless it looked for it.
+   **before** the call runs, so a `kill`-family call aimed at the monitor is
+   judged while the sender still waits. That is a narrow scripted-kill
+   defense, not monitor integrity: `pidfd_send_signal`, a signal to a whole
+   process group and the other routes of section 3d's gap list are not held,
+   and with `--syscall-filter off` no signal is sensed at all. A signal to
+   anything else is not held, which is why the rules cost a normal session
+   nothing — no program signals the monitor unless it looked for it.
 
    The filter never holds `execve`. The exec stop of section 3 already
    reports one, and a filter that held `execve` would break its own first
@@ -260,6 +263,31 @@ rule is advisory.** It makes a normal program quiet. It does not hold against
 a program that wants to defeat it. An exception that must hold has to name
 something that cannot be rewritten — the call itself, a scalar argument, or a
 fact of the process from the exec boundary.
+
+The rule is carried by the types of the engine, not only by this page
+(`crates/af-policy/src/facts.rs`, the `[af-12]` pointer-derived-facts
+invariant). The subject wraps the path of a held open as `AdvisoryPath` at
+its construction point, and the matcher evaluates every path condition
+under one of two views: a rule body reads every fact — a refusal, a
+question and a report are sound with a raced read — while every position
+that lets a held action continue reads ground facts only. Those positions
+are exactly two shapes: the exception of a rule that holds (a path-naming
+exception is dead, and the lint names it at load time), and a path
+condition under an odd number of `not`s inside a body, where a match
+quiets the rule. `GroundFacts` is the type of what an allow may rest on,
+and no conversion exists from an advisory path into it, so an allow that
+consumes one does not compile (the `compile_fail` doctest of
+`GroundFacts`). A runtime guard backs the types: the origin of every fact
+travels with it, and an allow that consults a fact whose marking was
+flipped fires the guard instead of deciding. The rule-mutation harness of
+`crates/af-policy/src/matcher.rs` flips the marking of 1000 raced reads
+(`f_a.txt`/`f_b.txt`, the shape of the measured race) and the two catchers
+take every one — the guard fires for the `not`-block shape, and the dead
+exception holds the rule for the exception shape — while every honest
+marking leaves the refusal standing. The verdict keeps the split as well:
+a rule that only reports puts its match in the notes, and a note never
+enters the decision — the allow that answers when nothing held is the
+default of a quiet action, and it rests on no fact.
 
 ## 3b. The path of one identity
 
@@ -359,23 +387,30 @@ that ships with it.
    floor carries matches, the session does not ask: the kernel refuses the
    action with `EACCES` whatever the user would answer, and the session says
    so. When a held file open targets a path the floor denies, the monitor
-   reports a `kernel_denied` event that names the rule class — the denial is
-   certain, because the ruleset was fixed before the program started, so the
-   monitor explains it without waiting for the failed call. The rules the
-   floor carries are named in a `kernel_floor` event at session start, and
+   reports a `kernel_denied` event that names the rule class, without
+   waiting for the failed call. The refusal is certain for a call that
+   really targets a denied path — the ruleset was fixed before the program
+   started — but the event's path is the one the monitor read from the
+   memory of the judged program (step 4 above), and a racing second thread
+   can change that memory: the event explains the refusal the monitor
+   expects, and under that race it can name a denial for a call that then
+   succeeds, or stay quiet about a call the kernel then denies. It is a
+   label, not a measurement of the kernel's decision ("A path is sound to
+   refuse with, and never to allow with"). The rules the floor carries are
+   named in a `kernel_floor` event at session start, and
    `research/spikes/landlock/tests/count-rules.py` keeps the list and the
    pack in step.
 
 ### What the floor carries, and what it does not
 
-The pack holds 160 rules today; 77 stop the user. The floor answers 6 of the
+The pack holds 161 rules today; 77 stop the user. The floor answers 6 of the
 68 questions the pack can ask (`filesystem.etc.write`,
 `filesystem.delete.system-path`, `filesystem.delete.mount-root`,
 `filesystem.credentials.write` on the paths it hides,
 `filesystem.device.truncate`, `process.signal.kill-everything`) and backs 3
-of the 9 `deny` rules with the same guarantee. Twenty-one classes are denied in
-part and keep their question; 130 are blind to Landlock, which sees a path
-and a TCP port and nothing else.
+of the 9 `deny` rules with the same guarantee. Twenty-one classes are denied
+in part and keep their question; 131 are blind to Landlock, which sees a
+path and a TCP port and nothing else.
 
 The floor is deliberately conservative about which questions it removes. A
 class rides on the floor only when **no session shape** exists in which the
@@ -401,22 +436,33 @@ a question whose answer cannot take effect.
 * Landlock does not mediate `chmod` or ioctls, sees no program name, no
   argument and no host, and an `execve` from an anonymous file descriptor
   runs (measured). Network rights are not handled at all.
+* The exact grant/deny set, the composition laws of the ruleset, and the
+  measured holes — the writable-tree hole for credential shapes, the
+  bind-mount alias — are the contract of
+  [LANDLOCK-CONTRACT.md](LANDLOCK-CONTRACT.md) (`[af-12]`, with the
+  stress matrix `research/bypass/floor-stress.sh`).
 
 ## 3d. The path of one tamper fact
 
 The firewall senses an attempt against its own visibility, a rule judges
 the fact, and a rule that asks for it suspends the whole tree until a
-person rules. The measurement behind this section is
-`research/bypass/tamper.sh` and the M4 section of
-`research/bypass/FINDINGS.md`.
+person rules. The measurements behind this section are
+`research/bypass/tamper.sh` (M4) and `research/bypass/evidence.sh` (M8),
+with the matching sections of `research/bypass/FINDINGS.md`.
 
 1. **The launcher names itself and its sensor.** The session metadata
    carries the process identifier of the monitor (`monitor_pid`) and, when a
    run carries the in-process sensor of `research/spikes/inprocess/`, the
    preload value and the instances that had registered at launch
-   (`sensor`). These are the B.5 facts: what a tamper rule keys on is always
-   a process of the firewall itself, never the absence of instrumentation on
-   a foreign process.
+   (`sensor`). Since M8 (`[af-9]`) the metadata also names the evidence
+   files the launcher itself opened: the trace path of the run (`trace`)
+   and, with the sensor active, the sensor's trace and registration paths
+   (`sensor.trace`, `sensor.registration`). These are the B.5 facts: what
+   a tamper rule keys on is always a process or a file of the firewall
+   itself, never the absence of instrumentation on a foreign process. A
+   rule asks about the file facts with the `evidence_target` field
+   (`trace`, `sensor_trace`, `sensor_registration`); a fact can only ask,
+   deny or report, never authorize an allow.
 
 2. **Four facts are sensed, each at the place that can measure it.**
 
@@ -675,7 +721,7 @@ The kernel floor is strong in its own way:
 
 * it decides in the LSM hook, with no supervisor in the loop, at a measured
   cost of 0.98×–1.07× on the benchmark of the spike — zero within the
-noise;
+  noise;
 * it was fixed before the program started, so nothing the program does can
   race it, and 0 of 6 escape attempts worked in the spike, a new user
   namespace included;
@@ -690,23 +736,43 @@ noise;
   a chatty program, which is the same order as the full system-call tracing
   that this design rejected. Seeing that content needs a proxy for the
   protocol, not a system-call filter.
+* **A descriptor the tree opens for itself and hands to a descendant.**
+  What the launch closes it closes completely: the root's `pre_exec` marks
+  every descriptor beyond stdio close-on-exec, so a capability a launcher
+  held open — a writable file, a connected socket, a `memfd`, a `pidfd` —
+  never enters the session (measured: the payload counts exactly stdio and
+  every write answers `EBADF`, every filter mode; `close_beyond_stdio` in
+  `crates/af-monitor/src/tracer.rs`; `research/bypass/inherit.sh`). What
+  the tree itself opens is another matter: a forked descendant's write
+  through an inherited descriptor, and a descriptor received over
+  `SCM_RIGHTS`, leave no event in any mode — the `open` and the `connect`
+  of the parent are seen, the use is not. Both rows are named out-of-scope
+  until a boundary tier exists (`docs/DECISIONS.md`, 2026-09-01).
 * **A delete and a rename inside a granted tree.** The kernel filter holds
   neither. The floor makes a delete outside the granted trees impossible,
   and a delete inside the work tree is judged at the command that does it.
   The normalized schema has the event kinds (`file_delete`, `file_rename`);
   only the in-process research sensor produces them today
   (`research/spikes/inprocess/`), and no shipped rule can act on them.
-* **Batch input and output through `io_uring`.** The operations run inside
-  the kernel through one `io_uring_enter` call and make no per-operation
-  system call, so both boundaries and the in-process sensor record
-  nothing. Measured live with a write-intent ring open: zero events in
-  every filter mode, and no rule could ever act on them
-  (`research/bypass/FINDINGS.md`, gap 1; scenario `evade-15`). The known
-  mitigations are kernel-side — a gate on the setup and enter calls, or
-  ring-operation auditing — and whether such a gate may ask a question is
-  an interruption-budget decision, because some runtimes use io_uring for
-  ordinary file work. On a machine where the gap matters, check
-  `/proc/sys/kernel/io_uring_disabled`.
+* **`io_uring` — held at the ring calls and reported; the deny is a host
+  choice.** The filter holds `io_uring_setup` and `io_uring_enter` at the
+  call boundary in every mode that installs it, and the rule
+  `tamper.bypass.io-uring` reports every call. The road behind the hold
+  is the one that was measured live with a write-intent ring open:
+  zero events in every filter mode, and no rule could act
+  (`research/bypass/FINDINGS.md`, gap 1; scenario `evade-15`); the hold
+  of 2026-09-01 closes that gap as visibility. The measurement that
+  decided the posture found nothing breaks under an `EPERM` deny — node
+  falls back to its thread pool — but a normal node session makes the
+  calls on its own (36 in one `npm ci`), so a default deny fires on
+  everyday work and the interruption budget forbids it
+  (`docs/DECISIONS.md`, 2026-09-01). A host that must refuse the road
+  sets the sysctl or loads a local rule file of the same identifier with
+  `decision: deny`, which is complete because the filter already holds
+  the calls. What the hold cannot see: a session with
+  `--syscall-filter off` holds nothing, and a ring the tree did not
+  create — an inherited or handed-over descriptor — is still the
+  live-descriptor gap below.
 * **A write to a credential store under the work tree or under `/tmp`.** The
   floor hides the stores of the home directory; a `.ssh` created inside the
   work tree is normal writable space, and the rule keeps its question there.
@@ -716,7 +782,9 @@ noise;
 * **`chmod` and ioctls.** Landlock mediates neither, and the floor handles
   no network right at all.
 * **An open that only reads, in the default mode.** The kernel drops it, on
-  purpose, because a read is 99.7% of the file traffic of a normal build.
+  purpose: the write-flags test cut the synthetic W2 file workload from
+  1034 stops to 3 — 99.7% of its opens only read — and no real build tree
+  was measured (`research/spikes/seccomp-ptrace/FINDINGS.md`).
   `--syscall-filter all-opens` holds it and costs more.
 * **Content in a file.** A script can put a dangerous statement in a
   temporary file and give the file name to the program. The firewall sees
@@ -780,6 +848,15 @@ rule of a live session also matches in a recorded session.
 `replay` judges an exec, a file open and a network connection, in the order
 of the trace and through the same memory-aware engine as a live session. Its
 summary line counts each kind.
+
+A trace that holds a `session_start` and no `session_end` gets a note on
+standard error: the session that wrote it never closed its record. Either
+it still runs, or its monitor died before the end — a kill of the monitor
+from outside the tree leaves exactly this shape, because the launcher and
+the monitor are one process and nothing of the firewall runs after the
+kill. The note names the monitor pid of the session metadata; it is
+after-the-fact teardown observation, not a boundary (the hostile same-UID
+matrix of `research/bypass/FINDINGS.md`, “After M11-hostile”).
 
 `--retention balanced`, the default, keeps a file open and a connection **that
 at least one rule matched**, and drops the rest. A match of the level `info`
@@ -901,7 +978,7 @@ Five additions land in this architecture without changing sections 1–7:
 * **The kernel floor — shipped (§3c).** Landlock turns the "always no" rule
   classes of the built-in pack into kernel enforcement before the first
   program runs, at a measured cost of 0.98×–1.07× — zero within the noise —
-with an explainer that names the
+  with an explainer that names the
   rule class behind every `EACCES` it causes.
 * **Agent detection and identity — shipped (§3b).** A detector subsystem
   tags the session root at launch, the tag propagates through the provenance

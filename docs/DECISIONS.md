@@ -6,7 +6,148 @@ otherwise. Each entry names its evidence.
 
 ---
 
+## 2026-09-01 — The io_uring road is held and reported; refusing it is a host requirement
 
+The decision of `[af-12]` / EXP-T1, on measurement and not on preference:
+the seccomp filter now holds `io_uring_setup` and `io_uring_enter` at the
+call boundary in every mode that installs it
+(`crates/af-monitor/src/seccomp.rs`), a new `io_uring` action kind carries
+the held call to the engine, and the built-in rule `tamper.bypass.io-uring`
+(`policies/tamper.yaml`) **reports** every call. The road itself stays open
+under the shipped pack; refusing it is a host requirement, met either by
+the sysctl (`kernel.io_uring_disabled = 2`, kernel grade) or by a local
+rule file that replaces the report with a `deny` — the filter already holds
+the calls, so that deny is complete before the ring performs anything
+(`tests/e2e.sh` §U runs both postures end to end). `doctor` reports the
+machine's posture.
+
+**Why not default-deny: the numbers.** With both ring calls answered
+`EPERM` — the exact refusal the monitor's `Intercept::Refuse` produces —
+nothing breaks: a cargo build of this repository, a git clone plus status,
+an `npm ci`, a python venv plus pip from a local wheel, a tar of a
+thousand files and a sqlite bulk insert all complete with their effects
+verified. But a normal node session makes the calls on its own:
+
+| workload | exit under EPERM | effect | ring calls |
+| --- | --- | --- | --- |
+| cargo build (incremental, af-core touched) | 0 | works | 0 |
+| git clone + status | 0 | works | 0 |
+| `npm ci` (is-odd, network) | 0 | works | **36** (27 in an earlier identical run) |
+| python venv + pip --no-index | 0 | works | 0 |
+| tar -cf, 1000 files | 0 | works | 0 |
+| sqlite3, 10 000 inserts | 0 | works | 0 |
+| benign corpus (`corpus.sh`) | 0 | works | **48** (36 in an earlier identical run) |
+
+Node attempts the ring, takes the `EPERM`, and falls back to its thread
+pool — functionally free, but every call is a held action and a deny
+decision. A default deny therefore fires **dozens of times on one
+scripted normal dev session** (36–48 ring calls in the corpus runs, the
+count varies with npm's work), which the interruption budget forbids
+whatever the severity
+([PRODUCT.md](PRODUCT.md) §5; the same refusal shape as the 2026-08-31
+write-comparison decision below). Visibility costs nothing: the hold wakes
+the monitor only for programs that ask for a ring, and the report is an
+`allow` decision that the corpus gate does not count.
+
+**Method, honestly.** The matrix was measured with
+`research/bypass/uring-compat.sh` and the seccomp stand-in
+`research/bypass/standin/uring-standin.c`: the same two call numbers held
+in the kernel, one mode answering `EPERM` (the refusal semantics) and one
+mode continuing every call and logging it (the occurrence measurement) —
+no monitor in the loop, because this host's Yama was latched at
+`ptrace_scope = 3` for the whole window (the sysctl refuses every lower
+value on this kernel; even `PTRACE_TRACEME` fails, which blocks every
+monitor-based run including the repository's own test suite). The
+monitor-side integration is carried by the unit tests of the filter hold
+(`crates/af-monitor/src/seccomp.rs`), the in-file rule tests (705 policy
+tests pass), the e2e section §U, and the re-run of
+`research/bypass/run.sh`; those must be executed on a host where ptrace
+works before `[af-12]` closes.
+
+**What ships.**
+
+* The hold: `io_uring_setup` (425) and `io_uring_enter` (426), no argument
+  test, both `WriteOnly` and `AllOpens`; `io_uring_register` is not held
+  (it changes an existing ring only).
+* The action: `io_uring` with the call name — a scalar from the registers,
+  so nothing can race it — through the engine, the trace (`EventKind`
+  `io_uring`), replay and telemetry.
+* The rule: report (`risk: suspicious`, `decision: allow`), negative-tested
+  in file; the corpus stays quiet because an `allow` match is not a
+  question.
+* The named residuals (docs/THREAT-MODEL.md §5.1): the road is open under
+  the shipped rule; `--syscall-filter off` holds nothing; a ring the tree
+  did not create enters through the live-descriptor gap; a 32-bit program
+  carries another call table.
+
+Evidence: `research/bypass/uring-compat.sh` (runnable, prints the matrix
+above); `research/bypass/standin/uring-standin.c`; the run outputs under
+`research/bypass/results/uring-compat/` (regenerable);
+`research/bypass/FINDINGS.md` gap 1, re-measured;
+[THREAT-MODEL.md](THREAT-MODEL.md) §3.2, §5.1; [README.md](../README.md)
+"Does not work yet"; `tests/e2e.sh` §U; `agent-firewall policy check`
+(161 valid, 0 warnings) and `policy test` (705 passed) on the working
+tree.
+
+---
+
+## 2026-09-01 — The hostile rows are accepted gaps, the launch vector is closed, and measuring yama 3 cost the machine
+
+Three decisions of `[af-12]` (review P0-7, P1-6; experiments EXP-T2,
+EXP-T3), each on its measurement. None of them claims protection the
+measurement did not produce.
+
+**The hostile same-UID matrix: accepted, not held.** The harness of
+`research/bypass/hostile.sh` attacked the live monitor from outside the
+tree — `PTRACE_ATTACH`/`POKETEXT`, `process_vm_writev`, a write through
+`/proc/<pid>/mem`, the pidfd routes, and an external `kill -KILL` — under
+the yama levels 0–3 (the full matrix, with every errno, is
+`research/bypass/FINDINGS.md`, "After M11-hostile"). At yama 0 every
+memory route succeeded and nothing sensed it: an accepted gap, pending
+the privileged tier (`[af-18]`). At yama 1 the kernel denies those
+routes (`EPERM`/`EACCES`) — yama's denial, not the firewall's; no event
+of the firewall fires. At yama 2 and 3 the product cannot start at all
+(`PTRACE_TRACEME` refused). The signal routes succeed at every scope
+that permits a session: the monitor dies, `PTRACE_O_EXITKILL` takes the
+whole tree — fail-closed — and no tamper event names the killer, because
+nothing of the firewall survives the kill to write one. The user-visible
+contract is [THREAT-MODEL.md](THREAT-MODEL.md) §5.2: no sentence may
+claim monitor integrity.
+
+**Inherited descriptors: the launch vector closed, the in-tree vectors
+named out-of-scope.** The gate of `research/bypass/inherit.sh` measured
+the launcher vector open before the fix — a hostile launcher that
+pre-opened a writable file, a connected socket, a `memfd` and a `pidfd`
+and exec'd the firewall delivered three of the four (the payload counted
+6 descriptors and the writes landed, every mode) — and closed after it:
+the monitor marks every descriptor beyond stdio close-on-exec in the
+root's `pre_exec` (`close_beyond_stdio`,
+`crates/af-monitor/src/tracer.rs`), and the same launcher then delivered
+nothing (fds=3, every write `EBADF`, every mode). The two in-tree
+vectors stay open rows: a forked descendant's use of a descriptor its
+parent opened, and a descriptor passed with `SCM_RIGHTS`, leave no event
+in any mode. Closing them means holding `write`/`sendto` — measured at
+8.8× and rejected (`research/spikes/seccomp-ptrace/FINDINGS.md`) — or
+per-descriptor provenance, which is a boundary tier of work. Until one
+exists they are out of scope, and **no sentence may claim coverage of a
+capability the tree did not open during the session**
+([THREAT-MODEL.md](THREAT-MODEL.md) §5.3; the gate's table is
+`research/bypass/FINDINGS.md`, "After M11-A").
+
+**The yama 3 incident.** Measuring scope 3 latched the machine there:
+the sysctl is one-way, `sudo sysctl -w` cannot lower it even as root, so
+the host stays at 3 until it reboots. Every monitor-based run is blocked
+(`PTRACE_TRACEME` refused): product sessions, `tests/e2e.sh`, the benign
+corpus, the floor bench. The `floor.sh` run of 2026-09-01 04:45 measured
+only the ~140 ms fast-fail and was **discarded** — kept as the blocker
+proof (`research/bypass/results/floor-stress/floor-bench-DISCARDED-
+yama3-fastfail.README`), not as a bench. The last valid floor numbers
+stay the ML ones (0.98×–1.03× on/off, `research/spikes/landlock/
+FINDINGS.md`), and the two fresh runs the contract asks for are first in
+the post-reboot queue behind `scripts/gate.sh`
+([LANDLOCK-CONTRACT.md](LANDLOCK-CONTRACT.md) §9, §10).
+
+---
 
 ## 2026-09-01 — The Rohrpost incident is recorded, and the store gets a snapshot rule
 
@@ -69,6 +210,7 @@ workflow. Remediation is tracked as M8 (`AF-xa01k3`,
 [docs/MILESTONES.md](MILESTONES.md)).
 
 ---
+
 ## 2026-09-01 — L0 is built: the kernel floor ships in the monitor
 
 Supersedes one line of the 2026-08-28 stack entry below, which says "L0 is
@@ -85,6 +227,7 @@ boundary, not a sensor. L3 still waits for the enterprise edition
 ([DIRECTION.md](DIRECTION.md) §10).
 
 ---
+
 ## 2026-08-31 — Correlation ships post-hoc, and the budget refused the write comparison
 
 The M5 gate measured the correlation engine

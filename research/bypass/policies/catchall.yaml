@@ -75,3 +75,19 @@ rules:
       - name: other input stays quiet
         expect: allow
         input: { source: stdin, data: "SELECT 1;" }
+
+  - id: probe.uring
+    title: Any io_uring call
+    category: probe
+    risk: approval_required
+    decision: approval_required
+    reason: Probe rule. It holds every io_uring call so the harness can see whether the filter delivered the ring road to the engine.
+    match:
+      action: io_uring
+    tests:
+      - name: a ring setup matches
+        expect: approval_required
+        io_uring: { call: setup }
+      - name: a ring enter matches
+        expect: approval_required
+        io_uring: { call: enter }

@@ -14,8 +14,9 @@
 //! the layer is cheap: `research/spikes/seccomp-ptrace/FINDINGS.md` measured
 //! 1.16× for the write-only filter against 6.42× for a stop at every call.
 //!
-//! **What this module covers is the open with write intent and the outgoing
-//! connection, and nothing else.** The filter holds no `unlink`, no `rmdir`
+//! **What this module covers is the open with write intent, the outgoing
+//! connection and the two `io_uring` calls, and nothing else.** The filter
+//! holds no `unlink`, no `rmdir`
 //! and no `rename`, so a program that deletes a tree from inside itself is
 //! still judged only at the command that started it. The event schema has no
 //! shape for a delete either. That gap stays open.
@@ -29,16 +30,36 @@
 //! | `creat` | always, because it always changes the file |
 //! | `openat2` | always, see below |
 //! | `connect` | always |
+//! | `io_uring_setup`, `io_uring_enter` | always, see below |
 //! | `kill` | the target is the monitor itself, or every process (`-1`) |
 //! | `tkill`, `tgkill` | the target is the monitor itself |
 //!
-//! The signal rules are what makes an attack on the monitor visible: the
-//! kernel compares the target identifier with the identifier of the monitor
-//! **before** the call runs, so a `SIGKILL` of the firewall never happens
-//! unobserved — the monitor judges it while the sender still waits. A signal
-//! to any other process is not held, which is why these rules cost a normal
-//! session nothing: no program signals the monitor unless it looked for it,
-//! and the comparison runs in the kernel where nothing can race it.
+//! The `io_uring` rules exist because the ring is the one road that carries
+//! file and network operations past this filter completely: an operation
+//! submitted to a ring runs inside the kernel through one `io_uring_enter`,
+//! no per-operation call ever happens, and a measured `IORING_OP_OPENAT`
+//! with write intent left zero events in every mode
+//! (`research/bypass/FINDINGS.md`, gap 1). Holding the two calls puts the
+//! road back behind a boundary the engine can judge: a rule can refuse the
+//! setup before the ring exists, and it can refuse an `enter` that uses a
+//! ring descriptor the session never created. The hold costs a program
+//! that asks for no ring nothing — the numbers appear only in a program
+//! that asks for one — and the shipped rule reports instead of denying,
+//! because a normal node session makes the calls on its own: the measured
+//! matrix and the host-requirement decision are `docs/DECISIONS.md`,
+//! 2026-09-01.
+//!
+//! The signal rules are what makes a scripted kill of the monitor visible:
+//! the kernel compares the target identifier with the identifier of the
+//! monitor **before** the call runs, so a `kill`-family call aimed at the
+//! monitor is judged while the sender still waits. That is a narrow
+//! scripted-kill defense, not monitor integrity: the routes named below
+//! (`pidfd_send_signal`, a signal to a whole process group) are not held,
+//! and a session with `--syscall-filter off` senses no signal at all. A
+//! signal to any other process is not held, which is why these rules cost
+//! a normal session nothing: no program signals the monitor unless it
+//! looked for it, and the comparison runs in the kernel where nothing can
+//! race it.
 //!
 //! `pidfd_send_signal` names its target by a file descriptor, and a BPF
 //! filter cannot follow one, so that call is not held — a named gap. A
@@ -77,7 +98,7 @@
 //! an automatic allow. It is not one here: a path that matches no rule is
 //! allowed because nothing matched, not because the monitor trusted the path.
 
-use af_core::{Action, Pid};
+use af_core::{Action, IoUringCall, Pid};
 
 /// Which calls the kernel holds for the monitor.
 ///
@@ -299,6 +320,19 @@ fn rules_of(filter: SyscallFilter, monitor_pid: Pid) -> Vec<Rule> {
         nr: connect,
         test: ArgTest::None,
     });
+    // The two `io_uring` calls are held with no test on the arguments: the
+    // operations of a ring run inside the kernel, so no other call of the
+    // program can ever stand in for them (research/bypass/FINDINGS.md,
+    // gap 1). A rule can refuse the setup before a ring exists and an
+    // `enter` that uses a ring the session never created.
+    rules.push(Rule {
+        nr: libc::SYS_io_uring_setup as u32,
+        test: ArgTest::None,
+    });
+    rules.push(Rule {
+        nr: libc::SYS_io_uring_enter as u32,
+        test: ArgTest::None,
+    });
     // A signal whose target is the monitor. The identifier fits in the low
     // word of the argument, so the kernel can compare it before the call
     // runs. `kill(-1, ...)` reaches every process the user can signal, the
@@ -467,6 +501,16 @@ pub(crate) fn observe(pid: Pid) -> Option<Action> {
     }
     if nr == libc::SYS_connect {
         return network_connect(pid, args[1], args[2] as usize);
+    }
+    if nr == libc::SYS_io_uring_setup {
+        return Some(Action::IoUring {
+            call: IoUringCall::Setup,
+        });
+    }
+    if nr == libc::SYS_io_uring_enter {
+        return Some(Action::IoUring {
+            call: IoUringCall::Enter,
+        });
     }
     if nr == libc::SYS_kill {
         return Some(Action::SignalSend {
@@ -748,9 +792,10 @@ mod tests {
         let program = build_program(SyscallFilter::WriteOnly, 0);
         // The prologue is 6 instructions, a rule with a mask is 5, a rule
         // without one is 3, and the program ends with one allow. The rules
-        // are openat, open, creat, openat2 and connect. A monitor that does
-        // not name itself adds no signal rule.
-        assert_eq!(program.len(), 6 + 5 + 5 + 3 + 3 + 3 + 1);
+        // are openat, open, creat, openat2, connect, io_uring_setup and
+        // io_uring_enter. A monitor that does not name itself adds no
+        // signal rule.
+        assert_eq!(program.len(), 6 + 5 + 5 + 3 + 3 + 3 + 3 + 3 + 1);
         assert!(program.len() < u16::MAX as usize);
     }
 
@@ -780,6 +825,27 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_filter_holds_the_two_uring_calls_in_every_mode() {
+        // The ring is the one road that carries work past this filter with no
+        // per-operation call, so both of its calls are held whatever the
+        // mode: a rule can refuse the setup before a ring exists, and an
+        // `enter` that uses a ring the session never created.
+        let setup = libc::SYS_io_uring_setup as u32;
+        let enter = libc::SYS_io_uring_enter as u32;
+        for filter in [SyscallFilter::WriteOnly, SyscallFilter::AllOpens] {
+            let held: Vec<u32> = rules_of(filter, 0).iter().map(|rule| rule.nr).collect();
+            assert!(held.contains(&setup), "{filter:?} must hold io_uring_setup");
+            assert!(held.contains(&enter), "{filter:?} must hold io_uring_enter");
+            // Only the two named calls of the ring family are held: a ring
+            // that cannot be set up and cannot submit work needs no third
+            // hold, and `io_uring_register` changes an existing ring only.
+            let register = libc::SYS_io_uring_register as u32;
+            assert!(!held.contains(&register), "io_uring_register is not held");
         }
     }
 

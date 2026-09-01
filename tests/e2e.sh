@@ -438,6 +438,32 @@ assert_eq "K7 the write asks no question either" \
 assert_contains "K8 the write names the write rule" \
     "$(file_text "$WORK_DIR/kw.stderr")" "filesystem.credentials.write"
 
+# The same shape OUTSIDE the hidden prefixes: a .ssh under the work tree
+# (equivalently under /tmp) is writable as far as the floor is concerned —
+# the /tmp and work-tree grants cover it — so this write keeps its question.
+# The pack denies it and explains it; that is the contract of
+# docs/LANDLOCK-CONTRACT.md for credential shapes in writable trees.
+TRACE_KT="$WORK_DIR/trace-kt.jsonl"
+
+status_kt=0
+(
+    cd "$PROJECT_DIR"
+    "$BINARY" run --approve deny --trace "$TRACE_KT" \
+        -- sh -c "mkdir -p .ssh && printf backdoor > .ssh/id_afw_e2e_tmp"
+) >"$WORK_DIR/kt.stdout" 2>"$WORK_DIR/kt.stderr" || status_kt=$?
+
+assert_exit_nonzero "K9 a .ssh created in the work tree is not written silently" \
+    "$status_kt"
+assert_eq "K10 the write keeps its question (the floor does not cover it)" \
+    "1" "$(afw_trace_matches "$TRACE_KT" '"type" *: *"approval_requested"')"
+assert_contains "K11 the question names the credential write rule" \
+    "$(file_text "$WORK_DIR/kt.stderr")" "filesystem.credentials.write"
+if [ -e "$PROJECT_DIR/.ssh/id_afw_e2e_tmp" ]; then
+    assert_eq "K12 the key file was never created" "absent" "present"
+else
+    assert_eq "K12 the key file was never created" "absent" "absent"
+fi
+
 # ---------------------------------------------------------------------------
 # T. Tamper and quarantine: the seeded techniques of the bypass harness fire
 #    every time, the ruling is one question, and the quarantine holds the
@@ -598,6 +624,90 @@ assert_not_contains "T21 the stripped-preload session stays quiet for correlatio
 REPLAY_CB="$("$BINARY" replay "$WORK_DIR/cb-findings.jsonl")"
 assert_contains "T22 the discrepancy trace replays with the rules" \
     "$REPLAY_CB" "correlation.sensor.silent-subtree"
+
+# ---------------------------------------------------------------------------
+# U. io_uring: the ring road is held at the call boundary, reported by the
+#    pack, and refused when the host chooses the deny. The technique of the
+#    bypass harness (evade-15) performed an open with write intent through
+#    one io_uring_enter and produced zero events in every filter mode; the
+#    filter now holds io_uring_setup and io_uring_enter, the rule of the
+#    tamper pack reports every call, and a local rule file that replaces
+#    the rule with a deny closes the road completely — the shipped posture
+#    of [af-12], decided on the measured numbers
+#    (docs/DECISIONS.md, 2026-09-01): a normal node session makes the
+#    calls on its own, so a default deny would fire on everyday work.
+#    The negative side is the benign corpus (research/bypass/benign.sh)
+#    and the in-file tests of policies/tamper.yaml.
+# ---------------------------------------------------------------------------
+
+printf '\n%sU — the io_uring ring is held, reported, and refusable%s\n' "$AFW_BOLD" "$AFW_RESET"
+
+cc -O2 -o "$WORK_DIR/uring" "$REPO_ROOT/research/bypass/techniques/uring.c"
+
+# U1–U5: the shipped posture. The calls are held and seen — the zero-events
+# gap is closed as visibility — the rule reports, and no question stands,
+# so the road itself stays open and the marker of the technique appears.
+TRACE_U="$WORK_DIR/trace-u.jsonl"
+status_u=0
+"$BINARY" run --approve deny --retention all --trace "$TRACE_U" \
+    -- "$WORK_DIR/uring" "$WORK_DIR/u-marker.txt" \
+    >"$WORK_DIR/u.stdout" 2>"$WORK_DIR/u.stderr" || status_u=$?
+
+assert_exit "U1 the reported ring session runs to its end" 0 "$status_u"
+assert_eq "U2 the trace holds the held ring calls" \
+    "2" "$(afw_trace_matches "$TRACE_U" '"type" *: *"io_uring"')"
+assert_eq "U3 the io_uring rule fired as a report on every held call" \
+    "2" "$(afw_trace_matches "$TRACE_U" '"type" *: *"policy_decision".*"rule_id" *: *"tamper.bypass.io-uring"')"
+assert_eq "U4 the report asks nothing" \
+    "0" "$(afw_trace_matches "$TRACE_U" '"decision" *: *"(approval_required|deny|terminate)"')"
+[ -f "$WORK_DIR/u-marker.txt" ] && pass "U5 the road itself stays open under the shipped posture" || \
+    fail "U5 the road itself stays open under the shipped posture"
+
+# U6–U10: the host-requirement enforcement, from a local rule file that
+# replaces the report with a deny. The filter already holds the calls, so
+# the deny is complete: the ring never performs anything.
+LOCAL_POLICY="$WORK_DIR/uring-deny.yaml"
+cat >"$LOCAL_POLICY" <<'POLICY'
+version: 1
+name: local.uring-deny
+description: The host-requirement enforcement of the io_uring decision — replace the report with a deny for the sessions that load this file.
+rules:
+  - id: tamper.bypass.io-uring
+    title: io_uring use inside the session
+    category: tamper
+    risk: blocked
+    decision: deny
+    reason: This host refuses the ring road inside the firewall — the call is refused before the ring performs anything, and the program sees an ordinary permission error.
+    match:
+      action: io_uring
+      io_uring: [io_uring_setup, io_uring_enter]
+    tests:
+      - name: a ring setup is denied
+        expect: deny
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        io_uring: { call: setup }
+POLICY
+
+TRACE_UD="$WORK_DIR/trace-ud.jsonl"
+status_ud=0
+"$BINARY" run --approve deny --retention all --policy "$LOCAL_POLICY" --trace "$TRACE_UD" \
+    -- "$WORK_DIR/uring" "$WORK_DIR/ud-marker.txt" \
+    >"$WORK_DIR/ud.stdout" 2>"$WORK_DIR/ud.stderr" || status_ud=$?
+
+assert_exit_nonzero "U6 the local deny stops the ring session" "$status_ud"
+if [ -e "$WORK_DIR/ud-marker.txt" ]; then
+    fail "U7 the marker of the ring write was never created"
+else
+    pass "U7 the marker of the ring write was never created"
+fi
+assert_eq "U8 the trace holds the held ring call" \
+    "1" "$(afw_trace_matches "$TRACE_UD" '"type" *: *"io_uring"')"
+assert_eq "U9 the local deny decided the call" \
+    "1" "$(afw_trace_matches "$TRACE_UD" '"type" *: *"policy_decision".*"decision" *: *"deny"')"
+assert_contains "U10 the session explains the refusal and names the rule" \
+    "$(file_text "$WORK_DIR/ud.stderr")" "tamper.bypass.io-uring"
+assert_contains "U11 the technique saw an ordinary permission error" \
+    "$(file_text "$WORK_DIR/ud.stdout")" "blocked"
 
 # ---------------------------------------------------------------------------
 # Summary.
