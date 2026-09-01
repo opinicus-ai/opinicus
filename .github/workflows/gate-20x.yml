@@ -20,6 +20,7 @@ permissions:
 
 jobs:
   gate-20x:
+    # This repeats the complete gate, including its Landlock behavior checks.
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
