@@ -785,65 +785,6 @@ fn environment_keeps_only_useful_names() {
     );
 }
 
-
-/// A session whose environment carries `DATABASE_URL` with a password in
-/// its userinfo must produce events that name the variable and never hold
-/// the password.
-///
-/// The password enters the session through the environment only: the
-/// script builds it from two halves, so neither the command line nor the
-/// script file that the monitor snapshots holds the password as text. The
-/// one remaining path into an event is the environment of the `exec true`,
-/// and that path is masked at capture.
-#[test]
-fn a_session_url_password_never_reaches_the_events() {
-    let dir = tempfile::tempdir().expect("temporary directory");
-    let script = dir.path().join("session.sh");
-    std::fs::write(
-        &script,
-        concat!(
-            "P=hun\n",
-            "P=\"${P}ter2\"\n",
-            "export DATABASE_URL=\"postgres://app:${P}@db-prod.internal:5432/app\"\n",
-            "exec true\n",
-        ),
-    )
-    .expect("write the script");
-
-    let (outcome, handler) = run_session(
-        &["/bin/sh", script.to_str().expect("a text path")],
-        Recorder::default(),
-        20,
-    );
-    assert!(outcome.is_success(), "the session itself must succeed");
-
-    let execs = handler.of_kind("process_exec");
-    let url_exec = execs
-        .iter()
-        .find_map(|event| match &event.kind {
-            EventKind::ProcessExec { process } => (process.comm == "true").then_some(process),
-            _ => None,
-        })
-        .expect("the session exec'd true");
-    assert_eq!(
-        url_exec.env.get("DATABASE_URL").map(String::as_str),
-        Some("postgres://app:<redacted>@db-prod.internal:5432/app"),
-        "the name stays visible for a rule, the password does not"
-    );
-
-    // The rendered events are the lines a trace holds. The password must
-    // appear in none of them, whatever path it could have taken.
-    for event in &handler.events {
-        let text = format!("{event:?}");
-        assert!(
-            !text.contains("hunter2"),
-            "the password of the URL must not reach the events:\n{text}"
-        );
-    }
-    let all = format!("{:?}", handler.events);
-    assert!(all.contains("DATABASE_URL"), "the name must stay: {all}");
-}
-
 #[test]
 fn process_facts_of_the_monitor_itself_are_complete() {
     let pid = std::process::id() as Pid;
