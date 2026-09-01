@@ -88,6 +88,8 @@ jobs:
           tool: cargo-deny,cargo-audit
 
       - name: The complete gate
+        env:
+          RUST_BACKTRACE: full
         run: scripts/gate.sh
 
   # The M14 release-pipeline dry-run of [af-11], first half: build the

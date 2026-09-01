@@ -1,0 +1,751 @@
+
+=== gate: cargo fmt --check ===
+
+=== gate: cargo clippy --workspace --all-targets -- -D warnings ===
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
+
+=== gate: supply chain (cargo-deny advisories/bans/licenses/sources, cargo-audit) ===
+advisories [32mok[0m, bans [32mok[0m, licenses [32mok[0m, sources [32mok[0m
+[0m[0m[1m[32m    Fetching[0m advisory database from `https://github.com/RustSec/advisory-db.git`
+[0m[0m[1m[32m      Loaded[0m 1233 security advisories (from /home/runner/.cargo/advisory-db)
+[0m[0m[1m[32m    Updating[0m crates.io index
+[0m[0m[1m[32m    Scanning[0m Cargo.lock for vulnerabilities (63 crate dependencies)
+
+=== gate: cargo test --workspace ===
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/af_approval-0d322b6f480d79d5)
+
+running 49 tests
+test console::tests::a_closed_terminal_with_text_still_gives_the_line ... ok
+test console::tests::invalid_bytes_become_valid_text ... ok
+test memory::tests::a_long_number_does_not_change_the_fingerprint ... ok
+test memory::tests::a_file_action_and_a_network_action_get_a_fingerprint ... ok
+test memory::tests::a_new_memory_is_empty ... ok
+test memory::tests::a_proc_path_loses_the_process_identifier ... ok
+test memory::tests::extra_spaces_do_not_change_the_fingerprint ... ok
+test memory::tests::the_fingerprint_holds_no_control_characters ... ok
+test memory::tests::a_temporary_file_name_does_not_change_the_fingerprint ... ok
+test memory::tests::the_memory_allows_the_same_action_again ... ok
+test memory::tests::the_memory_refuses_a_different_action ... ok
+test memory::tests::the_memory_refuses_a_different_program ... ok
+test memory::tests::the_memory_refuses_a_different_rule ... ok
+test memory::tests::the_process_identifier_is_not_part_of_the_fingerprint ... ok
+test mode::tests::parse_ignores_spaces_and_letter_case ... ok
+test mode::tests::parse_reads_the_three_words ... ok
+test mode::tests::parse_refuses_every_other_word ... ok
+test mode::tests::the_label_is_the_word_that_parse_reads ... ok
+test prompt::tests::a_hostile_working_directory_cannot_write_escape_codes ... ok
+test prompt::tests::a_low_risk_action_gets_no_colour ... ok
+test prompt::tests::a_request_without_a_rule_still_gets_a_prompt ... ok
+test prompt::tests::a_long_command_line_goes_to_the_next_line ... ok
+test prompt::tests::a_suspicious_action_is_yellow ... ok
+test prompt::tests::colour_marks_the_risk_level ... ok
+test prompt::tests::every_line_of_the_box_has_a_border ... ok
+test prompt::tests::no_colour_means_no_escape_code ... ok
+test prompt::tests::the_borders_have_the_same_width ... ok
+test prompt::tests::the_prompt_holds_the_chain_the_rule_the_operation_and_the_answers ... ok
+test prompt::tests::the_prompt_holds_the_session_and_the_working_directory ... ok
+test prompt::tests::the_prompt_removes_terminal_escape_codes ... ok
+test scripted::tests::an_empty_list_denies ... ok
+test scripted::tests::the_approver_keeps_the_text_of_every_question ... ok
+test terminal::tests::a_closed_terminal_denies ... ok
+test terminal::tests::a_session_answer_also_works_in_auto_deny_mode ... ok
+test scripted::tests::the_answers_come_in_order ... ok
+test terminal::tests::a_session_answer_answers_the_same_question_again ... ok
+test terminal::tests::a_timeout_denies ... ok
+test terminal::tests::a_session_answer_does_not_open_a_different_action ... ok
+test terminal::tests::an_empty_line_denies ... ok
+test terminal::tests::an_empty_terminal_denies_instead_of_waiting ... ok
+test terminal::tests::ask_without_a_terminal_denies_and_does_not_wait ... ok
+test terminal::tests::auto_allow_allows_without_a_terminal ... ok
+test terminal::tests::auto_deny_denies_without_a_terminal ... ok
+test terminal::tests::the_approver_is_an_approver_object ... ok
+test terminal::tests::the_approver_asks_again_after_a_word_that_it_does_not_know ... ok
+test terminal::tests::the_question_reaches_the_terminal ... ok
+test terminal::tests::the_approver_counts_every_answer ... ok
+test terminal::tests::three_words_that_the_approver_does_not_know_deny ... ok
+test terminal::tests::every_known_word_gives_the_right_answer ... ok
+
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/main.rs (target/debug/deps/agent_firewall-f540a1d52d450b5f)
+
+running 22 tests
+test inspect_cmds::tests::a_closed_session_is_not_an_abrupt_end ... ok
+test inspect_cmds::tests::a_trace_without_a_session_start_stays_quiet ... ok
+test inspect_cmds::tests::a_trace_that_never_closes_names_its_monitor ... ok
+test inspect_cmds::tests::the_monitor_named_is_the_one_of_the_session ... ok
+test normalize::tests::a_missing_script_does_not_change_the_program ... ok
+test normalize::tests::a_normal_program_does_not_change ... ok
+test normalize::tests::a_shell_command_keeps_the_shell_as_the_program ... ok
+test normalize::tests::a_wrapper_script_reports_the_script_as_the_program ... ok
+test run::tests::a_non_threshold_rule_still_caches_the_same_summary ... ok
+test run::tests::a_non_threshold_rule_still_re_asks_for_a_different_summary ... ok
+test run::tests::a_quarantine_rule_suspends_the_tree_once_and_takes_one_ruling ... ok
+test run::tests::a_signal_to_another_process_never_wakes_the_quarantine ... ok
+test run::tests::a_static_binary_that_ignores_the_preload_still_carries_it ... ok
+test run::tests::a_second_rule_in_the_verdict_asks_again ... ok
+test run::tests::an_evidence_path_takes_the_form_the_open_stop_reports ... ok
+test run::tests::a_threshold_rule_asks_one_time_for_the_session ... ok
+test run::tests::a_threshold_rule_still_records_every_decision_honestly ... ok
+test run::tests::a_threshold_rule_remembers_a_refusal_too ... ok
+test run::tests::the_preload_fact_only_exists_for_a_session_that_carries_a_sensor ... ok
+test run::tests::the_session_names_its_own_evidence_files ... ok
+test run::tests::the_sensor_registration_record_names_the_live_instances ... ok
+test run::tests::the_same_pair_of_rules_repeats_its_answer ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/cli.rs (target/debug/deps/cli-063298de5d32e564)
+
+running 30 tests
+test a_harmless_command_runs_without_a_question ... ok
+test a_quiet_trace_makes_no_sample ... ok
+test a_dangerous_command_is_stopped_and_recorded ... ok
+test a_replay_finds_the_chain_the_burst_and_the_new_remote ... ok
+test a_replay_finds_a_chain_that_two_tool_calls_share ... ok
+test a_live_chain_replays_from_the_default_trace ... ok
+test an_unknown_filter_mode_is_refused ... ok
+test consent_is_granular_and_revocable_from_the_cli ... ok
+test a_replay_judges_a_file_open_and_a_connection ... ok
+test a_replay_judges_the_standard_input_of_a_process ... ok
+test doctor_carries_the_alpha_disclosure_and_the_telemetry_state ... ok
+test a_sample_is_generated_inspected_and_destroyed_locally ... ok
+test doctor_reports_the_inactive_rule_count ... ok
+test doctor_reports_the_interception_capability ... ok
+test doctor_reports_the_system_call_filter ... ok
+test every_session_prints_the_alpha_banner ... ok
+test policy_list_reports_rules_that_cannot_fire ... ok
+test policy_list_shows_the_builtin_rules ... ok
+test one_process_that_writes_and_connects_is_now_held ... ok
+test telemetry_defaults_to_off_and_names_the_promises ... ok
+test policy_test_passes_for_the_builtin_rules ... ok
+test the_all_opens_mode_wakes_the_rules_about_a_read ... ok
+test the_exit_code_of_the_child_reaches_the_caller ... ok
+test the_off_mode_marks_every_file_and_network_rule ... ok
+test the_replay_summary_counts_every_kind_of_event ... ok
+test run_with_telemetry_packages_samples_without_a_trace_file ... ok
+test the_user_can_allow_a_dangerous_command ... ok
+test the_kernel_floor_names_rules_that_the_pack_really_carries ... ok
+test two_replays_of_a_file_and_network_trace_give_the_same_answer ... ok
+test two_replays_of_one_trace_give_the_same_answer ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.48s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/af_core-d66a37a9c8e9f475)
+
+running 42 tests
+test decision::tests::no_match_allows ... ok
+test decision::tests::one_quarantine_rule_suspends_the_verdict ... ok
+test display::tests::control_characters_do_not_reach_the_terminal ... ok
+test display::tests::chain_starts_at_the_session_root ... ok
+test decision::tests::strongest_decision_wins ... ok
+test display::tests::truncate_keeps_valid_text ... ok
+test event::tests::allow_decisions_are_not_evidence ... ok
+test event::tests::an_event_without_a_tag_stays_without_one_in_the_trace ... ok
+test event::tests::an_agent_tag_and_an_unlink_flag_round_trip_through_json ... ok
+test event::tests::event_round_trips_through_json ... ok
+test event::tests::discrepancy_events_round_trip_through_json ... ok
+test identity::tests::a_dependency_manifest_alone_stays_below_the_line ... ok
+test event::tests::the_dynamic_link_fact_travels_with_the_process_and_stays_absent_when_unknown ... ok
+test event::tests::sensor_events_round_trip_through_json ... ok
+test identity::tests::a_known_executable_tags_alone ... ok
+test identity::tests::a_marker_at_the_wrong_value_stays_quiet ... ok
+test identity::tests::a_path_that_mentions_an_agent_without_the_layout_stays_quiet ... ok
+test identity::tests::a_runner_that_names_an_agent_package_tags ... ok
+test identity::tests::an_api_key_is_not_an_agent_marker ... ok
+test identity::tests::an_ambiguous_name_alone_stays_below_the_line ... ok
+test identity::tests::an_install_layout_tags_through_the_executable_path ... ok
+test identity::tests::an_interpreter_that_runs_an_agent_script_tags ... ok
+test identity::tests::one_detector_cannot_inflate_the_confidence_by_repetition ... ok
+test identity::tests::weak_signals_combine_across_detectors ... ok
+test memory::tests::a_baseline_set_answers_for_a_known_and_for_a_new_value ... ok
+test identity::tests::the_agent_marker_environment_tags_a_plain_shell ... ok
+test memory::tests::a_count_holds_only_the_hits_of_the_window ... ok
+test memory::tests::a_distinct_count_holds_every_value_one_time ... ok
+test memory::tests::a_mark_of_a_subtree_is_invisible_in_another_subtree ... ok
+test memory::tests::a_mark_of_the_session_is_visible_everywhere ... ok
+test memory::tests::a_mark_that_is_written_again_keeps_the_longer_lifetime ... ok
+test memory::tests::a_mark_stops_counting_after_its_lifetime ... ok
+test memory::tests::a_reader_can_ask_for_a_shorter_time_than_the_lifetime ... ok
+test memory::tests::an_unknown_baseline_set_gives_no_answer ... ok
+test memory::tests::two_subtrees_keep_their_own_mark ... ok
+test memory::tests::the_store_drops_records_that_can_never_count_again ... ok
+test traits::tests::a_direct_child_of_the_root_opens_its_own_subtree ... ok
+test traits::tests::the_session_root_is_its_own_subtree_root ... ok
+test traits::tests::a_session_with_no_root_keeps_the_older_session_wide_answer ... ok
+test traits::tests::the_subtree_root_is_the_child_of_the_session_root ... ok
+test traits::tests::two_tool_calls_of_one_session_are_two_subtrees ... ok
+test memory::tests::one_mark_of_one_subtree_keeps_one_record ... ok
+
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/identity_corpus.rs (target/debug/deps/identity_corpus-1fd30b908888d41c)
+
+running 2 tests
+test the_corpus_measures_recall_of_at_least_ninety_percent ... ok
+test the_corpus_measures_precision_one ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/af_correlate-99f7ad7e6079802f)
+
+running 12 tests
+test tests::a_frozen_sensor_inside_a_living_process_is_silent ... ok
+test tests::a_dynamic_child_with_the_preload_that_never_registered_is_unreported ... ok
+test tests::a_held_open_the_registered_sensor_never_reported_is_contradicted ... ok
+test tests::a_reported_open_consumes_its_match_and_a_refused_open_is_honest_quiet ... ok
+test tests::a_registration_before_the_exec_is_the_parent_not_the_successor ... ok
+test tests::a_reported_spawn_with_no_observed_exec_is_measured_and_expected_zero ... ok
+test tests::a_sensor_whose_last_word_was_an_exec_intent_died_with_its_image ... ok
+test tests::a_thread_open_reports_under_the_leader_and_stays_quiet ... ok
+test tests::an_empty_record_means_no_sensor_and_no_findings ... ok
+test tests::static_children_and_stripped_children_and_registered_children_are_quiet ... ok
+test tests::teardown_and_quiet_instances_and_failed_execs_are_not_silence ... ok
+test tests::the_loaders_own_opens_are_plumbing_and_the_programs_are_not ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/af_monitor-4c7db5163b211b21)
+
+running 65 tests
+test landlock::tests::a_work_tree_inside_a_hidden_path_stays_ungranted ... ok
+test landlock::tests::a_credential_shape_in_the_work_tree_keeps_its_question ... ok
+test landlock::tests::an_unlisted_path_has_no_rule_to_name ... ok
+test landlock::tests::a_credential_shape_under_tmp_keeps_its_grant_and_its_question ... ok
+test landlock::tests::a_tool_configuration_file_keeps_its_read_and_loses_its_write ... ok
+test landlock::tests::the_enforced_rules_follow_the_abi_of_the_kernel ... ok
+test landlock::tests::the_floor_names_the_system_trees_and_the_devices ... ok
+test seccomp::tests::a_clean_path_keeps_itself ... ok
+test seccomp::tests::a_monitor_that_names_itself_holds_the_signals_to_itself ... ok
+test seccomp::tests::a_relative_path_keeps_the_walk_up ... ok
+test landlock::tests::the_carve_out_grants_the_siblings_and_not_the_hidden_dir ... ok
+test landlock::tests::the_floor_hides_the_credential_stores_of_the_home ... ok
+test seccomp::tests::a_walk_above_the_root_stays_at_the_root ... ok
+test seccomp::tests::the_all_opens_program_adds_the_two_read_rules ... ok
+test seccomp::tests::the_filter_holds_the_two_uring_calls_in_every_mode ... ok
+test seccomp::tests::the_filter_never_holds_execve ... ok
+test seccomp::tests::the_filter_never_holds_write_or_sendto ... ok
+test seccomp::tests::the_machine_that_runs_the_tests_offers_the_trace_action ... ok
+test seccomp::tests::the_parts_that_mean_nothing_go_away ... ok
+test seccomp::tests::the_write_mask_names_every_change_flag ... ok
+test seccomp::tests::the_write_only_program_holds_the_expected_calls ... ok
+test tests::a_connection_is_observed_with_its_address_and_port ... ok
+test tests::a_program_with_threads_and_many_children_stays_complete ... ok
+test tests::a_program_that_raises_privilege_gets_an_explanation ... ok
+test tests::a_foreign_child_exit_never_enters_the_session_events ... ok
+/bin/bash: connect: Operation not permitted
+/bin/bash: line 1: /dev/tcp/127.0.0.1/39235: Operation not permitted
+test tests::a_refused_connection_fails_in_the_program ... ok
+test tests::a_url_value_keeps_its_shape_and_loses_its_password ... ok
+test tests::a_refused_open_fails_and_the_program_runs_on ... ok
+test tests::a_session_url_password_never_reaches_the_events ... ok
+cat: /home/runner/.ssh/id_afw_floor_test: No such file or directory
+test tests::a_session_without_the_floor_reports_no_kernel_denial ... ok
+test tests::a_write_open_is_observed_and_a_read_is_not ... ok
+test tests::all_opens_mode_observes_a_read ... ok
+test tests::capabilities_report_the_real_machine ... ok
+test tests::capture_input_can_be_switched_off ... ok
+test tests::config_cwd_sets_the_working_directory ... ok
+test tests::environment_keeps_only_useful_names ... ok
+Killed
+test tests::empty_command_is_an_error ... ok
+test tests::deny_stops_the_program_before_it_writes ... ok
+test tests::ending_signal_is_reported ... ok
+test tests::process_facts_of_the_monitor_itself_are_complete ... ok
+test tests::read_process_reports_argv_exe_and_cwd ... ok
+test tests::read_process_returns_none_for_a_dead_process ... ok
+test tests::script_snapshot_reads_a_database_script ... ok
+test tests::script_snapshot_reads_an_interpreter_script ... ok
+test tests::script_snapshot_skips_inline_code_and_other_programs ... ok
+test tests::script_snapshot_stops_at_the_byte_limit ... ok
+test tests::exit_code_is_reported ... ok
+test tests::missing_program_is_an_error ... ok
+test tests::nested_session_links_every_child_to_the_root ... ok
+test tests::simple_session_reports_exec_and_exit ... ok
+test tests::stdin_snapshot_reads_a_large_here_document ... ok
+test tests::stdin_snapshot_reads_a_redirected_file ... ok
+test tests::stdin_snapshot_skips_a_pipe ... ok
+test tests::target_scenario_finds_psql_with_its_full_provenance ... ok
+test tests::terminate_session_stops_the_whole_tree ... ok
+test tests::the_capability_report_follows_the_filter_mode ... ok
+test tests::the_filter_reaches_a_program_two_levels_deep ... ok
+cat: /home/runner/.ssh/id_afw_floor_test: No such file or directory
+test tests::the_floor_denies_a_credential_read_two_shells_deep_and_explains_it ... ok
+test tests::the_monitor_reads_the_class_of_a_program ... ok
+test tests::the_monitor_reads_whether_a_program_needs_the_linker ... ok
+test tests::the_floor_leaves_a_ssh_directory_of_the_work_tree_alone ... ok
+test tests::the_launch_closes_inherited_descriptors_beyond_stdio ... ok
+test tests::the_launch_hygiene_keeps_the_floor_report_working ... ok
+test tests::the_write_only_mode_installs_the_filter_in_the_child ... ok
+test tests::the_off_mode_installs_no_filter_and_takes_no_privilege ... ok
+
+test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/af_policy-b80b942f06865594)
+
+running 22 tests
+test facts::tests::a_ground_path_keeps_its_text_and_allows_on_it ... ok
+test facts::tests::an_advisory_path_keeps_its_text_and_its_name ... ok
+test facts::tests::ground_facts_hold_no_path_when_there_is_none ... ok
+test glob::tests::a_question_mark_matches_one_character ... ok
+test glob::tests::a_star_at_the_end_can_match_nothing ... ok
+test glob::tests::one_star_stays_inside_one_path_part ... ok
+test facts::tests::the_guard_fires_on_a_forged_ground_path - should panic ... ok
+test glob::tests::plain_pattern_is_an_exact_compare ... ok
+test glob::tests::text_after_the_pattern_does_not_match ... ok
+test glob::tests::two_stars_in_the_middle_find_a_home_directory ... ok
+test glob::tests::two_stars_step_over_path_parts ... ok
+test lint::tests::an_exception_on_a_file_path_is_an_error ... ok
+test matcher::tests::a_not_block_never_quiets_a_rule_on_a_raced_read ... ok
+test matcher::tests::an_exception_never_allows_on_a_path_read_from_the_judged_program ... ok
+test matcher::tests::a_rule_that_stops_or_asks_matches_a_path_read_from_the_judged_program ... ok
+test matcher::tests::an_exception_still_allows_on_a_fact_of_the_exec_boundary ... ok
+test matcher::tests::the_guard_fires_when_an_allow_consumes_a_flipped_marking - should panic ... ok
+test matcher::tests::the_invariant_catches_every_flipped_marking_of_the_race ... ok
+test tests::the_split_verdict_equals_the_verdict_of_all_matches ... ok
+test testing::tests::no_rule_of_the_pack_fires_on_a_quiet_example_of_another_rule ... ok
+test matcher::tests::a_report_rule_notes_a_path_read_from_the_judged_program_and_decides_nothing ... ok
+test lint::tests::the_builtin_pack_lints_clean_under_the_exception_rule ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.39s
+
+[1m[92m     Running[0m tests/loading.rs (target/debug/deps/loading-788b57133a05c0b2)
+
+running 36 tests
+test a_count_over_paths_in_an_exec_rule_is_a_lint_error ... ok
+test a_bad_regex_is_a_load_error_that_names_the_rule_and_the_file ... ok
+test a_mark_that_no_rule_remembers_is_a_lint_error ... ok
+test a_missing_file_is_a_load_error_that_names_the_path ... ok
+test a_directory_gives_every_rule_file_and_skips_other_files ... ok
+test a_pack_without_a_name_is_a_load_error ... ok
+test a_remember_block_without_a_name_is_a_load_error ... ok
+test a_repeated_rule_id_in_one_file_is_a_load_error ... ok
+test a_repeated_rule_id_of_the_builtin_pack_is_a_load_error ... ok
+test a_rule_that_is_switched_off_never_matches ... ok
+test a_threshold_that_asks_for_one_hit_is_a_load_error ... ok
+test a_threshold_with_no_window_is_a_load_error ... ok
+test an_allow_rule_cannot_make_a_deny_rule_weak ... ok
+test a_capture_without_exactly_one_group_is_a_load_error ... ok
+test an_unknown_field_is_a_load_error ... ok
+test an_unknown_field_of_a_rule_is_a_load_error ... ok
+test an_unknown_format_version_is_a_load_error ... ok
+test an_exception_switches_a_rule_off_for_one_action ... ok
+test ancestor_depth_at_least_counts_the_parents ... ok
+test ancestor_program_looks_at_every_parent ... ok
+test any_of_needs_one_branch_and_all_of_needs_every_branch ... ok
+test cwd_prefix_reads_the_working_directory ... ok
+test env_needs_the_name_and_the_value ... ok
+test argv_predicates_read_the_command_line ... ok
+test exe_glob_reads_the_program_path ... ok
+test input_matches_reads_captured_content ... ok
+test not_turns_a_condition_around ... ok
+test parent_program_looks_only_at_the_nearest_parent ... ok
+test path_and_glob_and_prefix_select_a_file ... ok
+test run_tests_reports_the_rule_the_test_and_both_decisions ... ok
+test the_lint_reports_a_condition_for_the_wrong_action ... ok
+test the_lint_reports_a_rule_that_matches_every_action ... ok
+test the_lint_reports_a_rule_with_no_test ... ok
+test a_rule_that_asks_for_a_mark_stays_quiet_without_a_memory ... ok
+test merge_adds_the_rules_of_another_set ... ok
+test a_local_rule_replaces_a_builtin_rule_with_the_same_id ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.15s
+
+[1m[92m     Running[0m tests/pack.rs (target/debug/deps/pack-b5c8c5b663056027)
+
+running 3 tests
+test builtin_pack_loads_lints_clean_and_passes_its_tests ... ok
+test every_category_of_the_specification_has_rules ... ok
+test the_pack_asks_for_a_decision_only_on_a_small_part_of_the_rules ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s
+
+[1m[92m     Running[0m tests/scenarios.rs (target/debug/deps/scenarios-66827fe5a1aede29)
+
+running 24 tests
+test a_connection_to_a_remote_database_port_is_reported_but_allowed ... ok
+test a_connection_to_a_local_database_port_stays_quiet ... ok
+test a_delete_of_build_output_stays_quiet ... ok
+test a_burst_of_deletes_needs_approval_only_at_the_twentieth ... ok
+test a_drop_database_through_psql_needs_approval ... ok
+test a_drop_database_in_captured_input_needs_approval ... ok
+test a_force_push_to_the_main_branch_needs_approval ... ok
+test a_download_that_runs_at_once_needs_approval ... ok
+test a_plain_select_stays_quiet_and_matches_no_rule ... ok
+test a_production_host_in_the_environment_is_reported ... ok
+test a_read_of_a_project_file_stays_quiet ... ok
+test a_recursive_delete_of_the_home_directory_needs_approval ... ok
+test a_recursive_delete_of_the_root_directory_is_denied ... ok
+test a_write_to_the_ssh_directory_needs_approval ... ok
+test an_upload_after_a_credential_read_needs_approval ... ok
+test each_half_of_the_credential_chain_alone_stays_quiet ... ok
+test a_second_load_of_the_pack_gives_the_same_verdict ... ok
+test normal_development_commands_stay_quiet ... ok
+test normal_git_work_stays_quiet ... ok
+test the_credential_chain_stops_counting_after_ten_minutes ... ok
+test the_rule_list_names_every_rule_with_its_source ... ok
+test the_same_actions_give_the_same_verdicts_two_times ... ok
+test the_same_context_always_gives_the_same_verdict ... ok
+test twenty_deletes_over_an_hour_stay_quiet ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.10s
+
+[1m[92m     Running[0m tests/subtree.rs (target/debug/deps/subtree-a8becfe7ff6f8df6)
+
+running 3 tests
+test a_subtree_mark_fires_inside_the_tool_call_that_set_it ... ok
+test a_session_that_does_not_name_its_root_cannot_separate_two_subtrees ... ok
+test a_subtree_mark_stays_inside_its_own_tool_call ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/af_provenance-902edb6b0b6f3f08)
+
+running 3 tests
+test graph::tests::ancestry_terminates_on_a_cycle ... ok
+test graph::tests::unknown_start_time_keeps_the_process ... ok
+test graph::tests::render_terminates_on_a_cycle ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/graph.rs (target/debug/deps/graph-2228404d7c80db78)
+
+running 23 tests
+test a_new_graph_is_empty ... ok
+test a_decision_rebuilds_a_missing_chain ... ok
+test a_fork_always_makes_a_new_process ... ok
+test a_dead_parent_still_carries_the_chain ... ok
+test a_plain_session_carries_no_tag ... ok
+test a_session_end_closes_every_process ... ok
+test a_thread_does_not_become_a_process ... ok
+test a_setsid_descendant_is_flagged_unlinked_and_keeps_the_tag ... ok
+test an_exec_updates_the_node_and_keeps_the_history ... ok
+test an_unknown_parent_hangs_under_the_session_root ... ok
+test chain_reaches_the_session_root ... ok
+test from_trace_works_without_a_session_start ... ok
+test children_keep_their_creation_order ... ok
+test from_trace_rebuilds_the_same_graph ... ok
+test processes_without_session_facts_stay_quiet ... ok
+test identifier_reuse_keeps_the_two_chains_apart ... ok
+test the_agent_identity_propagates_to_every_descendant ... ok
+test the_graph_serves_the_provenance_view ... ok
+test the_strongest_verdict_marks_the_process ... ok
+test the_graph_attaches_a_process_when_it_learns_the_parent ... ok
+test the_tree_removes_control_characters ... ok
+test tree_of_the_demo_session ... ok
+test the_tree_is_stable ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/af_recorder-4b1e12c41c07aca4)
+
+running 1 test
+test retention::tests::levels_read_back_from_text ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/trace.rs (target/debug/deps/trace-a07215a8247da1ef)
+
+running 19 tests
+test a_process_event_reaches_the_file_without_a_flush ... ok
+test balanced_drops_a_file_open_that_no_rule_matched ... ok
+test a_trace_file_is_created_for_its_owner_only ... ok
+test balanced_keeps_evidence_and_process_activity ... ok
+test balanced_keeps_a_file_open_that_a_rule_matched ... ok
+test a_broken_line_does_not_stop_the_reader ... ok
+test every_level_keeps_the_evidence ... ok
+test every_event_kind_survives_a_round_trip ... ok
+test evidence_only_keeps_the_named_exec_events ... ok
+test the_memory_sink_keeps_every_event ... ok
+test the_stream_sink_explains_a_held_action ... ok
+test a_replayed_trace_draws_the_same_tree ... ok
+test the_fanout_reaches_every_sink ... ok
+test the_writer_can_write_to_any_destination ... ok
+test the_reader_knows_the_session_at_once ... ok
+test the_stream_sink_writes_a_trace ... ok
+test the_writer_flushes_the_evidence ... ok
+test the_writer_numbers_every_event ... ok
+test the_writer_counts_what_it_kept_and_dropped ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/af_telemetry-5b4c14ca106595ea)
+
+running 20 tests
+test redaction::tests::a_secret_name_is_found_case_insensitively_and_by_fragment ... ok
+test redaction::tests::a_text_loses_the_host_name ... ok
+test redaction::tests::an_authorization_header_loses_the_credential_not_the_scheme ... ok
+test redaction::tests::a_session_reference_is_stable_and_hides_the_identifier ... ok
+test redaction::tests::paths_lose_the_home_directory_and_the_login_not_the_files ... ok
+test redaction::tests::process_references_are_stable_and_ordered_by_first_appearance ... ok
+test redaction::tests::assignments_with_secret_names_lose_their_value ... ok
+test redaction::tests::credentials_with_known_prefixes_are_swallowed_whole ... ok
+test redaction::tests::redaction_is_multiplicative_over_a_text ... ok
+test redaction::tests::scrub_combines_redaction_and_pseudonymization ... ok
+test redaction::tests::the_cap_cuts_at_characters_and_marks_the_cut ... ok
+test tests::a_missing_consent_file_is_off_and_not_an_error ... ok
+test sha256::tests::a_long_message_hashes ... ok
+test sha256::tests::the_known_vectors_match ... ok
+test sha256::tests::streaming_matches_one_shot ... ok
+test tests::an_unknown_scope_name_is_skipped_and_a_broken_file_is_refused ... ok
+test tests::consent_is_granular_and_revocable ... ok
+test tests::telemetry_is_off_by_default ... ok
+test tests::the_consent_file_is_created_for_its_owner_only ... ok
+test tests::the_consent_file_round_trips ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/dependency_contract.rs (target/debug/deps/dependency_contract-d828bdb129464acc)
+
+running 4 tests
+test dev_dependencies_are_exactly_tempfile ... ok
+test direct_dependencies_are_exactly_af_core_serde_and_serde_json ... ok
+test dependency_graph_holds_no_network_crate ... ok
+test shipped_dependency_closure_is_pinned ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+[1m[92m     Running[0m tests/sample.rs (target/debug/deps/sample-c90480ba2353da3c)
+
+running 9 tests
+test a_quiet_session_makes_no_sample ... ok
+test far_apart_triggers_make_two_samples_with_a_small_window ... ok
+test a_denied_action_becomes_one_sample_with_both_reasons ... ok
+test a_sample_file_is_created_for_its_owner_only ... ok
+test no_secret_baseline_session_id_or_raw_pid_reaches_the_sample_text ... ok
+test tamper_and_discrepancy_events_are_triggers_too ... ok
+test each_scope_gates_its_own_payload ... ok
+test the_tree_names_real_files_by_hash_and_the_outbox_counts_them ... ok
+test the_sample_carries_the_redacted_payload_it_promises ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+[1m[92m   Doc-tests[0m af_approval
+
+running 1 test
+test crates/af-approval/src/lib.rs - (line 26) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+[1m[92m   Doc-tests[0m af_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m af_correlate
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m af_monitor
+
+running 1 test
+test crates/af-monitor/src/lib.rs - (line 29) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+[1m[92m   Doc-tests[0m af_policy
+
+running 3 tests
+test crates/af-policy/src/facts.rs - facts::GroundFacts (line 191) - compile fail ... ok
+test crates/af-policy/src/facts.rs - facts::GroundFacts (line 207) ... ok
+test crates/af-policy/src/lib.rs - (line 17) ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s
+
+[1m[92m   Doc-tests[0m af_provenance
+
+running 2 tests
+test crates/af-provenance/src/graph.rs - graph::ProcessGraph (line 31) ... ok
+test crates/af-provenance/src/lib.rs - (line 35) ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+[1m[92m   Doc-tests[0m af_recorder
+
+running 2 tests
+test crates/af-recorder/src/reader.rs - reader::read_trace (line 18) - compile ... ok
+test crates/af-recorder/src/lib.rs - (line 22) ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+[1m[92m   Doc-tests[0m af_telemetry
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+=== gate: cargo build --release ===
+[1m[92m    Finished[0m `release` profile [optimized] target(s) in 0.03s
+
+=== gate: build the in-process sensor ===
+-rwxr-xr-x 1 runner runner 36200 Sep  1 06:12 /home/runner/work/opinicus/opinicus/research/spikes/inprocess/libafsensor.so
+
+=== gate: policy check ===
+161 rule(s) are valid, 0 warning(s)
+
+=== gate: policy test ===
+705 policy test(s) passed
+
+=== gate: e2e ===
+Agent Firewall end-to-end test
+binary:    /home/runner/work/opinicus/opinicus/target/release/agent-firewall
+workspace: /home/runner/work/opinicus/opinicus/tmp/e2e-36805
+
+A — a harmless session
+  ok   A1 the session ends with code 0
+  ok   A2 the child writes hello on standard output
+
+B — the dangerous session with --approve deny
+  ok   B1 the firewall stopped the session
+  ok   B2 the marker file holds no DROP DATABASE line
+  ok   B3 the harmless statements still ran
+  ok   B4 the firewall explained the decision
+
+C — the dangerous session with --approve allow
+  ok   C1 the session ends with code 0
+  ok   C2 the marker file holds the DROP DATABASE line
+
+D — the trace of the denied session
+  ok   D1 the trace holds a policy_decision for the drop rule
+  ok   D2 the decision of the rule is not allow
+
+E — the process tree of the trace
+  ok   E1 the tree command ends with code 0
+  ok   E2 the tree holds psql
+  ok   E3 psql stands below migrate.sh
+
+F — the replay of the trace
+  ok   F1 the replay finds the same rule
+
+G — the policy tests
+  ok   G1 policy test ends with code 0
+
+H — the policy checker
+  ok   H1 policy check accepts the policies directory
+  ok   H2 policy check rejects a bad rule file
+
+I — the doctor
+  ok   I1 doctor ends with code 0
+  ok   I2 doctor reports exec_interception
+
+J — normal work stays quiet
+  ok   J1 the harmless session ends with code 0
+  ok   J2 the trace holds no approval question
+  ok   J3 the trace holds no strong decision
+
+K — the kernel floor answers without asking
+  ok   K1 the credential read two shells deep fails
+  ok   K2 the trace holds no approval question
+  ok   K3 the session names the rule the kernel enforced
+  ok   K4 the trace records the kernel denial
+  ok   K5 the trace records the kernel floor
+  ok   K6 the credential write two shells deep fails
+  ok   K7 the write asks no question either
+  ok   K8 the write names the write rule
+  ok   K9 a .ssh created in the work tree is not written silently
+  ok   K10 the write keeps its question (the floor does not cover it)
+  ok   K11 the question names the credential write rule
+  ok   K12 the key file was never created
+
+T — tamper sensing and the quarantine flow
+  ok   T1 the monitor-kill session is stopped by the ruling
+  ok   T2 the trace holds the held signal
+  ok   T3 the tamper rule fired
+  ok   T4 the tree was quarantined exactly once
+  ok   T5 one ruling, one answer
+  ok   T6 the kill never ran
+  ok   T7 the detached session still runs to its end
+  ok   T8 the detach fact fired
+  ok   T9 the detach reports and never asks
+  ok   T10 the respawn loop is stopped by a ruling
+  ok   T11 the killed program that came back fired
+  ok   T12 the quarantine suspended the tree
+  ok   T13 the stripped-preload session is stopped by a ruling
+  ok   T14 the preload fact fired
+  ok   T15 the session carries the sensor facts
+  ok   T16 a session without the sensor stays quiet
+  ok   T17 no tamper fact of any kind fired
+tests/e2e.sh: line 574: 37185 Killed                  "$BINARY" run --approve deny --retention all --syscall-filter off --landlock off --trace "$TRACE_TD" -- "$WORK_DIR/kill-monitor" "$WORK_DIR/td-marker.txt" > "$WORK_DIR/td.stdout" 2> "$WORK_DIR/td.stderr"
+  ok   T18 a killed monitor leaves the evidence of what ran
+
+C — the correlation engine
+  ok   T19 the blinded session runs to its end
+  ok   T20 the silent sensor raised its discrepancy and its rule
+  ok   T20a the rule of the pack fired
+  ok   T20b the emitted findings read back as a trace
+  ok   T21 the stripped-preload session stays quiet for correlation
+  ok   T22 the discrepancy trace replays with the rules
+
+U — the io_uring ring is held, reported, and refusable
+  ok   U1 the reported ring session runs to its end
+  ok   U2 the trace holds the held ring calls
+  ok   U3 the io_uring rule fired as a report on every held call
+  ok   U4 the report asks nothing
+  ok   U5 the road itself stays open under the shipped posture
+  ok   U6 the local deny stops the ring session
+  ok   U7 the marker of the ring write was never created
+  ok   U8 the trace holds the held ring call
+  ok   U9 the local deny decided the call
+  ok   U10 the session explains the refusal and names the rule
+  ok   U11 the technique saw an ordinary permission error
+
+Summary
+passed: 69
+failed: 0
+every assertion passed
+
+=== gate: quiet-check ===
+Interruption budget check
+binary: /home/runner/work/opinicus/opinicus/target/release/agent-firewall
+commands: 58
+
+
+Everyday commands
+  quiet            53
+  reported only    5
+  STOPPED the user 0
+
+Dangerous commands
+  stopped          13
+  MISSED           0
+
+Quiet on everyday work, and every dangerous command stopped.
+
+=== gate: benign gate ===
+mode=write-only fw_exit=0 session_exit=0 questions=0 agent_tags=0 decision_events=14 quarantines=0 tamper_events=1
+PASS: the corpus ran clean with zero questions, zero agent tags and zero quarantines
+benign gate: the write-only corpus ran quiet; the summary holds no FAIL
+
+=== gate: count-rules (Landlock pack/floor drift guard) ===
+the pack holds 161 rules: 77 stop the user (9 deny, 68 approval_required), 84 report only
+
+A  the kernel answers, the question disappears: 6
+     filesystem.credentials.write  (approval_required)  the credential stores of the home are hidden, so every write to them fails with EACCES; the class rides on the floor for the paths it hides — a .ssh under /tmp keeps its question
+     filesystem.delete.mount-root  (approval_required)  /mnt, /media, /run/media and /Volumes get no rule at all, so no delete and no write can reach a mounted drive
+     filesystem.delete.system-path  (approval_required)  the system trees are read and execute only; the writable exceptions of the rule (/var/tmp, /var/cache, /dev/shm) are exactly the writable exceptions of the floor
+     filesystem.device.truncate  (approval_required)  the raw devices of /dev get no rule and the TRUNCATE right is handled, so a truncate of a device cannot run
+     filesystem.etc.write  (approval_required)  /etc is granted read and execute only, so every write open gives EACCES
+     process.signal.kill-everything  (approval_required)  the signal scope (ABI 6) refuses every signal to a process outside the session, so the editor, the other sessions and the monitor survive; measured: pkill -f prints EPERM for each outside target
+
+A' deny rules the kernel backs, no question to remove: 3
+     filesystem.delete.root  (deny)  deny today; the floor makes the walk over / fail and no removal outside the granted trees can run, so the exec boundary keeps its block and the floor stands under it
+     filesystem.device.destroy  (deny)  deny today; no rule covers a raw device, so the raw write cannot run and the exec boundary keeps its block
+     process.signal.supervision  (deny)  deny today; the signal scope makes the kill of the monitor and of the outside agent impossible, and the exec boundary keeps its block
+
+B  the floor denies part of the ground: 21
+C  the floor is blind: 131
+
+questions removed: 6 of 68 approval_required rules (9% of the questions the pack can ask)
+deny rules backed by the kernel: 3 of 9
+
+=== gate: threat-ledger check ===
+incidents on disk: 90  |  scenarios on disk: 255
+ledger agrees with disk
+
+=== gate: gate green ===
+every check of the complete gate passed
