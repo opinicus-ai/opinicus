@@ -3,9 +3,10 @@
 // This file is a script for the pi `workflow` tool. Do not run it with
 // node or bun. To run it, the agent reads this file, passes its content
 // as `script` and the current state as `args` (JSON):
-//   { "ledger": "<content of LEDGER.md>",
-//     "knownReports": [{ "f": "<file>.md", "t": "<title>" }, ...] }
+//   { "knownReports": [{ "f": "<file>.md", "t": "<title>" }, ...] }
 // knownReports lists incident reports already on disk (do not redo them).
+// There is no ledger arg: researchers and the merge agent read LEDGER.md
+// from disk.
 //
 // Current state model (refreshed 2026-08-31 for the post-ladder monitor:
 // file_open and network_connect ship; the research sensor, identity, the
@@ -37,7 +38,6 @@ export const meta = {
 }
 
 const state = typeof args === 'string' ? JSON.parse(args) : (args ?? {})
-const LEDGER = state.ledger ?? '(empty ledger: first run)'
 const KNOWN = (state.knownReports ?? []).map((r) => `- ${r.f} | ${r.t}`).join('\n') || '(none)'
 const ROOT = '/home/vfeenstr/devel/lab/opinicus-56sol/research/threats'
 const POLICIES = '/home/vfeenstr/devel/lab/opinicus-56sol/policies'

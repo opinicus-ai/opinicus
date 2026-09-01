@@ -1,0 +1,21 @@
+Retro written to `docs/retros/create-a-workflow-to-implement.md`. Repository untouched otherwise.
+
+**Top three findings**
+
+1. **The 32-agent / 5.3 h workflow landed nothing**: helper-built verify/push agents got `[object Object]` prompts (objects passed to `agent()`), still self-reported `ok: true`, phases "closed" on that self-report, and the budget died with zero commits (entries 7128e2d2, 047714e6, 10ea7d1a).
+2. **No-commits-until-the-end forced hours of reverse hunk surgery** across 68+ files, producing five CI-caught integration mistakes, a force-push rewrite, and one destroyed diff — phase-boundary commits and staged-state verification were only adopted after the damage (25d8dfce, 9ce5f7bf, 1fe8aa29, b8e9819c).
+3. **A workflow agent latched the host at yama `ptrace_scope=3`** (one-way per boot; still 3 now) because the orchestrator's own prompt assumed the value could be restored — and the user only learned of it via a wrap-up footnote, then had to ask twice (90cf86f8, 7f27b4d2, ccf5f7b5).
+
+**Proposal counts**
+
+- skill-create: 1 (`.pi/skills/agent-workflows/SKILL.md` runbook, full text drafted)
+- rule-update: 2 (AGENTS.md pointer to the skill; AGENTS.md host-global/one-way-state ban)
+- doc-update: 1 (ci.yml header: canary-probe step for the Blacksmith swap-back)
+- investigate: 1 (pi runtime: reject non-string prompts; deterministic `sh()` step for phase commits)
+- tool-create: 1 (`research/vm-lab/` QEMU harness — pending user go)
+
+**Could not decide without you**
+
+- Whether to build the VM lab (your "can't we just create a small vm?" was answered with "if you say go" that never arrived).
+- Whether to file the `[object Object]` runtime coercion upstream as a pi issue or keep mitigation doc-only.
+- (Reminder, not a question: the host still needs a reboot to clear the yama latch.)
