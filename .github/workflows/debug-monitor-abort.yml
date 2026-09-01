@@ -15,30 +15,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Loop the failing context until it aborts
+      - name: "Narrow the abort - serial suite, then the suspect pair in parallel"
         env:
           RUST_BACKTRACE: full
-          RUST_LIB_BACKTRACE: full
         run: |
           mkdir -p /tmp/looplog
-          # The abort appeared inside `cargo test --workspace`, never in an
-          # isolated af-monitor loop (200 green); reproduce that context,
-          # with load, and keep every log.
-          for i in $(seq 1 40); do
-            yes > /dev/null & yes > /dev/null & yes > /dev/null &
-            LOADPIDS=$(jobs -p)
-            printf '=== iteration %d ===\n' "$i"
-            if ! cargo test --workspace > "/tmp/looplog/iter-$i.log" 2>&1; then
-              kill $LOADPIDS 2>/dev/null || true
-              printf 'iteration %d failed; full log follows\n' "$i"
-              cat "/tmp/looplog/iter-$i.log"
-              exit 1
+          echo "=== A: the whole af-monitor lib, serial, 30 iterations"
+          for i in $(seq 1 30); do
+            if ! cargo test -p af-monitor --lib -- --test-threads=1 > "/tmp/looplog/serial-$i.log" 2>&1; then
+              echo "serial iteration $i failed"; cat "/tmp/looplog/serial-$i.log"; exit 1
             fi
-            kill $LOADPIDS 2>/dev/null || true
-            wait 2>/dev/null || true
-            printf 'iteration %d green\n' "$i"
+            printf 'serial %d green\n' "$i"
           done
-          printf '40 workspace iterations green under load, no abort\n'
+          echo "=== B: the suspect tests together, default threads, 150 iterations"
+          for i in $(seq 1 150); do
+            yes > /dev/null &
+            LOAD=$!
+            if ! cargo test -p af-monitor --lib -- a_connection_is_observed_with_its_address_and_port a_foreign_child_exit_never_enters_the_session_events > "/tmp/looplog/pair-$i.log" 2>&1; then
+              kill $LOAD 2>/dev/null || true
+              echo "pair iteration $i failed"; cat "/tmp/looplog/pair-$i.log"; exit 1
+            fi
+            kill $LOAD 2>/dev/null || true; wait 2>/dev/null || true
+            printf 'pair %d green\n' "$i"
+          done
+          printf 'narrowing complete, no abort\n'
+
       - name: Upload the loop log
         if: always()
         uses: actions/upload-artifact@v7
