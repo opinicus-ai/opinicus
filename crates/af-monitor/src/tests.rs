@@ -786,6 +786,108 @@ fn environment_keeps_only_useful_names() {
 }
 
 #[test]
+fn a_url_value_keeps_its_shape_and_loses_its_password() {
+    // `DATABASE_URL` is allowlisted without a secret marker, and its value
+    // is a URL whose userinfo can hold the password. The name stays, the
+    // user name, the host and the database stay — a rule matches on the
+    // host — and only the password becomes `<redacted>`.
+    assert_eq!(
+        procfs::keep_env(
+            "DATABASE_URL",
+            "postgres://app:hunter2@db-prod.internal:5432/app?sslmode=require",
+            &[]
+        ),
+        Some("postgres://app:<redacted>@db-prod.internal:5432/app?sslmode=require".to_string())
+    );
+    // A URL with an empty user name still loses the password.
+    assert_eq!(
+        procfs::mask_userinfo("redis://:hunter2@cache.internal:6379/0"),
+        "redis://:<redacted>@cache.internal:6379/0"
+    );
+    // A password that itself holds an `@` is masked whole.
+    assert_eq!(
+        procfs::mask_userinfo("postgres://app:p@ss@db.internal/app"),
+        "postgres://app:<redacted>@db.internal/app"
+    );
+    // Sibling URL-shaped names of the allow list keep a passwordless
+    // userinfo, and values that are no URL stay as they are.
+    assert_eq!(
+        procfs::keep_env("DOCKER_HOST", "ssh://dev@builder.internal", &[]),
+        Some("ssh://dev@builder.internal".to_string())
+    );
+    assert_eq!(
+        procfs::keep_env("HOME", "/home/dev", &[]),
+        Some("/home/dev".to_string())
+    );
+    assert_eq!(
+        procfs::mask_userinfo("prod-db.internal"),
+        "prod-db.internal"
+    );
+    assert_eq!(
+        procfs::mask_userinfo("postgres://app@db.internal/app"),
+        "postgres://app@db.internal/app"
+    );
+}
+
+/// A session whose environment carries `DATABASE_URL` with a password in
+/// its userinfo must produce events that name the variable and never hold
+/// the password.
+///
+/// The password enters the session through the environment only: the
+/// script builds it from two halves, so neither the command line nor the
+/// script file that the monitor snapshots holds the password as text. The
+/// one remaining path into an event is the environment of the `exec true`,
+/// and that path is masked at capture.
+#[test]
+fn a_session_url_password_never_reaches_the_events() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let script = dir.path().join("session.sh");
+    std::fs::write(
+        &script,
+        concat!(
+            "P=hun\n",
+            "P=\"${P}ter2\"\n",
+            "export DATABASE_URL=\"postgres://app:${P}@db-prod.internal:5432/app\"\n",
+            "exec true\n",
+        ),
+    )
+    .expect("write the script");
+
+    let (outcome, handler) = run_session(
+        &["/bin/sh", script.to_str().expect("a text path")],
+        Recorder::default(),
+        20,
+    );
+    assert!(outcome.is_success(), "the session itself must succeed");
+
+    let execs = handler.of_kind("process_exec");
+    let url_exec = execs
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ProcessExec { process } => (process.comm == "true").then_some(process),
+            _ => None,
+        })
+        .expect("the session exec'd true");
+    assert_eq!(
+        url_exec.env.get("DATABASE_URL").map(String::as_str),
+        Some("postgres://app:<redacted>@db-prod.internal:5432/app"),
+        "the name stays visible for a rule, the password does not"
+    );
+
+    // The rendered events are the lines a trace holds. The password must
+    // appear in none of them, whatever path it could have taken.
+    for event in &handler.events {
+        let text = format!("{event:?}");
+        assert!(
+            !text.contains("hunter2"),
+            "the password of the URL must not reach the events:\n{text}"
+        );
+    }
+    let all = format!("{:?}", handler.events);
+    assert!(all.contains("DATABASE_URL"), "the name must stay: {all}");
+}
+
+#[test]
 fn process_facts_of_the_monitor_itself_are_complete() {
     let pid = std::process::id() as Pid;
     let stat = procfs::read_stat(pid).expect("the test program is alive");
