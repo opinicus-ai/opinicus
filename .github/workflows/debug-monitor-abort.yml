@@ -15,22 +15,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Loop the monitor suite until it aborts
+      - name: Loop the failing context until it aborts
         env:
           RUST_BACKTRACE: full
           RUST_LIB_BACKTRACE: full
         run: |
           mkdir -p /tmp/looplog
-          for i in $(seq 1 200); do
+          # The abort appeared inside `cargo test --workspace`, never in an
+          # isolated af-monitor loop (200 green); reproduce that context,
+          # with load, and keep every log.
+          for i in $(seq 1 40); do
+            yes > /dev/null & yes > /dev/null & yes > /dev/null &
+            LOADPIDS=$(jobs -p)
             printf '=== iteration %d ===\n' "$i"
-            if ! cargo test -p af-monitor --lib > "/tmp/looplog/iter-$i.log" 2>&1; then
+            if ! cargo test --workspace > "/tmp/looplog/iter-$i.log" 2>&1; then
+              kill $LOADPIDS 2>/dev/null || true
               printf 'iteration %d failed; full log follows\n' "$i"
               cat "/tmp/looplog/iter-$i.log"
               exit 1
             fi
+            kill $LOADPIDS 2>/dev/null || true
+            wait 2>/dev/null || true
             printf 'iteration %d green\n' "$i"
           done
-          printf '200 iterations green, no abort\n'
+          printf '40 workspace iterations green under load, no abort\n'
       - name: Upload the loop log
         if: always()
         uses: actions/upload-artifact@v7
