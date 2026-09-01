@@ -92,7 +92,7 @@ ISO-8601 time stamp:
 2026-09-01T12:00:01.456Z decision approval-required rule=database.destructive.drop-database: psql -c DROP DATABASE customer_prod (pid 401)
 2026-09-01T12:00:01.456Z question rule=database.destructive.drop-database: psql -c DROP DATABASE customer_prod (pid 401)
 2026-09-01T12:00:03.789Z answer rule=database.destructive.drop-database: deny after 2331ms
-2026-09-01T12:00:03.790Z quarantine rule=tamper.quarantine: signal 9 to process 900 (pid 402)
+2026-09-01T12:00:03.790Z quarantine rule=tamper.quarantine: signal 9 to process 900 — Signal the firewall (pid 402)
 2026-09-01T12:00:04.100Z quarantine resolved rule=tamper.quarantine: terminate
 2026-09-01T12:00:04.200Z session afw-1a2b3c ended: exit=3 processes=5
 ```
