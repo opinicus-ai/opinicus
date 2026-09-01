@@ -21,12 +21,26 @@ HOST_YAMA=/proc/sys/kernel/yama/ptrace_scope
 BEFORE="$(cat "$HOST_YAMA")"
 printf 'vm-lab: host yama ptrace_scope before: %s (must be unchanged after)\n' "$BEFORE"
 
+# The host-untouched assertion runs even when a round fails: it is the
+# contract of the lab, and a failed sweep is exactly when the user needs
+# the proof.
+host_scope_check() {
+    local after; after="$(cat "$HOST_YAMA" 2>/dev/null || printf '?')"
+    printf 'vm-lab: host yama ptrace_scope after: %s\n' "$after"
+    if [ "$after" != "$BEFORE" ]; then
+        printf 'vm-lab: HOST SCOPE MOVED (%s -> %s) — the lab contract is broken\n' "$BEFORE" "$after" >&2
+        exit 1
+    fi
+    printf 'vm-lab: host untouched\n'
+}
+trap host_scope_check EXIT
+
 for round in $(seq 1 "$ROUNDS"); do
     printf 'vm-lab: yama sweep round %d of %d\n' "$round" "$ROUNDS"
     RESEARCH_VM_LAB=1 "$LAB_DIR/vm-run.sh" sh -c '
         set -euo pipefail
         echo "vm: $(uname -r), yama=$(cat /proc/sys/kernel/yama/ptrace_scope)"
-        dnf -q install -y gcc git python3 tar make perl >/dev/null 2>&1 || true
+        dnf -q install -y gcc git python3 tar make perl golang >/dev/null 2>&1 || true
         curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal >/dev/null
         . "$HOME/.cargo/env"
         cd /root/opinicus
@@ -34,11 +48,4 @@ for round in $(seq 1 "$ROUNDS"); do
         research/bypass/hostile.sh | tee /root/artifacts/hostile-round.'"$round"'.txt
     '
 done
-
-AFTER="$(cat "$HOST_YAMA")"
-printf 'vm-lab: host yama ptrace_scope after: %s\n' "$AFTER"
-if [ "$BEFORE" != "$AFTER" ]; then
-    printf 'vm-lab: HOST SCOPE MOVED (%s -> %s) — the lab contract is broken\n' "$BEFORE" "$AFTER" >&2
-    exit 1
-fi
-printf 'vm-lab: host untouched; matrices in work/artifacts/\n'
+printf 'vm-lab: matrices in work/artifacts/\n'
