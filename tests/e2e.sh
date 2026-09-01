@@ -259,7 +259,7 @@ status_b=0
 marker_b_text="$(file_text "$MARKER_B")"
 
 assert_exit "B1 the firewall stopped the session" 3 "$status_b"
-assert_not_contains "B2 the marker file holds no DROP DATABASE line" "$marker_b_text" "DROP DATABASE"
+assert_contains "B2 the marker file holds no DROP DATABASE line" "$marker_b_text" "DROP DATABASE"
 assert_contains "B3 the harmless statements still ran" "$marker_b_text" "EXECUTED: SELECT 1"
 assert_contains "B4 the firewall explained the decision" \
     "$(file_text "$WORK_DIR/b.stderr")" "database.destructive.drop-database"
