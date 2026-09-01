@@ -13,6 +13,7 @@ research lives and where new work goes.
 | Baseline spikes | `spikes/baselines/` | cost and coverage of the cheap mechanisms; the `/proc` polling and `LD_PRELOAD` measurements |
 | seccomp + ptrace spike | `spikes/seccomp-ptrace/` | the `RET_TRACE` filter and its cost curve — now shipped in `af-monitor` |
 | seccomp user-notify spike | `spikes/seccomp-unotify/` | argument reliability, the 47.6% path race |
+| The VM lab | `vm-lab/` | disposable QEMU/KVM machine for measurements that write kernel-global or one-way state (the yama sweep lives here now); a container is not a substitute — it shares the host kernel |
 | Landlock spike | `spikes/landlock/` | in-kernel "always no" rules, the privileged tier survey, and the af-12 composition measurements (`tmp_scope`): why a shape inside a writable tree cannot be subtracted. The shipped floor's contract is `docs/LANDLOCK-CONTRACT.md` |
 | In-process sensor spike | `spikes/inprocess/` | the `[af-2]` `LD_PRELOAD` sensor: af-core events close to the agent, durable instance registration, the matrix preload pass, the semantic gain and the quiet gate. Read [spikes/inprocess/FINDINGS.md](spikes/inprocess/FINDINGS.md) |
 | Windows survey | `spikes/windows-notes/` | the `[af-8]` paper survey: the hooking and observer candidates, the evasion realities, the schema review, the chosen candidate and the eight questions for a Windows spike. Read [spikes/windows-notes/FINDINGS.md](spikes/windows-notes/FINDINGS.md) |

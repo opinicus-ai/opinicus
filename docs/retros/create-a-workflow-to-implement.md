@@ -112,12 +112,12 @@ f264a537).
 
 | # | Type | Change | Where | Evidence | Status |
 |---|------|--------|-------|----------|--------|
-| 1 | skill-create | New `.pi/skills/agent-workflows/SKILL.md` — the workflow runbook (full text below) | `.pi/skills/agent-workflows/SKILL.md` (new; sibling format: `.pi/skills/threat-research/SKILL.md`) | 7128e2d2, 047714e6, 10ea7d1a, 47c5f6ac, 89e0f67b, 25d8dfce | proposed |
-| 2 | rule-update | Add pointer line to AGENTS.md so the skill fires (text below) | `AGENTS.md` → "Rules that matter", after the rohrpost-snapshot bullet | 47c5f6ac (no workflow guidance consulted; none existed) | proposed |
-| 3 | rule-update | Add host-global/one-way-state rule to AGENTS.md (text below) | `AGENTS.md` → "Rules that matter" | 90cf86f8, 7f27b4d2, ccf5f7b5, 497d7b89, 164d6af0; host still at yama 3 | proposed |
-| 4 | doc-update | Add canary-probe step to the Blacksmith swap-back procedure in the ci.yml header (text below) | `.github/workflows/ci.yml` → header comment, after the "three-line swap" block | 81341071, 4503e79c, 69cbd1b5, bdf4dd97 | proposed |
-| 5 | investigate | pi workflow runtime: `agent()` should reject a non-string prompt instead of coercing `[object Object]`; consider a deterministic `sh()` step so phase-boundary commits don't need an LLM agent (repo law: deterministic code for state changes, LLM for semantics) | pi runtime (upstream issue), affects the `workflow` tool | 7128e2d2, 047714e6, 10ea7d1a | proposed |
-| 6 | tool-create | `research/vm-lab/`: QEMU/KVM boot-snapshot-run-destroy script; re-point the yama sweep and the AF-a5xn5s abort hunt at it; file rohrpost ticket | `research/vm-lab/` (new) + `.rohrpost` ticket under `[af]` | 497d7b89, 164d6af0 (agent sketched it; user asked "can't we next time just create a small vm?"; `/dev/kvm` + QEMU confirmed present) | proposed — needs user go |
+| 1 | skill-create | New `.pi/skills/agent-workflows/SKILL.md` — the workflow runbook (full text below) | `.pi/skills/agent-workflows/SKILL.md` (new; sibling format: `.pi/skills/threat-research/SKILL.md`) | 7128e2d2, 047714e6, 10ea7d1a, 47c5f6ac, 89e0f67b, 25d8dfce | done — applied 2026-09-01 after user approval (commit 189ef55) |
+| 2 | rule-update | Add pointer line to AGENTS.md so the skill fires (text below) | `AGENTS.md` → "Rules that matter", after the rohrpost-snapshot bullet | 47c5f6ac (no workflow guidance consulted; none existed) | done — applied 2026-09-01 after user approval (commit 189ef55) |
+| 3 | rule-update | Add host-global/one-way-state rule to AGENTS.md (text below) | `AGENTS.md` → "Rules that matter" | 90cf86f8, 7f27b4d2, ccf5f7b5, 497d7b89, 164d6af0; host still at yama 3 | done — applied 2026-09-01 after user approval (commit 189ef55) |
+| 4 | doc-update | Add canary-probe step to the Blacksmith swap-back procedure in the ci.yml header (text below) | `.github/workflows/ci.yml` → header comment, after the "three-line swap" block | 81341071, 4503e79c, 69cbd1b5, bdf4dd97 | done — applied 2026-09-01 and then executed live: canary PR #6 green in 5 s after Blacksmith support allowlisted the org; the real migration rode the user-merged bot PR #5 (gate stays hosted on the Landlock claim, docker/signing on Blacksmith); the header documents the split + canary rule (commit 844c53e) |
+| 5 | investigate | pi workflow runtime: `agent()` should reject a non-string prompt instead of coercing `[object Object]`; consider a deterministic `sh()` step so phase-boundary commits don't need an LLM agent (repo law: deterministic code for state changes, LLM for semantics) | pi runtime (upstream issue), affects the `workflow` tool | 7128e2d2, 047714e6, 10ea7d1a | done — issue drafted at `docs/retros/pi-upstream-agent-prompt-coercion.md` (repro + evidence + both asks); user files it upstream |
+| 6 | tool-create | `research/vm-lab/`: QEMU/KVM boot-snapshot-run-destroy script; re-point the yama sweep and the AF-a5xn5s abort hunt at it; file rohrpost ticket | `research/vm-lab/` (new) + `.rohrpost` ticket under `[af]` | 497d7b89, 164d6af0 (agent sketched it; user asked "can't we next time just create a small vm?"; `/dev/kvm` + QEMU confirmed present) | done — ticket AF-fnejbc filed; lab built and validated the same day (canary VM: ssh up in 26 s, host scope provably untouched); exit gate (3× sweep) tracked on the ticket |
 
 ### Proposal 1 — full new file: `.pi/skills/agent-workflows/SKILL.md`
 
@@ -214,14 +214,13 @@ After (new bullet directly below it):
 # matched until support allowlisted the org.)
 ```
 
-## Questions for the user
+## Questions for the user — resolved 2026-09-01
 
-- **Go for the VM lab (#6)?** You asked "can't we next time just create a
-  small vm for testing?" and the agent answered with a build plan "if you
-  say go" — the go never came before the session ended. Approve building
-  `research/vm-lab/` and filing the ticket?
-- **File #5 upstream?** The `[object Object]` coercion is a pi workflow
-  runtime behavior, not a repo bug; fixing it here is impossible. OK to file
-  it as an upstream issue, or keep mitigation doc-only?
+- **Go for the VM lab (#6)?** — YES ("Build it now too"). Ticket AF-fnejbc
+  filed; `research/vm-lab/` built and validated the same day: the canary VM
+  answered ssh in 26 s on kernel 6.17.1, and the host's
+  `ptrace_scope` was 3 before and after, byte-proven untouched.
+- **File #5 upstream?** — YES ("Draft it for me"). The issue draft lives at
+  `docs/retros/pi-upstream-agent-prompt-coercion.md`.
 - Unchanged reminder from the session: this host is **still** latched at
   yama `ptrace_scope=3` — it needs a reboot; no proposal can substitute.
