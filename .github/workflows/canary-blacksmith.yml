@@ -1,0 +1,13 @@
+# The canary: proves a blacksmith-* runner picks up a job before the real
+# gate migrates. One job, one echo. Delete after the migration.
+name: canary-blacksmith
+on:
+  push:
+    branches: [canary/blacksmith]
+  pull_request:
+jobs:
+  echo:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - run: echo ok
