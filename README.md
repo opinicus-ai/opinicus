@@ -147,6 +147,8 @@ Options of `run`:
 | `--no-builtin-policies` | Does not load the rule pack inside the binary. |
 | `--trace <PATH>` | Writes the normalized events as JSON Lines. |
 | `--approve <MODE>` | `ask`, `allow` or `deny`. The default is `ask` on a terminal and `deny` without one. |
+| `--ci` | Runs a deterministic headless session (see below). Cannot be combined with `--approve`. |
+| `--summary <PATH>` | Writes a machine-readable JSON session summary when the session ends. |
 | `--approval-timeout <S>` | Denies when nobody answers in this many seconds. |
 | `--syscall-filter <MODE>` | `write-only` (the default), `all-opens` or `off`. See below. |
 | `--print-tree` | Prints the process tree when the session ends. |
@@ -246,6 +248,43 @@ states the whole contract — the guarantees, the advisory layers, the
 measured bypasses and the phrasing rules that keep the claims honest —
 and [SECURITY.md](SECURITY.md) is the disclosure and false-positive or
 false-negative report path.
+
+### Headless CI mode and exit codes
+
+A job that runs an agent with nobody watching needs the questions gone,
+not answered late at night:
+
+```console
+$ agent-firewall run --ci --summary summary.json --trace session.jsonl -- claude -p "fix the flaky test"
+$ echo $?
+3
+```
+
+`--ci` is the CI shape of `--approve deny`: every decision a rule leaves
+to a person resolves to **deny**, deterministically — no terminal is
+opened and no prompt is written, also not when one is attached — and the
+two flags cannot be combined, so a job's posture is one line that no
+copy-pasted `--approve` can weaken. The alpha banner stays, because a CI
+guard is still alpha.
+
+The exit code is the contract a pipeline branches on (`run --help` prints
+the same table):
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The session ended, and the firewall stopped nothing. |
+| `3` | The firewall stopped an action (a rule denial, a refusal or a ruling); the session did not run to its end. |
+| `2` | The firewall could not run the session at all (an unknown option, a policy that cannot load, a monitor failure). |
+| `N` | The program of the session exited with code `N`, when the session ran to its end (for example `7` after `exit 7`). |
+| `128+N` | The program of the session died of signal `N`. |
+
+`--summary <PATH>` writes the machine-readable record of the session when
+it ends: every rule decision with its rule id, its evidence line and its
+provenance chain, the counts of denied, reported and quarantined actions
+and of the questions an interactive session would have asked, and the exit
+code. The decisions come from the session's own `policy_decision` events,
+so `agent-firewall replay` of the trace confirms them — every deny maps to
+a rule id, and no summary claims more than the record proves.
 
 ### Telemetry: off, granular, local
 

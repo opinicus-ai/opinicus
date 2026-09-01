@@ -6,6 +6,7 @@ mod inspect_cmds;
 mod normalize;
 mod policy_cmds;
 mod run;
+mod summary;
 mod telemetry_cmds;
 
 use clap::Parser;
@@ -28,7 +29,7 @@ fn main() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             eprintln!("agent-firewall: {error:#}");
-            std::process::exit(2);
+            std::process::exit(run::EXIT_ERROR);
         }
     }
 }

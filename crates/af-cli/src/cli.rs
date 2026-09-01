@@ -58,7 +58,24 @@ pub struct PolicyOptions {
 }
 
 /// Arguments of the `run` sub-command.
+///
+/// The exit-code contract of a session, printed by `run --help`. Every code
+/// a session can return is named here; `run --summary` writes the same code
+/// into the session summary.
+const EXIT_CODES_HELP: &str = "\
+Exit codes:
+  0        The session ended, and the firewall stopped nothing.
+  3        The firewall stopped an action (a rule denial, a refusal or a
+           ruling) and the session did not run to its end.
+  2        The firewall could not run the session at all (an unknown
+           option, a policy that cannot load, a monitor failure).
+  N        The program of the session exited with code N, when the session
+           ran to its end (for example 7 after `exit 7`).
+  128+N    The program of the session died of signal N.";
+
+/// Arguments of the `run` sub-command.
 #[derive(Debug, clap::Args)]
+#[command(after_help = EXIT_CODES_HELP)]
 pub struct RunArgs {
     #[command(flatten)]
     pub policy: PolicyOptions,
@@ -74,6 +91,35 @@ pub struct RunArgs {
     /// Selects how the firewall answers a question: ask, allow or deny.
     #[arg(long, value_name = "MODE")]
     pub approve: Option<String>,
+
+    /// Runs a deterministic headless session, for a continuous-integration
+    /// job: every decision a rule leaves to a person resolves to deny, and
+    /// no terminal is opened and no prompt is written, also not when one
+    /// is attached.
+    ///
+    /// This is the CI shape of `--approve deny`, as a flag of `run` and not
+    /// a separate `guard` command: `run` already owns every part a CI guard
+    /// needs — the trace, the telemetry, the tree, the summary — and a
+    /// second entry point would fork that flag surface and drift. The
+    /// flag exists so a job never depends on terminal state: it fixes the
+    /// answer (deny) where `--approve` selects a mode, and the two cannot
+    /// be combined, so a job's posture is one line that cannot be weakened
+    /// by accident. The alpha disclosure stays: a CI guard is still alpha.
+    /// Combine with `--summary` for the machine-readable session record.
+    #[arg(long, conflicts_with = "approve")]
+    pub ci: bool,
+
+    /// Writes a machine-readable JSON summary of the session to this file
+    /// after the session ended.
+    ///
+    /// The summary names every rule decision with its rule id, its
+    /// evidence line and its provenance chain, counts the denied,
+    /// reported and quarantined actions and the questions an interactive
+    /// session would have asked, and carries the exit code. The decisions
+    /// come from the session's own `policy_decision` events, so a replay
+    /// of the trace finds them again.
+    #[arg(long, value_name = "PATH")]
+    pub summary: Option<PathBuf>,
 
     /// Denies when nobody answers in this many seconds.
     #[arg(long, value_name = "SECONDS")]

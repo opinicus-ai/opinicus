@@ -1314,3 +1314,261 @@ fn doctor_carries_the_alpha_disclosure_and_the_telemetry_state() {
         "doctor must report the default consent state:\n{out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Headless CI mode: `run --ci` and the session summary
+// ---------------------------------------------------------------------------
+
+/// Runs a `--ci` session of the fake client and returns the exit code, the
+/// output, the errors and the paths of the summary and the trace.
+///
+/// This is a live-session test: it launches the monitor, so it needs a
+/// machine that permits ptrace sessions (yama ptrace_scope below 3). On a
+/// machine that cannot launch one the run fails with the error exit code 2
+/// and the assertions below fail honestly.
+fn ci_session(dir: &Path, extra: &[&str]) -> (i32, String, String, PathBuf, PathBuf) {
+    let marker = dir.join("marker");
+    write_fake_psql(dir, &marker);
+    let summary = dir.join("summary.json");
+    let trace = dir.join("trace.jsonl");
+    let output = Command::new(binary())
+        .args([
+            "run",
+            "--ci",
+            "--summary",
+            summary.to_str().unwrap(),
+            "--trace",
+            trace.to_str().unwrap(),
+        ])
+        .args(extra)
+        .args([
+            "--",
+            "/bin/sh",
+            "-c",
+            "psql -c 'DROP DATABASE customer_prod'",
+        ])
+        .env("PATH", path_with(dir))
+        .current_dir(repo_root())
+        .output()
+        .expect("the binary must run");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        summary,
+        trace,
+    )
+}
+
+/// Returns the parsed session summary of a path.
+fn read_summary(path: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("the summary must exist at {}: {error}", path.display()));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("the summary must be valid JSON: {error}\n{text}"))
+}
+
+#[test]
+fn a_ci_session_is_denied_with_the_contract_code_and_no_terminal() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let (code, _out, err, _summary, _trace) = ci_session(dir.path(), &[]);
+
+    // The exit-code contract of `run --help`: the firewall stopped an
+    // action, so the session returns 3.
+    assert_eq!(
+        code, 3,
+        "a denied ci session must return the blocked exit code:\n{err}"
+    );
+    // Deterministic headless posture: the session says so, and it never
+    // writes a prompt — the prompt text is the only shape a question takes.
+    assert!(
+        err.contains("ci mode: every question resolves to deny"),
+        "the ci mode must announce its posture:\n{err}"
+    );
+    assert!(
+        !err.contains("answer [a/s/d/t]"),
+        "a ci session must never prompt, also not when a terminal exists:\n{err}"
+    );
+    // The alpha banner stays in ci mode: a CI guard is still alpha.
+    assert!(
+        err.contains("not a production security boundary"),
+        "the disclosure must precede a ci session too:\n{err}"
+    );
+    assert!(
+        !dir.path().join("marker").exists(),
+        "the denied statement must not run"
+    );
+}
+
+#[test]
+fn the_ci_summary_is_valid_and_every_deny_maps_to_a_rule() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let (code, _out, _err, summary_path, _trace) = ci_session(dir.path(), &[]);
+    assert_eq!(code, 3);
+
+    let summary = read_summary(&summary_path);
+    assert_eq!(summary["schema_version"], 1, "the schema version is fixed");
+    assert_eq!(summary["exit_code"], 3, "the summary carries the exit code");
+    assert_eq!(summary["session"]["ci"], true);
+    assert!(
+        summary["session"]["command"].is_array(),
+        "the summary names the session command"
+    );
+
+    let counts = &summary["counts"];
+    assert!(
+        counts["denied"].as_u64().expect("denied is a number") >= 1,
+        "the denied action is counted:\n{summary}"
+    );
+    assert!(
+        counts["questions"].as_u64().expect("questions is a number") >= 1,
+        "the question an interactive session would have asked is counted:\n{summary}"
+    );
+
+    // Every deny maps to a rule identifier of the built-in pack: the rule
+    // is the unit a CI job gates on, so no deny may be anonymous.
+    let decisions = summary["decisions"]
+        .as_array()
+        .expect("decisions is an array");
+    assert!(
+        !decisions.is_empty(),
+        "a denied session must record its decisions"
+    );
+    let denied: Vec<&str> = decisions
+        .iter()
+        .filter(|one| one["resolved"] == "deny" || one["resolved"] == "terminate-session")
+        .map(|one| one["rule_id"].as_str().expect("rule_id is text"))
+        .collect();
+    assert!(
+        !denied.is_empty(),
+        "at least one decision must be a deny:\n{summary}"
+    );
+    let (_, list_out, _list_err) = firewall(&["policy", "list"]);
+    for rule_id in &denied {
+        assert!(
+            rule_id.contains('.'),
+            "a rule identifier is namespaced, but this one is not: {rule_id}"
+        );
+        assert!(
+            list_out.contains(rule_id),
+            "every denied rule must exist in the built-in pack: {rule_id}"
+        );
+    }
+
+    // The evidence line and the provenance chain are part of every decision.
+    for one in decisions {
+        assert!(
+            one["evidence"]
+                .as_str()
+                .expect("evidence is text")
+                .contains("DROP DATABASE"),
+            "the evidence names the action:\n{one}"
+        );
+        assert!(
+            one["provenance"]
+                .as_array()
+                .expect("provenance is an array")
+                .len()
+                >= 2,
+            "the provenance chain names the ancestry and the actor:\n{one}"
+        );
+    }
+}
+
+#[test]
+fn a_clean_ci_session_exits_zero_with_no_denials() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let summary = dir.path().join("summary.json");
+    let (code, out, err) = firewall(&[
+        "run",
+        "--ci",
+        "--summary",
+        summary.to_str().unwrap(),
+        "--",
+        "/bin/echo",
+        "hello",
+    ]);
+    assert_eq!(code, 0, "a clean session stays clean under --ci:\n{err}");
+    assert!(out.contains("hello"), "output was:\n{out}");
+
+    let parsed = read_summary(&summary);
+    assert_eq!(parsed["exit_code"], 0);
+    assert_eq!(parsed["counts"]["denied"], 0, "no deny happened:\n{parsed}");
+    assert_eq!(parsed["counts"]["questions"], 0, "no rule asked:\n{parsed}");
+    assert_eq!(
+        parsed["decisions"].as_array().map(Vec::len),
+        Some(0),
+        "a clean session decides nothing:\n{parsed}"
+    );
+}
+
+#[test]
+fn the_ci_summary_matches_the_replay_of_the_same_trace() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let (code, _out, _err, summary_path, trace) = ci_session(dir.path(), &[]);
+    assert_eq!(code, 3);
+
+    let summary = read_summary(&summary_path);
+    let (replay_code, replay_out, replay_err) =
+        firewall(&["replay", trace.to_str().unwrap(), "--json"]);
+    assert_eq!(replay_code, 0, "{replay_err}");
+    let hits: Vec<serde_json::Value> =
+        serde_json::from_str(&replay_out).expect("the replay prints a JSON array");
+
+    // Replay consistency: every decision the summary claims, the replay of
+    // the same trace under the built-in pack finds again, with the same
+    // decision label. A summary that claimed more than the record proves
+    // would be a summary nobody can trust.
+    for one in summary["decisions"].as_array().expect("decisions") {
+        let rule_id = one["rule_id"].as_str().expect("rule_id");
+        let decision = one["decision"].as_str().expect("decision");
+        let found = hits
+            .iter()
+            .any(|hit| hit["rule_id"] == rule_id && hit["decision"].as_str() == Some(decision));
+        assert!(
+            found,
+            "the replay must confirm {rule_id} ({decision}) that the summary claims:\n{replay_out}"
+        );
+    }
+    assert!(
+        hits.iter()
+            .any(|hit| hit["rule_id"] == "database.destructive.drop-database"),
+        "the replay finds the denied rule:\n{replay_out}"
+    );
+}
+
+#[test]
+fn ci_cannot_be_weakened_by_an_approval_flag() {
+    // The two flags refuse to combine, so a job's posture is one line that
+    // no copy-pasted `--approve` can weaken by accident.
+    let (code, _out, err) = firewall(&[
+        "run",
+        "--ci",
+        "--approve",
+        "allow",
+        "--",
+        "/bin/echo",
+        "hello",
+    ]);
+    assert_ne!(code, 0, "the combination must be refused");
+    assert!(
+        err.contains("--approve"),
+        "the error must name the conflict:\n{err}"
+    );
+}
+
+#[test]
+fn the_run_help_names_every_exit_code() {
+    let (code, out, err) = firewall(&["run", "--help"]);
+    assert_eq!(code, 0, "{err}");
+    for code in ["0", "3", "2", "128+N"] {
+        assert!(
+            out.contains(code),
+            "the exit-code table must name {code}:\n{out}"
+        );
+    }
+    assert!(
+        out.contains("Exit codes:"),
+        "the table has a heading:\n{out}"
+    );
+}

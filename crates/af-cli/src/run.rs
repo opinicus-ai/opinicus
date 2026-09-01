@@ -28,9 +28,17 @@ use anyhow::{bail, Context, Result};
 use crate::cli::RunArgs;
 use crate::normalize;
 use crate::policy_cmds::load_policy;
+use crate::summary;
 
 /// The exit code that the firewall returns when it stopped the session.
 pub const EXIT_BLOCKED: i32 = 3;
+
+/// The exit code that the firewall returns when it cannot run the session.
+///
+/// An unknown option, a policy that cannot load and a monitor failure all
+/// answer this code; the entry point uses it for every error. The contract
+/// is part of the help text of `run`.
+pub const EXIT_ERROR: i32 = 2;
 
 /// Prints the alpha disclosure on standard error, before a session starts.
 ///
@@ -71,6 +79,11 @@ pub fn run(args: RunArgs) -> Result<i32> {
         bail!("no command given after `--`");
     }
     print_banner();
+    if args.ci {
+        eprintln!(
+            "agent-firewall: ci mode: every question resolves to deny, and no terminal is opened"
+        );
+    }
 
     let cwd = match &args.cwd {
         Some(dir) => dir.clone(),
@@ -139,7 +152,11 @@ pub fn run(args: RunArgs) -> Result<i32> {
     // the packaging at the end of the run needs no trace file. The handle is
     // shared with the fanout, which owns the writing end.
     let telemetry_sink = args.telemetry.then(SharedMemory::default);
-    let sink = build_sink(&args, telemetry_sink.clone())?;
+    // A session with `--summary` does the same: the summary is built from
+    // the session's own events after the session ended, so it needs no
+    // trace file either.
+    let summary_sink = args.summary.is_some().then(SharedMemory::default);
+    let sink = build_sink(&args, telemetry_sink.clone(), summary_sink.clone())?;
 
     let mut handler = FirewallHandler {
         memory: SessionMemory::with_baseline(session.baseline.clone()),
@@ -226,16 +243,33 @@ pub fn run(args: RunArgs) -> Result<i32> {
         );
     }
 
-    if blocked {
-        return Ok(EXIT_BLOCKED);
+    // The exit code is the contract that `run --help` names: 3 when the
+    // firewall stopped something, otherwise the code (or the signal, as
+    // 128+N) of the program, and 0 for a session that ended quietly.
+    let exit_code = if blocked {
+        EXIT_BLOCKED
+    } else if let Some(code) = outcome.exit_code {
+        code
+    } else if let Some(signal) = outcome.signal {
+        128 + signal
+    } else {
+        0
+    };
+
+    // The summary is written after the session ended and after the trace is
+    // flushed, from the session's own events. It adds no question and reads
+    // no live monitor state, so a summary of a trace-backed session is a
+    // function of that trace — the same record a replay evaluates.
+    if let (Some(path), Some(shared)) = (&args.summary, &summary_sink) {
+        summary::write(&summary::build(&shared.events(), exit_code, args.ci), path)
+            .with_context(|| format!("cannot write the summary to {}", path.display()))?;
+        eprintln!(
+            "agent-firewall: session summary written to {}",
+            path.display()
+        );
     }
-    if let Some(code) = outcome.exit_code {
-        return Ok(code);
-    }
-    if let Some(signal) = outcome.signal {
-        return Ok(128 + signal);
-    }
-    Ok(0)
+
+    Ok(exit_code)
 }
 
 /// Reads the filter mode from a command-line value.
@@ -258,6 +292,13 @@ fn parse_landlock_mode(text: &str) -> Result<af_monitor::LandlockMode> {
 
 /// Reads the approval mode from the command-line options.
 fn approval_mode(args: &RunArgs) -> Result<ApprovalMode> {
+    // `--ci` answers every question itself, with the safe answer. The flag
+    // cannot be combined with `--approve`, so the two branches never fight,
+    // and the answer here is what makes a CI session deterministic: a job
+    // must not depend on whether a terminal happens to be attached.
+    if args.ci {
+        return Ok(ApprovalMode::AutoDeny);
+    }
     match args.approve.as_deref() {
         None => Ok(ApprovalMode::automatic()),
         Some(text) => match ApprovalMode::parse(text) {
@@ -269,11 +310,19 @@ fn approval_mode(args: &RunArgs) -> Result<ApprovalMode> {
 
 /// Makes the event sink from the command-line options.
 ///
-/// `telemetry` is the shared memory sink of a session that opted in, or
-/// `None`.
-fn build_sink(args: &RunArgs, telemetry: Option<SharedMemory>) -> Result<Box<dyn EventSink>> {
+/// `telemetry` is the shared memory sink of a session that opted in, and
+/// `summary` the one of a session with `--summary`; both are `None`
+/// without their flag.
+fn build_sink(
+    args: &RunArgs,
+    telemetry: Option<SharedMemory>,
+    summary: Option<SharedMemory>,
+) -> Result<Box<dyn EventSink>> {
     let mut sinks: Vec<Box<dyn EventSink>> = Vec::new();
     if let Some(memory) = telemetry {
+        sinks.push(Box::new(memory));
+    }
+    if let Some(memory) = summary {
         sinks.push(Box::new(memory));
     }
     if let Some(path) = &args.trace {
