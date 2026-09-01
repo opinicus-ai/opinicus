@@ -936,10 +936,20 @@ impl Tracer<'_> {
     /// identifier of the process from `/proc`. A daemon that called `setsid`
     /// and never ran another program carries its detachment nowhere else, so
     /// the exit event carries the value for the graph to compare.
+    ///
+    /// The monitor waits with `waitpid(-1)`, so it also reaps the exits of
+    /// every other child of the calling program — the capability probe of a
+    /// test run is one. An exit of a process that no fork event and no adopt
+    /// announced cannot belong to this session: the loop forgets it instead
+    /// of reporting it, because a session names its own processes only.
     fn note_exit(&mut self, pid: Pid, code: Option<i32>, signal: Option<i32>) {
         if pid == self.root {
             self.root_code = code;
             self.root_signal = signal;
+        }
+        if pid != self.root && !self.known.contains(&pid) {
+            self.tree.tracked.remove(&pid);
+            return;
         }
         if self.exited.insert(pid) {
             let sid = procfs::read_stat(pid)

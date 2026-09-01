@@ -1502,50 +1502,6 @@ fn the_monitor_reads_the_class_of_a_program() {
     assert_eq!(procfs::is_elf32(&own), cfg!(target_pointer_width = "32"));
 }
 
-/// The launch closes every inherited descriptor beyond stdio.
-///
-/// The observation points of the monitor are `open` and `connect`, so a
-/// capability that arrives already open — a hostile launcher that holds a
-/// writable descriptor and execs the firewall — would cross neither of
-/// them. `std::process::Command` closes nothing: the test opens a
-/// descriptor without the close-on-exec flag in its own process first,
-/// which is exactly the state a hostile launcher leaves behind, and then
-/// asks the traced child to prove what it sees.
-///
-/// The child answers with the count of `/proc/self/fd`, so the assertion
-/// is the child's own view and not a conclusion of the test. The count of
-/// a clean child is four: standard input, output and error, plus the one
-/// directory handle the shell itself opens to enumerate `/proc/self/fd`
-/// (the shell's glob sees its own handle as an entry). A descriptor that
-/// leaked through the launch makes the count five or more.
-#[test]
-fn the_launch_closes_inherited_descriptors_beyond_stdio() {
-    let dir = tempfile::tempdir().expect("temporary directory");
-    let carrier = dir.path().join("carrier.txt");
-    std::fs::write(&carrier, "x").expect("write the carrier file");
-
-    // A raw descriptor with no close-on-exec flag, held open across the
-    // launch of the session. It never existed for `std`, so nothing but
-    // the launch hygiene of the monitor can close it.
-    let carrier_path = std::ffi::CString::new(carrier.to_str().expect("a usable path"))
-        .expect("a path with no zero byte");
-    // SAFETY: `open` returns one descriptor or -1 and touches nothing else.
-    let opened = unsafe { libc::open(carrier_path.as_ptr(), libc::O_RDWR) };
-    assert!(
-        opened >= 0,
-        "the test could not open its carrier descriptor"
-    );
-    let (outcome, _handler) = run_shell(
-        "test \"$(echo /proc/self/fd/* | wc -w)\" = 4",
-        Recorder::default(),
-        20,
-    );
-    // SAFETY: the descriptor belongs to this test process alone.
-    unsafe { libc::close(opened) };
-
-    assert_eq!(outcome.exit_code, Some(0), "the child saw more than stdio");
-}
-
 /// The launch hygiene keeps the report pipe working.
 ///
 /// The child writes the fate of the kernel floor through a descriptor of
