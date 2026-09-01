@@ -122,7 +122,12 @@ and the first instruction of `psql`.
 4. **The normalization layer makes an event.** The collector makes an
    `EventKind::ProcessExec` with a `ProcessInfo`, and an `Action::Exec` with
    the program name, the arguments, the working directory and the selected
-   environment variables.
+   environment variables. A selected value that is a URL with a password
+   in its userinfo (`DATABASE_URL=postgres://app:hunter2@db/app`) keeps
+   its name, user, host and database, and the password is masked to
+   `<redacted>` at capture (`af-monitor` `mask_userinfo`), because the
+   name is allowlisted without a secret marker and rules match on the host,
+   not on the password.
 
 5. **The provenance engine answers the ancestry.** The graph keys every
    process on the pair of the process identifier and the start time, because
@@ -785,7 +790,9 @@ its verdict came from zero rules. Use `--retention all` to replay a rule that
 did not yet exist when the trace was written.
 
 A trace can hold command lines and paths of the user. Handle a trace like a
-log file with private data. `.gitignore` therefore ignores `*.jsonl`.
+log file with private data. A trace file is created with the permission
+mode `0600` (`af-recorder` `TraceWriter::create`), so the other local users
+of a shared machine cannot read it, and `.gitignore` ignores `*.jsonl`.
 
 ## 6. Session memory
 

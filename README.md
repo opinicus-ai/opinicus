@@ -213,7 +213,11 @@ carries it too. The firewall holds dangerous actions at real boundaries
 ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §4), and the alpha label is
 not modesty: the rule pack is young, the sensor stack is measured but not
 exhaustive, and the [limits](#what-works-and-what-does-not) below are part
-of the product, not a footnote.
+of the product, not a footnote. [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)
+states the whole contract — the guarantees, the advisory layers, the
+measured bypasses and the phrasing rules that keep the claims honest —
+and [SECURITY.md](SECURITY.md) is the disclosure and false-positive or
+false-negative report path.
 
 ### Telemetry: off, granular, local
 
@@ -342,6 +346,10 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
   product, the sensor stack, agent identity, tamper, telemetry, the research
   pipeline, the business split, and the learning plan. Where an older
   document conflicts, it wins.
+* [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) — the security contract of
+  the alpha: what it guarantees, what is advisory, what is bypassable and
+  what is unknown, every claim with its source. [SECURITY.md](SECURITY.md)
+  is the disclosure and report path that goes with it.
 * [PROJECT.md](PROJECT.md) — the idea, the principles and the plan.
 * [docs/DECISIONS.md](docs/DECISIONS.md) — the dated decision log; the
   newest entry wins.

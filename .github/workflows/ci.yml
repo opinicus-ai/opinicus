@@ -3,8 +3,18 @@
 # [af-10] (M9): every claim the repository makes must be checked on every
 # push and pull request. The gate job runs scripts/gate.sh, the same script
 # a person runs locally: fmt, clippy, workspace tests, policy tests, e2e,
-# quiet-check, the Landlock count-rules drift guard, and the threat-ledger
-# checker. No check may be skipped; the gate is red until all of them pass.
+# quiet-check, the benign gate, the Landlock count-rules drift guard, the
+# threat-ledger checker, and the supply-chain checks of [af-11] (cargo-deny:
+# advisories, bans, licenses, sources; cargo-audit). No check may be skipped;
+# the gate is red until all of them pass.
+#
+# [af-11] (M10) also ships the executable dry-run of the M14 release
+# pipeline: the sign-and-upload / verify-on-second-machine job pair below
+# signs a dry-run bundle with an ephemeral in-job minisign key and proves on
+# a second runner that signature and sha256 verification both pass on the
+# real bundle and FAIL on a deliberately corrupted byte. docs/RELEASE.md is
+# the policy definition; this pipeline is its dry-run, not a release
+# channel.
 #
 # Runners: GitHub-hosted ubuntu-24.04 for now. The org's Blacksmith
 # installation (app: blacksmith-sh, all repositories) is waiting on their
@@ -18,8 +28,11 @@
 #           docker/build-push-action@v7             (colocated layer cache)
 #
 # Actions are pinned to their latest major versions; every bundled action
-# runs its node24 runtime. The repository itself needs no Node toolchain —
-# the gate is Rust and Python only.
+# runs its node24 runtime. The gate itself needs Rust, Python and one more
+# thing: the benign corpus runs `npm init` in a scratch directory
+# (research/bypass/corpus.sh), so the runner must have a Node toolchain.
+# The GitHub-hosted ubuntu-24.04 image ships one; a runner without it fails
+# the benign gate loudly rather than skipping the cell.
 name: gate
 
 on:
@@ -69,8 +82,174 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential
 
+      - name: Install the supply-chain gate tools (cargo-deny, cargo-audit)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
       - name: The complete gate
         run: scripts/gate.sh
+
+  # The M14 release-pipeline dry-run of [af-11], first half: build the
+  # release, bundle it, hash it, and sign the hash manifest with an
+  # EPHEMERAL key generated in this job and destroyed with the runner.
+  # Nothing here produces a distributable artifact or a trust anchor: the
+  # key exists for one run, and the verify job receives the public key
+  # through the job-output channel, not inside the bundle — modelling the
+  # out-of-band key publication that the real M14 pipeline must have
+  # (docs/RELEASE.md §3). The secret key never leaves $RUNNER_TEMP and is
+  # deleted after signing.
+  sign-and-upload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      public_key: ${{ steps.keygen.outputs.public_key }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # minisign is NOT in taiki-e/install-action's tool manifest (checked
+      # 2026-09-01), and the crates.io `minisign` crate is library-only, so
+      # the action's cargo fallback cannot provide the CLI. Install the
+      # official upstream release instead, pinned to one version and one
+      # sha256, verified before use. Bumping either value is a reviewed
+      # change.
+      - name: Install minisign 0.12 (pinned, checksum-verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/minisign.tar.gz" \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $RUNNER_TEMP/minisign.tar.gz" \
+            | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+          minisign -v
+
+      - name: Build the release
+        run: cargo build --release
+
+      # The dry-run bundle: the release binary plus the policy packs. The
+      # real M14 release manifest (changelog, completions, docs) is not
+      # decided yet; whatever it becomes gets hashed and signed the same
+      # way.
+      - name: Stage the bundle and write SHA256SUMS
+        run: |
+          mkdir -p dist
+          cp target/release/agent-firewall dist/
+          cp -r policies dist/policies
+          cd dist
+          {
+            sha256sum agent-firewall
+            find policies -type f -print0 | sort -z | xargs -0 sha256sum
+          } > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Generate the ephemeral key pair
+        id: keygen
+        run: |
+          minisign -G -W -s "$RUNNER_TEMP/minisign.key" -p "$RUNNER_TEMP/minisign.pub"
+          {
+            echo "public_key<<PUBKEY_EOF"
+            cat "$RUNNER_TEMP/minisign.pub"
+            echo "PUBKEY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sign SHA256SUMS
+        run: |
+          cd dist
+          minisign -S -W -s "$RUNNER_TEMP/minisign.key" \
+            -t "agent-firewall release dry-run run=${GITHUB_RUN_ID} commit=${GITHUB_SHA}" \
+            -m SHA256SUMS
+          rm -f "$RUNNER_TEMP/minisign.key"
+
+      - name: Upload the signed bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dry-run
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The M14 release-pipeline dry-run of [af-11], second half: a second
+  # runner that receives ONLY the artifact bundle plus the public key
+  # (through the job-output channel) and must (1) verify the minisign
+  # signature over SHA256SUMS, (2) verify every sha256 in the manifest,
+  # (3) prove both checks have teeth: a one-byte corruption of the signed
+  # manifest must FAIL minisign, and a one-byte corruption of an artifact
+  # must FAIL sha256sum -c. This job is the executable form of the M10 exit
+  # gate "a signed dry-run artifact verifies on a second machine".
+  verify-on-second-machine:
+    needs: sign-and-upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PUBLIC_KEY: ${{ needs.sign-and-upload.outputs.public_key }}
+    steps:
+      - name: Install minisign 0.12 (pinned, checksum-verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/minisign.tar.gz" \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $RUNNER_TEMP/minisign.tar.gz" \
+            | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+          minisign -v
+
+      - name: Download the signed bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: release-dry-run
+
+      - name: Restore the public key from the separate channel
+        run: printf '%s\n' "$PUBLIC_KEY" > minisign.pub
+
+      - name: Verify the minisign signature over SHA256SUMS
+        run: minisign -V -p minisign.pub -m SHA256SUMS
+
+      - name: Verify every sha256 in the signed manifest
+        run: sha256sum -c SHA256SUMS
+
+      # Teeth, part 1: flip one byte in a COPY of the signed manifest (with
+      # the signature copied alongside) and require minisign to reject it.
+      # A check that cannot fail is not a check.
+      - name: A corrupted copy of SHA256SUMS must fail minisign -V
+        run: |
+          cp SHA256SUMS SHA256SUMS.corrupt
+          cp SHA256SUMS.minisig SHA256SUMS.corrupt.minisig
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("SHA256SUMS.corrupt")
+          d = bytearray(p.read_bytes())
+          d[0] = ord("0") if d[0] != ord("0") else ord("1")
+          p.write_bytes(bytes(d))
+          PY
+          if minisign -V -p minisign.pub -m SHA256SUMS.corrupt; then
+            echo "FAIL: the corrupted manifest verified; the signature check has no teeth" >&2
+            exit 1
+          fi
+          echo "ok: one flipped byte in SHA256SUMS was rejected by minisign"
+
+      # Teeth, part 2: flip one byte of an artifact in place and require
+      # sha256sum -c to reject it (the signature over the manifest stays
+      # valid — this is the layer below it).
+      - name: A corrupted artifact byte must fail sha256sum -c
+        run: |
+          cp agent-firewall "$RUNNER_TEMP/agent-firewall.good"
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("agent-firewall")
+          d = bytearray(p.read_bytes())
+          d[5] ^= 1
+          p.write_bytes(bytes(d))
+          PY
+          if sha256sum -c SHA256SUMS; then
+            echo "FAIL: the corrupted artifact passed the checksum check" >&2
+            exit 1
+          fi
+          mv "$RUNNER_TEMP/agent-firewall.good" agent-firewall
+          echo "ok: one flipped byte in agent-firewall was rejected by sha256sum -c"
 
   # The container image. Built with buildx and the GitHub Actions cache;
   # on Blacksmith the same job switches to their colocated layer cache
