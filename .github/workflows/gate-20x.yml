@@ -1,0 +1,80 @@
+# The twenty-run gate: [af-10]'s exit measurement.
+#
+# The remediation review (P0-1) recorded a nondeterministic e2e suite and a
+# flaky unit test; the exit gate of [af-10] demands the complete gate pass
+# twenty consecutive times on a machine that is not the maintainer's laptop.
+# This workflow runs scripts/gate.sh twenty times back to back on a clean
+# GitHub-hosted runner (yama 1, a different kernel and /bin/sh than the
+# reference host), keeps the full log of every run, and fails if any single
+# run fails. Dispatch it from main when the gate evidence is collected.
+#
+# The log lands as an artifact and is committed (raw excerpt plus summary)
+# under research/gates/ by the closing change.
+name: gate-20x
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate-20x:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust (stable, with fmt and clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-20x-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            cargo-20x-${{ runner.os }}-
+
+      - name: Install the C compiler for the e2e techniques
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+
+      - name: Run the complete gate twenty times
+        run: |
+          mkdir -p /tmp/gate20
+          ok=0
+          for i in $(seq 1 20); do
+            start=$(date -u +%s)
+            if scripts/gate.sh > "/tmp/gate20/run-$i.log" 2>&1; then
+              end=$(date -u +%s)
+              printf 'run %02d: PASS in %ss\n' "$i" "$((end - start))"
+              ok=$((ok + 1))
+            else
+              end=$(date -u +%s)
+              printf 'run %02d: FAIL in %ss\n' "$i" "$((end - start))"
+              tail -40 "/tmp/gate20/run-$i.log"
+              exit 1
+            fi
+          done
+          printf 'gate 20x: %d of 20 consecutive runs green\n' "$ok"
+
+      - name: Upload the twenty-run log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-20x-log
+          path: /tmp/gate20/
+          if-no-files-found: error
