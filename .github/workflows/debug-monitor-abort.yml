@@ -15,25 +15,40 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: "Catch the abort under gdb"
+      - name: "strace the suspect pair until the abort names its closer"
         run: |
-          mkdir -p /tmp/looplog
-          sudo apt-get update -q && sudo apt-get install -y -q gdb
+          mkdir -p /tmp/looplog /tmp/trace
+          sudo apt-get update -q && sudo apt-get install -y -q strace
           cargo test -p af-monitor --lib --no-run 2>/dev/null
           BIN=$(ls -t target/debug/deps/af_monitor-* | grep -v '\.d$' | head -1)
           echo "test binary: $BIN"
-          for i in $(seq 1 60); do
-            yes > /dev/null & yes > /dev/null &
-            LOAD=$(jobs -p)
-            if ! gdb --batch -ex run -ex bt -ex "thread apply all bt 12" --args "$BIN" > "/tmp/looplog/gdb-$i.log" 2>&1; then
-              kill $LOAD 2>/dev/null || true
-              echo "iteration $i crashed; gdb log follows"; cat "/tmp/looplog/gdb-$i.log"; exit 1
+          for i in $(seq 1 120); do
+            rm -f /tmp/trace/*
+            set +e
+            strace -f -ff -o /tmp/trace/t -e trace=close,dup,dup2,dup3,fcntl,close_range -s 0 -- "$BIN" a_refused_connection_fails_in_the_program --exact --test-threads 1 > "/tmp/looplog/run-$i.log" 2>&1
+            RC=$?
+            set -e
+            if [ "$RC" -ne 0 ]; then
+              echo "single run rc=$RC at iteration $i (expected: the pair needs both tests)"
             fi
-            kill $LOAD 2>/dev/null || true; wait 2>/dev/null || true
-            grep -q "IO Safety" "/tmp/looplog/gdb-$i.log" && { echo "abort at iteration $i"; cat "/tmp/looplog/gdb-$i.log"; exit 1; }
-            printf 'iteration %d clean\n' "$i"
+            # The abort needs concurrency between the two tests: run both, default threads.
+            rm -f /tmp/trace/*
+            set +e
+            strace -f -ff -o /tmp/trace/t -e trace=close,dup,dup2,dup3,fcntl,close_range -s 0 -- "$BIN" -- a_refused_connection_fails_in_the_program a_session_url_password_never_reaches_the_events > "/tmp/looplog/pair-$i.log" 2>&1
+            PR=$?
+            set -e
+            if [ "$PR" -ne 0 ]; then
+              echo "pair iteration $i rc=$PR; trace follows"
+              grep -l "SIGABRT\|IO Safety" /tmp/looplog/pair-$i.log /tmp/trace/* 2>/dev/null || true
+              echo "=== every close of the contested descriptor in this run:"
+              grep -h "close(7)" /tmp/trace/* 2>/dev/null | sort | uniq -c || true
+              echo "=== the tail of the failing log:"; tail -25 "/tmp/looplog/pair-$i.log"
+              cp -r /tmp/trace "/tmp/looplog/trace-$i" 2>/dev/null || true
+              exit 1
+            fi
+            printf 'pair %d clean\n' "$i"
           done
-          printf "60 gdb-guarded iterations clean\n"
+          printf "120 strace-guarded pair iterations clean\n"
 
       - name: Upload the loop log
         if: always()
