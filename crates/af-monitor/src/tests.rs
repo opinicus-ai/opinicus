@@ -262,6 +262,71 @@ fn simple_session_reports_exec_and_exit() {
     ));
 }
 
+/// A child of the test program that no session owns never enters the events.
+///
+/// The monitor waits with `waitpid(-1)`, so it also reaps the exits of every
+/// other child of the calling program. The capability probe used to leave its
+/// own test process half-dead in exactly that way, and the next session
+/// reported its exit (one load run of `simple_session_reports_exec_and_exit`
+/// saw four exit events for a session of one shell). A session names its own
+/// processes only, so such an exit is swallowed instead of reported.
+#[test]
+fn a_foreign_child_exit_never_enters_the_session_events() {
+    use std::process::Command;
+
+    // The lock of the session is part of run_config below. The foreign
+    // children start before that call, because their ends must fall into the
+    // window of the session, and the session takes the queue over from
+    // whatever reaped before it.
+
+    // Five short children of the test program die while the session below
+    // runs, so their exits land in the one wait queue that the monitor drains.
+    let mut foreign = Vec::new();
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 0.25")
+            .spawn()
+            .expect("start a foreign child");
+        foreign.push(child.id() as Pid);
+        handles.push(child);
+    }
+
+    let (outcome, handler) = run_shell("sleep 1", Recorder::default(), 20);
+    assert_eq!(outcome.exit_code, Some(0));
+
+    // The waits only collect the ends. The monitor of the session reaped the
+    // exits already, so most answers are `ECHILD` — the point of the test.
+    for mut child in handles {
+        let _ = child.wait();
+    }
+
+    for pid in &foreign {
+        assert!(
+            handler.events.iter().all(|event| event.pid != *pid),
+            "the session reported the foreign process {pid}: {:?}",
+            handler.events
+        );
+    }
+
+    // Every end the session reports belongs to a program the session saw.
+    let announced: Vec<Pid> = handler
+        .execs
+        .iter()
+        .map(|process| process.pid)
+        .chain(std::iter::once(handler.root_pid()))
+        .collect();
+    for exit in handler.of_kind("process_exit") {
+        assert!(
+            announced.contains(&exit.pid),
+            "the session reported the end of an unknown process {}: {:?}",
+            exit.pid,
+            handler.events
+        );
+    }
+}
+
 #[test]
 fn nested_session_links_every_child_to_the_root() {
     // The extra `true` keeps the shell from replacing itself with the next
@@ -449,14 +514,22 @@ fn stdin_snapshot_skips_a_pipe() {
 #[test]
 fn stdin_snapshot_reads_a_large_here_document() {
     // A shell keeps a small here-document in a pipe and a large one in a
-    // deleted temporary file. The monitor can read the temporary file,
-    // because a deleted file is still a regular file. The text stays below
-    // the kernel limit of one argument, which is 128 KiB.
+    // deleted temporary file — that shell is bash. dash, which is /bin/sh
+    // on Ubuntu, pipes a large here-document too, so the shape under test
+    // (a deleted regular file on descriptor 0) never appears there and the
+    // monitor correctly reads nothing: this failed on a CI runner whose
+    // /bin/sh is dash. The test names bash, because the deleted-tempfile
+    // shape is bash's and the monitor's contract is about descriptor 0
+    // being a readable regular file, not about which shell is /bin/sh.
+    // The text stays below the kernel limit of one argument, 128 KiB.
     let marker = "DROP DATABASE customer_prod;";
     let filler = "-".repeat(90_000);
     let script = format!("/bin/cat > /dev/null <<EOF\n{marker}\n{filler}\nEOF\n");
-
-    let (outcome, handler) = run_shell(&script, Recorder::default(), 20);
+    let command = ["/bin/bash", "-c", &script]
+        .iter()
+        .map(|word| word.to_string())
+        .collect();
+    let (outcome, handler) = run_config(MonitorConfig::new(command), Recorder::default(), 20);
 
     assert_eq!(outcome.exit_code, Some(0));
     let snapshot = handler
@@ -710,6 +783,108 @@ fn environment_keeps_only_useful_names() {
         ),
         Some(crate::REDACTED.to_string())
     );
+}
+
+#[test]
+fn a_url_value_keeps_its_shape_and_loses_its_password() {
+    // `DATABASE_URL` is allowlisted without a secret marker, and its value
+    // is a URL whose userinfo can hold the password. The name stays, the
+    // user name, the host and the database stay — a rule matches on the
+    // host — and only the password becomes `<redacted>`.
+    assert_eq!(
+        procfs::keep_env(
+            "DATABASE_URL",
+            "postgres://app:hunter2@db-prod.internal:5432/app?sslmode=require",
+            &[]
+        ),
+        Some("postgres://app:<redacted>@db-prod.internal:5432/app?sslmode=require".to_string())
+    );
+    // A URL with an empty user name still loses the password.
+    assert_eq!(
+        procfs::mask_userinfo("redis://:hunter2@cache.internal:6379/0"),
+        "redis://:<redacted>@cache.internal:6379/0"
+    );
+    // A password that itself holds an `@` is masked whole.
+    assert_eq!(
+        procfs::mask_userinfo("postgres://app:p@ss@db.internal/app"),
+        "postgres://app:<redacted>@db.internal/app"
+    );
+    // Sibling URL-shaped names of the allow list keep a passwordless
+    // userinfo, and values that are no URL stay as they are.
+    assert_eq!(
+        procfs::keep_env("DOCKER_HOST", "ssh://dev@builder.internal", &[]),
+        Some("ssh://dev@builder.internal".to_string())
+    );
+    assert_eq!(
+        procfs::keep_env("HOME", "/home/dev", &[]),
+        Some("/home/dev".to_string())
+    );
+    assert_eq!(
+        procfs::mask_userinfo("prod-db.internal"),
+        "prod-db.internal"
+    );
+    assert_eq!(
+        procfs::mask_userinfo("postgres://app@db.internal/app"),
+        "postgres://app@db.internal/app"
+    );
+}
+
+/// A session whose environment carries `DATABASE_URL` with a password in
+/// its userinfo must produce events that name the variable and never hold
+/// the password.
+///
+/// The password enters the session through the environment only: the
+/// script builds it from two halves, so neither the command line nor the
+/// script file that the monitor snapshots holds the password as text. The
+/// one remaining path into an event is the environment of the `exec true`,
+/// and that path is masked at capture.
+#[test]
+fn a_session_url_password_never_reaches_the_events() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let script = dir.path().join("session.sh");
+    std::fs::write(
+        &script,
+        concat!(
+            "P=hun\n",
+            "P=\"${P}ter2\"\n",
+            "export DATABASE_URL=\"postgres://app:${P}@db-prod.internal:5432/app\"\n",
+            "exec true\n",
+        ),
+    )
+    .expect("write the script");
+
+    let (outcome, handler) = run_session(
+        &["/bin/sh", script.to_str().expect("a text path")],
+        Recorder::default(),
+        20,
+    );
+    assert!(outcome.is_success(), "the session itself must succeed");
+
+    let execs = handler.of_kind("process_exec");
+    let url_exec = execs
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ProcessExec { process } => (process.comm == "true").then_some(process),
+            _ => None,
+        })
+        .expect("the session exec'd true");
+    assert_eq!(
+        url_exec.env.get("DATABASE_URL").map(String::as_str),
+        Some("postgres://app:<redacted>@db-prod.internal:5432/app"),
+        "the name stays visible for a rule, the password does not"
+    );
+
+    // The rendered events are the lines a trace holds. The password must
+    // appear in none of them, whatever path it could have taken.
+    for event in &handler.events {
+        let text = format!("{event:?}");
+        assert!(
+            !text.contains("hunter2"),
+            "the password of the URL must not reach the events:\n{text}"
+        );
+    }
+    let all = format!("{:?}", handler.events);
+    assert!(all.contains("DATABASE_URL"), "the name must stay: {all}");
 }
 
 #[test]
@@ -1427,4 +1602,83 @@ fn the_monitor_reads_the_class_of_a_program() {
     // real path must give the same answer as the crafted header.
     let own = std::env::current_exe().expect("the path of this test");
     assert_eq!(procfs::is_elf32(&own), cfg!(target_pointer_width = "32"));
+}
+
+/// The launch closes every inherited descriptor beyond stdio.
+///
+/// The observation points of the monitor are `open` and `connect`, so a
+/// capability that arrives already open — a hostile launcher that holds a
+/// writable descriptor and execs the firewall — would cross neither of
+/// them. `std::process::Command` closes nothing: the test opens a
+/// descriptor without the close-on-exec flag in its own process first,
+/// which is exactly the state a hostile launcher leaves behind, and then
+/// asks the traced child to prove what it sees.
+///
+/// The child answers with the count of `/proc/self/fd`, so the assertion
+/// is the child's own view and not a conclusion of the test. The count of
+/// a clean child is four: standard input, output and error, plus the one
+/// directory handle the shell itself opens to enumerate `/proc/self/fd`
+/// (the shell's glob sees its own handle as an entry). A descriptor that
+/// leaked through the launch makes the count five or more.
+#[test]
+fn the_launch_closes_inherited_descriptors_beyond_stdio() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let carrier = dir.path().join("carrier.txt");
+    std::fs::write(&carrier, "x").expect("write the carrier file");
+
+    // A raw descriptor with no close-on-exec flag, held open across the
+    // launch of the session. It never existed for `std`, so nothing but
+    // the launch hygiene of the monitor can close it.
+    let carrier_path = std::ffi::CString::new(carrier.to_str().expect("a usable path"))
+        .expect("a path with no zero byte");
+    // SAFETY: `open` returns one descriptor or -1 and touches nothing else.
+    let opened = unsafe { libc::open(carrier_path.as_ptr(), libc::O_RDWR) };
+    assert!(
+        opened >= 0,
+        "the test could not open its carrier descriptor"
+    );
+    let (outcome, _handler) = run_shell(
+        "test \"$(echo /proc/self/fd/* | wc -w)\" = 4",
+        Recorder::default(),
+        20,
+    );
+    // SAFETY: the descriptor belongs to this test process alone.
+    unsafe { libc::close(opened) };
+
+    assert_eq!(outcome.exit_code, Some(0), "the child saw more than stdio");
+}
+
+/// The launch hygiene keeps the report pipe working.
+///
+/// The child writes the fate of the kernel floor through a descriptor of
+/// its own before the `execve`, and the hygiene marks descriptors only
+/// after that write: the floor report must still reach the monitor. The
+/// session either reports the floor as active or warns that the kernel
+/// refused it — a session that reports nothing would mean the write end
+/// was closed too early.
+#[test]
+fn the_launch_hygiene_keeps_the_floor_report_working() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let config = MonitorConfig {
+        landlock: crate::LandlockMode::On,
+        landlock_home: Some(dir.path().to_path_buf()),
+        ..MonitorConfig::new(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "true".to_string(),
+        ])
+    };
+    let (outcome, handler) = run_config(config, Recorder::default(), 20);
+
+    assert_eq!(outcome.exit_code, Some(0));
+    let floor_or_warning = handler.events.iter().any(|event| {
+        matches!(
+            event.kind,
+            EventKind::KernelFloor { .. } | EventKind::MonitorWarning { .. }
+        )
+    });
+    assert!(
+        floor_or_warning,
+        "the session said nothing about the kernel floor, so the report pipe broke"
+    );
 }

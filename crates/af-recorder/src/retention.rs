@@ -155,7 +155,7 @@ pub(crate) fn named_processes(event: &Event) -> Vec<af_core::Pid> {
 pub(crate) fn is_held_action(event: &Event) -> bool {
     matches!(
         event.kind,
-        EventKind::FileOpen { .. } | EventKind::NetworkConnect { .. }
+        EventKind::FileOpen { .. } | EventKind::NetworkConnect { .. } | EventKind::IoUring { .. }
     )
 }
 
@@ -192,6 +192,7 @@ pub(crate) fn decides_about(held: &Event, decision: &Event) -> bool {
                 ..
             },
         ) => addr == other_addr && port == other_port,
+        (EventKind::IoUring { call }, af_core::Action::IoUring { call: other }) => call == other,
         _ => false,
     }
 }

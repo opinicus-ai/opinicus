@@ -1,8 +1,21 @@
 # Agent Firewall
 
-A security and observability layer for coding agents. It watches what an
-agent really does — and everything its process tree really does — and it
-stops a dangerous action before the action runs.
+A Linux launch wrapper for cooperative or accidental coding agents. It
+watches what an agent really does — and what its process tree does at the
+boundaries the firewall holds: where a new program starts, at a held
+file open or outgoing `connect`, and at the `io_uring` calls that would
+carry work past both — and it stops a dangerous action before
+the action runs, at that boundary. Not everything a tree does crosses a
+held boundary: descriptors the tree did not open itself and attacks on
+the monitor are measured silent, and they ride with every coverage claim
+in this document.
+
+It is a guardrail against an agent that misfires, not a boundary against a
+hostile program that runs with your user. It is an **alpha release — not
+a production security boundary**. The full contract — what the alpha
+guarantees, what it only observes, and the measured bypasses (inherited
+descriptors, the monitor's own attack surface) — is
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 The [direction of record](docs/DIRECTION.md) is a cross-platform system that
 observes and controls an agent from inside and outside the agent process,
@@ -152,9 +165,22 @@ so the mode is a choice.
 
 | `--syscall-filter` | What the firewall sees | Measured cost |
 | --- | --- | --- |
-| `write-only` (default) | a file open that can change the file, and every outgoing connection | 1.16× to 1.33× |
+| `write-only` (default) | the write-intent open and the outgoing `connect` the tree itself makes, held at the call boundary | 1.16× to 1.33× |
 | `all-opens` | the same, and an open that only reads | 1.33× to 1.92× |
 | `off` | nothing beyond a new program | no cost above the monitor itself |
+
+Every mode that installs the filter holds the two `io_uring` calls
+(`io_uring_setup`, `io_uring_enter`), which closes the measured
+zero-events gap as visibility: every ring call reaches the engine and the
+built-in rule reports it. The road itself stays open by decision — a
+normal node session makes the calls on its own, so a default deny would
+fire on everyday work; a host that must close the road sets the sysctl or
+loads a one-line local rule that turns the report into a deny
+([docs/DECISIONS.md](docs/DECISIONS.md), 2026-09-01). No mode sees a
+descriptor the tree did not open itself or the calls of a 32-bit program.
+Those gaps are measured and named — see
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) §5 and
+[the limits](#what-works-and-what-does-not) below.
 
 Every number is measured against the `ptrace` monitor and not against a
 session with no firewall. The monitor itself is the larger part of the price:
@@ -162,10 +188,12 @@ a file-heavy workload under `ptrace` alone was about ten times slower than the
 same workload with no firewall. `off` adds nothing to that; it does not make
 the session free.
 
-The default is cheap because the kernel itself drops a read-only open, and a
-read is 99.7% of the file traffic of a normal build. The price is that a rule
-about the path of a **read** — a credential file that a program only reads —
-cannot fire. Run `policy list` to see which rules that is, and
+The default is cheap because the kernel itself drops a read-only open: the
+write-flags test cut the measured file workload — the synthetic W2 harness,
+not a real build tree — from 1034 stops to 3, so 99.7% of its opens only
+read (`research/spikes/seccomp-ptrace/FINDINGS.md`). The price is that a
+rule about the path of a **read** — a credential file that a program only
+reads — cannot fire. Run `policy list` to see which rules that is, and
 `--syscall-filter all-opens` to wake them.
 
 `off` also gives the session back its right to raise privilege: the firewall
@@ -213,7 +241,11 @@ carries it too. The firewall holds dangerous actions at real boundaries
 ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §4), and the alpha label is
 not modesty: the rule pack is young, the sensor stack is measured but not
 exhaustive, and the [limits](#what-works-and-what-does-not) below are part
-of the product, not a footnote.
+of the product, not a footnote. [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)
+states the whole contract — the guarantees, the advisory layers, the
+measured bypasses and the phrasing rules that keep the claims honest —
+and [SECURITY.md](SECURITY.md) is the disclosure and false-positive or
+false-negative report path.
 
 ### Telemetry: off, granular, local
 
@@ -257,10 +289,13 @@ Works today:
   the arguments and the ancestry;
 * the firewall holds the process before the new program starts, and it asks
   the user;
-* a kernel filter holds a file open that can change the file, and every
-  outgoing connection, **inside a program that already runs**; the firewall
-  reports it, asks about it, and can let the call fail with a permission
-  error while the program keeps running;
+* a kernel filter holds the write-intent file open and the outgoing
+  `connect` **inside a program that already runs** — the calls the tree
+  itself makes — and the two `io_uring` calls, which the built-in pack
+  reports (and a host can deny with a one-line local rule); a descriptor
+  the tree did not open is not held (see the gaps below). The firewall
+  reports the held call, asks about it, and can let the call fail with a
+  permission error while the program keeps running;
 * the recorder writes a trace, and `replay` evaluates the trace again,
   including the file and the network actions. The default trace keeps every
   file and network action that a rule matched, so a chain that the live
@@ -283,17 +318,30 @@ Does not work yet:
 * No content of an open connection. The firewall sees that a program
   connects, and not the statement that the program sends over a connection
   that is already open. Watching that costs 8.8× and is not worth it.
-* No delete and no rename event. The schema has no shape for them yet, so a
-  delete inside the work tree is still judged at the command that does it;
-  a delete outside the granted trees is impossible in the kernel.
-* No visibility into `io_uring`. A program can submit file and network
-  operations to an io_uring instance, and the kernel performs them inside
-  one `io_uring_enter` call, so no per-operation system call happens and
-  neither the kernel filter nor the in-process sensor records anything.
-  Measured with a live technique: zero events in every filter mode
-  (`research/bypass/FINDINGS.md`, gap 1; scenario `evade-15`). The known
-  mitigations are kernel-side; on a machine where the gap matters, check
-  `/proc/sys/kernel/io_uring_disabled`.
+* No delete and no rename event from the observer. The event schema has a
+  shape for both and the in-process sensor can emit them
+  (`FileDelete`, `FileRename` in `crates/af-core/src/event.rs`), but the
+  shipped monitor holds no delete and no rename, so no product rule acts on
+  one yet: a delete inside the work tree is still judged at the command
+  that does it; a delete outside the granted trees is impossible in the
+  kernel.
+* `io_uring` is held and reported, not invisible and not denied. A program
+  can submit file and network operations to an io_uring instance, and the
+  kernel performs them inside one `io_uring_enter` call, so no
+  per-operation system call happens. The filter therefore holds
+  `io_uring_setup` and `io_uring_enter` themselves in every mode that
+  installs it, and the rule `tamper.bypass.io-uring` reports every call:
+  the ring road is visible in every trace. The measurement that decided
+  this posture (`docs/DECISIONS.md`, 2026-09-01) found that nothing
+  breaks under a deny — node falls back when the calls fail — but a
+  normal node session makes the calls on its own (36 in one `npm ci`, 48 in one
+  benign corpus run, with run-to-run variance), so a default deny would fire on everyday
+  work and the interruption budget forbids that. A host that must refuse
+  the road sets `kernel.io_uring_disabled` to 2, or loads a local rule
+  file that replaces `tamper.bypass.io-uring` with a deny; `doctor`
+  reports which posture the machine is in. A session with
+  `--syscall-filter off` holds nothing, and a ring the tree did not
+  create is the live-descriptor gap above.
 * The kernel floor cannot be relaxed and it carves the home directory: `ls ~`
   and `ls /` fail with `EACCES` under it, and the session explains every
   denial it causes. A session that must touch a path the floor denies starts
@@ -339,6 +387,10 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
   product, the sensor stack, agent identity, tamper, telemetry, the research
   pipeline, the business split, and the learning plan. Where an older
   document conflicts, it wins.
+* [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) — the security contract of
+  the alpha: what it guarantees, what is advisory, what is bypassable and
+  what is unknown, every claim with its source. [SECURITY.md](SECURITY.md)
+  is the disclosure and report path that goes with it.
 * [PROJECT.md](PROJECT.md) — the idea, the principles and the plan.
 * [docs/DECISIONS.md](docs/DECISIONS.md) — the dated decision log; the
   newest entry wins.

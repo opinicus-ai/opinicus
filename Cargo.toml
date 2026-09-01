@@ -20,7 +20,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
-repository = "https://github.com/agent-firewall/agent-firewall"
+repository = "https://github.com/opinicus-ai/opinicus"
+description = "A Linux launch wrapper that guards cooperative or accidental coding agents — alpha, not a production security boundary"
+readme = "README.md"
 
 [workspace.dependencies]
 af-core = { path = "crates/af-core" }

@@ -35,6 +35,24 @@
 //! restriction (ABI 6) takes the signal to any process outside the session
 //! away with it.
 //!
+//! The hidden set is exactly the home enumeration above. A credential-shaped
+//! path (`.ssh`, `.aws/credentials`, …) that sits under a writable tree — the
+//! work tree, `/tmp`, `/var/tmp`, `/var/cache` — is **not** hidden: the grant
+//! on the tree covers it. No composition of Landlock rules can subtract it,
+//! and the mechanism is measured, not guessed (`research/spikes/landlock`,
+//! section E, `bin/tmp-scope`): rules within one layer union, a second layer
+//! can only intersect, rules attach to objects that exist when the ruleset is
+//! built, and a path created later inherits the grant of the directory above
+//! it. Carving the tree instead (granting every entry but the shape) denies
+//! the shape but also denies every creation the enumeration does not reach,
+//! and a make-only grant denies even a fresh `open(O_CREAT|O_WRONLY)`.
+//! The protection of such a path is therefore the pack's question, which the
+//! session still asks and explains. `docs/LANDLOCK-CONTRACT.md` is the full
+//! set-theoretic contract, with the measured holes: a bind mount is judged by
+//! its mount path, so a privileged hand can alias a hidden store into a
+//! granted tree and the session can read it through the alias; a symlink is
+//! resolved to its object, so a link to a hidden store is denied.
+//!
 //! A rule that names something other than a directory — a file, a device
 //! node — may carry the file rights and no directory right, because the
 //! kernel rejects such a rule whole. The entries of the home directory
@@ -593,7 +611,11 @@ impl Plan {
     /// * `filesystem.credentials.write` names credential stores, which the
     ///   floor hides — but a `.ssh` under the work tree or under `/tmp` is
     ///   **not** hidden, so this class rides on the floor only for a path
-    ///   under one of the hidden prefixes ([`Plan::denied_prefixes`]).
+    ///   under one of the hidden prefixes ([`Plan::denied_prefixes`]). That
+    ///   is a property of the mechanism, measured in `research/spikes/landlock`
+    ///   section E: no ruleset composition subtracts a shape from a granted
+    ///   tree, so the question stays with the pack (`docs/LANDLOCK-CONTRACT.md`
+    ///   §6).
     /// * `process.signal.kill-everything` is the signal scope, which holds
     ///   for every process outside the session. It needs ABI 6.
     ///
@@ -1002,5 +1024,45 @@ mod tests {
         assert!(granted.contains(&home.join(".bashrc").as_path()));
         assert!(!granted.contains(&home.join(".ssh").as_path()));
         assert!(!granted.contains(&home.as_path()));
+    }
+
+    #[test]
+    fn a_credential_shape_under_tmp_keeps_its_grant_and_its_question() {
+        // The contract of docs/LANDLOCK-CONTRACT.md: the hidden set is the
+        // home enumeration and nothing else. A shape under /tmp is covered
+        // by the /tmp grant, the plan does not map it to a denial, and no
+        // denied prefix reaches it — which is what keeps the pack's
+        // question alive for the write (e2e K9–K12).
+        let work = std::env::temp_dir().join("afw-floor-tmpshape");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(work.join("x/.ssh")).ok();
+
+        let plan = plan_with_home(Path::new("/home/dev"));
+        let shape = "/tmp/x/.ssh/id_rsa";
+        assert!(plan.denies(shape, true).is_none());
+        assert!(plan.denies(shape, false).is_none());
+        assert!(plan.granted(Path::new(shape)));
+        assert!(plan
+            .denied_prefixes()
+            .iter()
+            .all(|(prefix, _)| !prefix.starts_with("/tmp")));
+    }
+
+    #[test]
+    fn a_credential_shape_in_the_work_tree_keeps_its_question() {
+        // The same holds inside the work tree: the grant on the work tree
+        // covers a .ssh created there, so the floor cannot answer the
+        // credential write — the question stays with the pack.
+        let work = std::env::temp_dir().join("afw-floor-workshape");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(work.join(".ssh")).ok();
+
+        let plan = Plan::build(&work, Some(Path::new("/home/dev")), 6);
+        let shape = work.join(".ssh/id_rsa");
+        assert!(plan.denies(&shape.display().to_string(), true).is_none());
+        assert!(plan.granted(&shape));
+        // The floor also granted the work tree itself: a hidden path under
+        // it would have left it ungranted, but a shape is not a hidden path.
+        assert!(!plan.work_tree_ungranted);
     }
 }

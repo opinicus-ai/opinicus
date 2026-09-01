@@ -19,8 +19,9 @@ What it does:
   environment change and stdin feed — argv alone can describe only the execs
   (the program name and its arguments). The gain is the fraction of the rest.
   Read-only opens are excluded from "interesting" on purpose: they are
-  99.7% of the file traffic of a normal build (docs/DETECTION-RESEARCH.md),
-  and the product's own filter drops them for that reason.
+  99.7% of the open traffic on the synthetic W2 file workload
+  (research/spikes/seccomp-ptrace/FINDINGS.md), and the product's own
+  filter drops them for that reason.
 
 * Sensor silence (--reg). An instance the firewall installed is silent when
   its process still lives, the instance spoke at least once (an event or a

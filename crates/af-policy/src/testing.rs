@@ -157,22 +157,8 @@ pub(crate) fn build_case(test: &TestSource) -> TestCase {
         .enumerate()
         .map(|(index, p)| to_process(p, 2 + index as i32))
         .collect();
-    let action = to_action(
-        test.file_open.as_ref(),
-        test.connect.as_ref(),
-        test.input.as_ref(),
-        test.signal_send.as_ref(),
-        test.tamper.as_ref(),
-        test.discrepancy.as_ref(),
-        &process,
-    );
-    let session = test_session(
-        &process,
-        &ancestry,
-        &test.baseline,
-        test.monitor_pid,
-        &test.sensor_instances,
-    );
+    let action = to_action(DeclaredAction::of_test(test), &process);
+    let session = test_session(&process, &ancestry, &test.baseline, &SessionFacts::of(test));
     let ts = seconds(test.at_seconds.unwrap_or_else(|| history_length(test)));
     TestCase {
         session,
@@ -229,16 +215,8 @@ fn build_step(step: &TestStep, at_seconds: u64) -> TestCase {
         .enumerate()
         .map(|(index, p)| to_process(p, 2 + index as i32))
         .collect();
-    let action = to_action(
-        step.file_open.as_ref(),
-        step.connect.as_ref(),
-        step.input.as_ref(),
-        step.signal_send.as_ref(),
-        step.tamper.as_ref(),
-        step.discrepancy.as_ref(),
-        &process,
-    );
-    let session = test_session(&process, &ancestry, &BTreeMap::new(), None, &[]);
+    let action = to_action(DeclaredAction::of_step(step), &process);
+    let session = test_session(&process, &ancestry, &BTreeMap::new(), &SessionFacts::none());
     TestCase {
         session,
         action,
@@ -251,6 +229,44 @@ fn build_step(step: &TestStep, at_seconds: u64) -> TestCase {
 /// Turns whole seconds into the nanoseconds that an event carries.
 fn seconds(value: u64) -> TimestampNanos {
     value.saturating_mul(NANOS_PER_SECOND)
+}
+
+/// The B.5 facts that one declared test seeds into its session.
+struct SessionFacts<'a> {
+    /// Process identifier of the monitor itself, when the test names one.
+    monitor_pid: Option<i32>,
+    /// The sensor instances that had registered at session start.
+    sensor_instances: &'a [i32],
+    /// Path of the trace file that the session writes to.
+    trace_path: Option<&'a str>,
+    /// Path of the in-process sensor's trace file.
+    sensor_trace_path: Option<&'a str>,
+    /// Path of the sensor registration record.
+    sensor_registration_path: Option<&'a str>,
+}
+
+impl<'a> SessionFacts<'a> {
+    /// The facts of a test that declares no B.5 facts at all.
+    fn none() -> Self {
+        Self {
+            monitor_pid: None,
+            sensor_instances: &[],
+            trace_path: None,
+            sensor_trace_path: None,
+            sensor_registration_path: None,
+        }
+    }
+
+    /// Reads the facts that a test declares on itself.
+    fn of(test: &'a TestSource) -> Self {
+        Self {
+            monitor_pid: test.monitor_pid,
+            sensor_instances: &test.sensor_instances,
+            trace_path: test.trace_path.as_deref(),
+            sensor_trace_path: test.sensor_trace_path.as_deref(),
+            sensor_registration_path: test.sensor_registration_path.as_deref(),
+        }
+    }
 }
 
 /// Makes the session metadata of a test.
@@ -268,13 +284,18 @@ fn test_session(
     process: &ProcessInfo,
     ancestry: &[ProcessInfo],
     baseline: &BTreeMap<String, Vec<String>>,
-    monitor_pid: Option<i32>,
-    sensor_instances: &[i32],
+    facts: &SessionFacts<'_>,
 ) -> SessionMeta {
     let mut sets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, values) in baseline {
         sets.insert(name.clone(), values.iter().cloned().collect());
     }
+    // The sensor facts exist when the test names anything of the sensor: a
+    // session can run with the sensor and no registered instance yet, which
+    // a test with only a sensor path and no instance writes.
+    let has_sensor = !facts.sensor_instances.is_empty()
+        || facts.sensor_trace_path.is_some()
+        || facts.sensor_registration_path.is_some();
     SessionMeta {
         session_id: SessionId::from("afw-policy-test"),
         started_at: 0,
@@ -290,11 +311,14 @@ fn test_session(
         schema_version: af_core::EVENT_SCHEMA_VERSION,
         baseline: sets,
         detection: None,
-        monitor_pid: monitor_pid.unwrap_or(0),
-        sensor: (!sensor_instances.is_empty()).then(|| af_core::SensorMeta {
+        monitor_pid: facts.monitor_pid.unwrap_or(0),
+        sensor: has_sensor.then(|| af_core::SensorMeta {
             preload: "/research/spikes/inprocess/libafsensor.so".to_string(),
-            instances: sensor_instances.to_vec(),
+            instances: facts.sensor_instances.to_vec(),
+            trace: facts.sensor_trace_path.map(str::to_string),
+            registration: facts.sensor_registration_path.map(str::to_string),
         }),
+        trace: facts.trace_path.map(str::to_string),
     }
 }
 
@@ -327,19 +351,63 @@ fn to_process(source: &TestProcess, default_pid: i32) -> ProcessInfo {
     }
 }
 
+/// The action that a declared test, or one of its history steps, performs.
+///
+/// A test and a step name their action with the same fields, so the two
+/// share one carrier and [`to_action`] reads one value instead of eight
+/// positions.
+pub(crate) struct DeclaredAction<'a> {
+    file_open: Option<&'a crate::source::TestFileOpen>,
+    connect: Option<&'a crate::source::TestConnect>,
+    input: Option<&'a crate::source::TestInput>,
+    signal_send: Option<&'a crate::source::TestSignalSend>,
+    io_uring: Option<&'a crate::source::TestIoUring>,
+    tamper: Option<&'a crate::source::TestTamper>,
+    discrepancy: Option<&'a crate::source::TestDiscrepancy>,
+}
+
+impl<'a> DeclaredAction<'a> {
+    /// Reads the action that the test itself declares.
+    fn of_test(test: &'a TestSource) -> Self {
+        Self {
+            file_open: test.file_open.as_ref(),
+            connect: test.connect.as_ref(),
+            input: test.input.as_ref(),
+            signal_send: test.signal_send.as_ref(),
+            io_uring: test.io_uring.as_ref(),
+            tamper: test.tamper.as_ref(),
+            discrepancy: test.discrepancy.as_ref(),
+        }
+    }
+
+    /// Reads the action that one history step declares.
+    fn of_step(step: &'a TestStep) -> Self {
+        Self {
+            file_open: step.file_open.as_ref(),
+            connect: step.connect.as_ref(),
+            input: step.input.as_ref(),
+            signal_send: step.signal_send.as_ref(),
+            io_uring: step.io_uring.as_ref(),
+            tamper: step.tamper.as_ref(),
+            discrepancy: step.discrepancy.as_ref(),
+        }
+    }
+}
+
 /// Makes the action of a test.
 ///
 /// A test that names no other action starts a program, because that is the
 /// action that most rules watch.
-fn to_action(
-    file_open: Option<&crate::source::TestFileOpen>,
-    connect: Option<&crate::source::TestConnect>,
-    input: Option<&crate::source::TestInput>,
-    signal_send: Option<&crate::source::TestSignalSend>,
-    tamper: Option<&crate::source::TestTamper>,
-    discrepancy: Option<&crate::source::TestDiscrepancy>,
-    process: &ProcessInfo,
-) -> Action {
+fn to_action(declared: DeclaredAction<'_>, process: &ProcessInfo) -> Action {
+    let DeclaredAction {
+        file_open,
+        connect,
+        input,
+        signal_send,
+        io_uring,
+        tamper,
+        discrepancy,
+    } = declared;
     if let Some(open) = file_open {
         return Action::FileOpen {
             path: open.path.clone(),
@@ -373,6 +441,9 @@ fn to_action(
             target: signal.target,
             signal: signal.signal,
         };
+    }
+    if let Some(ring) = io_uring {
+        return Action::IoUring { call: ring.call };
     }
     if let Some(tamper) = tamper {
         return Action::Tamper {

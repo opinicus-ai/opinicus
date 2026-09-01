@@ -316,9 +316,19 @@ def witness_ok(record, action, events, notes):
         notes.append("session waited for the daemon" if found else "daemon outside the trace")
         return found
     if tech == "uring":
+        # Since [af-12] the filter holds io_uring_setup and io_uring_enter,
+        # so the witness is the delivered io_uring event itself; the
+        # file_open witness still covers a session whose local rules let a
+        # ring through.
+        if any(e.get("type") == "io_uring" for e in events):
+            notes.append("the filter held the ring call before it ran")
+            return True
         ok = has_file_open(events, "marker.txt", True)
         if not ok:
-            notes.append("the ring open bypassed the filter; no file_open event exists")
+            notes.append(
+                "no io_uring event and no file_open witness: "
+                "the ring road never reached the engine"
+            )
         return ok
     if tech == "delete-rename":
         notes.append("the create was visible, the unlink and the rename are not: no event kind exists")

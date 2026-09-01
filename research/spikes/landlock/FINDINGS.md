@@ -980,3 +980,45 @@ chain (K1–K8): a credential read two shells deep fails with no prompt, the
 stderr names `filesystem.credentials.read`, the trace records the
 `kernel_denied` event and the `kernel_floor` fact, and the write side answers
 `filesystem.credentials.write` the same way in the default filter mode.
+
+## The writable-tree hole, measured (af-12, 2026-09-01)
+
+The contract question of P1-7: the shipped floor grants the work tree and
+`/tmp` in full, so a credential shape (`.ssh`) under one of them is
+writable there. Can any composition of the ABI deny a shape inside a
+directory that must stay writable? `bin/tmp-scope` (`make check`, section
+E, 21 assertions) measures every composition on this kernel. Every child
+restricts itself first and only then attempts the operation.
+
+| scenario | ruleset | operation | result |
+| --- | --- | --- | --- |
+| covering | one full rule on the tree | read/write the existing `x/.ssh/id_rsa` | **OK — the hole** |
+| covering | the same | create `n1/.ssh/id_rsa` fresh | **OK — the hole reaches shapes that do not exist at plan time** |
+| carve | no rule on the tree, rules per entry, none on the shape | read the shape | `EACCES` — subtraction works for enumerated paths |
+| carve | the same | `mkdir` at the tree root | `EACCES` — creation the enumeration does not reach is denied |
+| layers | covering rule **plus** a second layer that carves | read the shape | `EACCES` — a second layer intersects, so it subtracts |
+| layers | the same | `mkdir` at the root, fresh file in an enumerated parent | `EACCES` — the second layer denies everything it does not enumerate |
+| makeonly | every `MAKE_*` right, no `WRITE_FILE`, no `REMOVE_*` | `open(O_CREAT\|O_WRONLY)` of a fresh file | `EACCES` — a create-with-write needs `WRITE_FILE` from a covering rule |
+| makeonly | the same | mkdir fresh | `OK`; create a file inside it | `EACCES` |
+| bounded | full grants that stop above the shape | read `y/z/.ssh/id_rsa` | `OK` — an enumeration that does not walk to the shape misses it |
+
+The mechanism, in one paragraph: rules within a layer union (a deeper rule
+cannot subtract — `rule_specificity` again, and `allowed_access = 0` is
+refused with `ENOMSG`); a second layer intersects, so it can only deny,
+and denying selectively means enumerating everything that must stay
+allowed; rules attach to objects that exist at ruleset-build time, and a
+path created later inherits the grant of its covering directory; and a
+make-only grant cannot express "create but never edit", because the kernel
+checks `WRITE_FILE` on the create-with-write open itself.
+
+**Conclusion: denying a name-shaped path inside a writable tree is
+impossible with this ABI.** Carving the tree (what the floor does to
+`$HOME`) denies the shape but kills every creation the enumeration does
+not reach — fatal for `/tmp` (`mktemp`, `rustc`'s work directories) and
+for the work tree root; layering has the same enumeration requirement
+against a world-writable, unbounded tree; and the make-only scoping kills
+every scratch write, measured. The product answer is the shipped one: the
+floor hides the stores of the home, the pack keeps the question for shapes
+under writable trees, and the contract says so
+(`docs/LANDLOCK-CONTRACT.md` §6; the product-level stress matrix S1–S11 is
+`research/bypass/floor-stress.sh`).

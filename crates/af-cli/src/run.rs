@@ -105,13 +105,19 @@ pub fn run(args: RunArgs) -> Result<i32> {
     // the firewall itself runs with. Both travel inside the session start
     // event, so a replay answers the same questions from the trace.
     session.monitor_pid = std::process::id() as Pid;
-    session.sensor = sensor_facts();
+    session.sensor = sensor_facts(&cwd);
     if let Some(sensor) = &session.sensor {
         eprintln!(
             "agent-firewall: in-process sensor active: {} instance(s) registered at start",
             sensor.instances.len()
         );
     }
+    // The audit-trail fact of [af-9]: the trace file is a path the launcher
+    // itself opened, so a write-open of it from a process of the session is
+    // a fact of the firewall's own evidence — a B.5 fact in the shape of a
+    // path, and never the basis of an allow. The sensor's trace and
+    // registration paths ride the same rule inside the sensor facts.
+    session.trace = args.trace.as_deref().map(|path| evidence_path(path, &cwd));
 
     let policy = load_policy(&args.policy).context("cannot load the rules")?;
     // A rule with a `threshold` block fires again on every action that
@@ -1410,14 +1416,15 @@ fn git_remotes(cwd: &Path) -> BTreeSet<String> {
 /// The sensor of `research/spikes/inprocess/` is a research instrument that
 /// the caller installs through the environment, so the launcher reads its own
 /// environment to learn whether a session runs with one: the `LD_PRELOAD`
-/// that carried the shim in, and the registration record the shim appends
-/// to. The launcher takes one snapshot at start; whether an instance still
-/// speaks is the correlation question of a later milestone.
+/// that carried the shim in, the registration record the shim appends to,
+/// and the trace file the shim writes. The launcher takes one snapshot at
+/// start; whether an instance still speaks is the correlation question of a
+/// later milestone.
 ///
 /// A run with no sensor returns `None`, and every rule that keys on sensor
 /// instances then answers nothing — the quiet, correct answer for a normal
 /// session.
-fn sensor_facts() -> Option<SensorMeta> {
+fn sensor_facts(cwd: &Path) -> Option<SensorMeta> {
     let preload = std::env::var("LD_PRELOAD").ok()?;
     if !preload.split(':').any(|path| {
         Path::new(path)
@@ -1426,12 +1433,61 @@ fn sensor_facts() -> Option<SensorMeta> {
     }) {
         return None;
     }
-    let instances = std::env::var_os("AF_SENSOR_REG")
-        .map(PathBuf::from)
+    let registration_path = std::env::var_os("AF_SENSOR_REG").map(PathBuf::from);
+    let instances = registration_path
+        .as_deref()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|text| sensor_instances(&text))
         .unwrap_or_default();
-    Some(SensorMeta { preload, instances })
+    Some(SensorMeta {
+        preload,
+        instances,
+        trace: env_evidence_path("AF_SENSOR_TRACE", cwd),
+        registration: registration_path
+            .as_deref()
+            .map(|path| evidence_path(path, cwd)),
+    })
+}
+
+/// Reads an environment name as an evidence path of the sensor.
+///
+/// The sensor writes its facts as paths relative to the directory the
+/// launcher ran in, so the answer is the absolute, lexically clean form.
+fn env_evidence_path(name: &str, cwd: &Path) -> Option<String> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .map(|path| evidence_path(&path, cwd))
+}
+
+/// Makes the absolute, lexically clean form of a path.
+///
+/// The monitor records the path of an open stop in exactly this form —
+/// absolute, with no `.` and `..` parts and no doubled separators — so the
+/// audit-trail facts and the observed path of a write-open compare equal
+/// without asking the file system. The trace file does not exist yet when
+/// the launcher names it, which is why the cleanup is lexical and not a
+/// canonicalize: a symlink on the way changes nothing here, and a path that
+/// reaches the file through another shape is a gap that the facts honestly
+/// do not cover.
+fn evidence_path(path: &Path, cwd: &Path) -> String {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for part in joined.iter() {
+        match part.to_str() {
+            Some(".") => {}
+            Some("..") => {
+                parts.pop();
+            }
+            _ => parts.push(part.to_os_string()),
+        }
+    }
+    let mut out = PathBuf::from("/");
+    out.extend(parts);
+    out.display().to_string()
 }
 
 /// Reads the process identifiers out of a registration record.
@@ -2151,6 +2207,8 @@ not json at all
         handler.session.sensor = Some(af_core::SensorMeta {
             preload: "/research/spikes/inprocess/libafsensor.so".to_string(),
             instances: vec![400],
+            trace: None,
+            registration: None,
         });
         child.env.insert(
             "LD_PRELOAD".to_string(),
@@ -2178,6 +2236,8 @@ not json at all
         handler.session.sensor = Some(af_core::SensorMeta {
             preload: "/research/spikes/inprocess/libafsensor.so".to_string(),
             instances: vec![],
+            trace: None,
+            registration: None,
         });
         // A static binary keeps the variable in its environment even though
         // the loader never reads it: the removal is the fact, not the
@@ -2188,5 +2248,64 @@ not json at all
             "/research/spikes/inprocess/libafsensor.so".to_string(),
         );
         assert!(handler.preload_stripped(&child).is_none());
+    }
+
+    #[test]
+    fn an_evidence_path_takes_the_form_the_open_stop_reports() {
+        let cwd = Path::new("/work/session");
+        // The monitor's own form: absolute, no `.` and `..`, no doubled
+        // separators. The fact and the observed path must compare equal.
+        assert_eq!(
+            evidence_path(Path::new("trace.jsonl"), cwd),
+            "/work/session/trace.jsonl"
+        );
+        assert_eq!(
+            evidence_path(Path::new("../session/./trace.jsonl"), cwd),
+            "/work/session/trace.jsonl"
+        );
+        assert_eq!(
+            evidence_path(Path::new("/tmp/afw//trace.jsonl"), cwd),
+            "/tmp/afw/trace.jsonl"
+        );
+        // `..` above the root cannot climb out of it.
+        assert_eq!(
+            evidence_path(Path::new("../../trace.jsonl"), cwd),
+            "/trace.jsonl"
+        );
+    }
+
+    #[test]
+    fn the_session_names_its_own_evidence_files() {
+        let mut session = SessionMeta::new(vec!["bash".to_string()], "/work".to_string());
+        assert_eq!(session.evidence_kind("/work/t.jsonl"), None);
+        session.trace = Some("/work/t.jsonl".to_string());
+        assert_eq!(
+            session.evidence_kind("/work/t.jsonl"),
+            Some(af_core::EvidenceKind::Trace)
+        );
+        // A path that is close but not the file answers nothing, and a
+        // session without the fact answers nothing for any path.
+        assert_eq!(session.evidence_kind("/work/t.jsonl.bak"), None);
+        session.trace = None;
+        assert_eq!(session.evidence_kind("/work/t.jsonl"), None);
+
+        let mut sensor = af_core::SensorMeta {
+            preload: "/research/spikes/inprocess/libafsensor.so".to_string(),
+            instances: vec![],
+            trace: Some("/work/s.jsonl".to_string()),
+            registration: Some("/work/s.reg".to_string()),
+        };
+        session.sensor = Some(sensor.clone());
+        assert_eq!(
+            session.evidence_kind("/work/s.jsonl"),
+            Some(af_core::EvidenceKind::SensorTrace)
+        );
+        assert_eq!(
+            session.evidence_kind("/work/s.reg"),
+            Some(af_core::EvidenceKind::SensorRegistration)
+        );
+        sensor.registration = None;
+        session.sensor = Some(sensor);
+        assert_eq!(session.evidence_kind("/work/s.reg"), None);
     }
 }

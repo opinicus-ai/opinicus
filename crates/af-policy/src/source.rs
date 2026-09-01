@@ -71,6 +71,9 @@ pub enum ActionKind {
     Input,
     /// A process sends a signal to a process of the firewall.
     SignalSend,
+    /// A process asks the kernel for an `io_uring` instance, or submits work
+    /// to one.
+    IoUring,
     /// The firewall sensed a state of its own visibility.
     Tamper,
     /// The expected view and the observed view of the session disagree.
@@ -86,6 +89,7 @@ impl ActionKind {
             ActionKind::NetworkConnect => "network_connect",
             ActionKind::Input => "input",
             ActionKind::SignalSend => "signal_send",
+            ActionKind::IoUring => "io_uring",
             ActionKind::Tamper => "tamper",
             ActionKind::Discrepancy => "discrepancy",
         }
@@ -318,6 +322,17 @@ pub struct MatchSource {
     /// True selects a write, false selects a read.
     #[serde(default)]
     pub write: Option<bool>,
+    /// Which firewall-owned evidence file the open aims at.
+    ///
+    /// One of the words must name the file of the action: `trace`,
+    /// `sensor_trace` or `sensor_registration`. These are the B.5 facts of
+    /// the audit trail — files the launcher itself opened before the session
+    /// ran — and a rule that keys on them never fires on the writes of a
+    /// normal session, which opens none of them. A session that carries no
+    /// such fact answers nothing, which keeps the rule quiet. The fact can
+    /// only ask, deny or report; no rule may allow an action because of it.
+    #[serde(default)]
+    pub evidence_target: Option<Words>,
     /// Host names or addresses. One of them must match.
     #[serde(default)]
     pub host: Option<Words>,
@@ -352,6 +367,15 @@ pub struct MatchSource {
     /// them never fires on the signals of a normal session.
     #[serde(default)]
     pub signal_target: Option<Words>,
+    /// Which of the two `io_uring` calls an `io_uring` action carries.
+    ///
+    /// One of the words must name the call of the action:
+    /// `io_uring_setup` or `io_uring_enter`. The kernel filter holds both
+    /// calls at the call boundary, so a rule that names one of them fires
+    /// before the ring performs anything, and a session that asks for no
+    /// ring never raises the action at all.
+    #[serde(default)]
+    pub io_uring: Option<Words>,
     /// Which sensed shape a `tamper` action carries.
     ///
     /// One of the words must be the kind of the fact: for example
@@ -454,6 +478,14 @@ fn default_signal() -> i32 {
     9
 }
 
+/// The `io_uring` call that a declared test makes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestIoUring {
+    /// Which of the two calls the test makes.
+    pub call: af_core::IoUringCall,
+}
+
 /// The sensed fact that a declared test carries.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -533,6 +565,9 @@ pub struct TestStep {
     /// start.
     #[serde(default)]
     pub signal_send: Option<TestSignalSend>,
+    /// An `io_uring` call instead of the default program start.
+    #[serde(default)]
+    pub io_uring: Option<TestIoUring>,
     /// A sensed fact instead of the default program start.
     #[serde(default)]
     pub tamper: Option<TestTamper>,
@@ -581,6 +616,9 @@ pub struct TestSource {
     /// start.
     #[serde(default)]
     pub signal_send: Option<TestSignalSend>,
+    /// An `io_uring` call instead of the default program start.
+    #[serde(default)]
+    pub io_uring: Option<TestIoUring>,
     /// A sensed fact instead of the default program start.
     #[serde(default)]
     pub tamper: Option<TestTamper>,
@@ -607,4 +645,18 @@ pub struct TestSource {
     /// with any.
     #[serde(default)]
     pub sensor_instances: Vec<i32>,
+    /// Path of the trace file that the test session writes to, when it
+    /// writes one.
+    ///
+    /// This is the B.5 fact that `evidence_target: trace` compares with: a
+    /// test whose `file_open` names this path aims at the evidence of the
+    /// firewall itself.
+    #[serde(default)]
+    pub trace_path: Option<String>,
+    /// Path of the in-process sensor's trace file of the test session.
+    #[serde(default)]
+    pub sensor_trace_path: Option<String>,
+    /// Path of the sensor registration record of the test session.
+    #[serde(default)]
+    pub sensor_registration_path: Option<String>,
 }

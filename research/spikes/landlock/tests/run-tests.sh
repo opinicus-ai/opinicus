@@ -392,6 +392,74 @@ timeout 30 "$LL" "${RUNTIME[@]}" --rw "$WORK/project" -- \
     >"$OUT" 2>&1
 assert_line "a command line is only bytes to Landlock" "$OUT" 'git push --force'
 
+# ---------------------------------------------------------------------------
+section "E. the writable-tree hole: what a ruleset can and cannot subtract"
+# ---------------------------------------------------------------------------
+# The shipped floor grants the work tree and /tmp in full, so a credential
+# shape (.ssh) under one of them is writable there. tmp-scope measures, on
+# this kernel, every composition the ABI offers for closing that: a covering
+# grant; a carve (no rule on the root, one rule per entry); a second layer
+# (layers intersect); a make-only grant; a bounded carve.
+SC="$WORK/tmpscope"
+rm -rf "$SC"
+mkdir -p "$SC"
+timeout 30 "$BIN/tmp-scope" "$SC" >"$WORK/tmpscope.txt" 2>&1
+
+# Covering: the grant on the tree reaches the shape, existing or created.
+assert_line "covering: an existing shape under the grant is readable" \
+    "$WORK/tmpscope.txt" 'RESULT covering_shape_read -> OK'
+assert_line "covering: an existing shape under the grant is writable" \
+    "$WORK/tmpscope.txt" 'RESULT covering_shape_write -> OK'
+assert_line "covering: a fresh .ssh chain can be created under the grant" \
+    "$WORK/tmpscope.txt" 'RESULT covering_fresh_shape_dir -> OK'
+assert_line "covering: a fresh key file can be created with write under the grant" \
+    "$WORK/tmpscope.txt" 'RESULT covering_fresh_shape_file -> OK'
+
+# Carve: not granting the root and enumerating entries denies the shape —
+# and denies creation everywhere the enumeration does not reach.
+assert_line "carve: an enumerated shape is denied" \
+    "$WORK/tmpscope.txt" 'RESULT carve_shape_read -> FAIL errno=13'
+assert_line "carve: an enumerated sibling keeps its read" \
+    "$WORK/tmpscope.txt" 'RESULT carve_sibling_read -> OK'
+assert_line "carve: an enumerated sibling keeps its write" \
+    "$WORK/tmpscope.txt" 'RESULT carve_sibling_write -> OK'
+assert_line "carve: creation at the root is denied (the price)" \
+    "$WORK/tmpscope.txt" 'RESULT carve_mkdir_at_root -> FAIL errno=13'
+assert_line "carve: creation in an unenumerated subtree is denied (the price)" \
+    "$WORK/tmpscope.txt" 'RESULT carve_mkdir_in_enumerated -> FAIL errno=13'
+
+# Layers: a second ruleset intersects the first, so it can subtract the
+# shape — and denies everything it does not enumerate, creation included.
+assert_line "layers: the second layer subtracts the enumerated shape" \
+    "$WORK/tmpscope.txt" 'RESULT layers_shape_read -> FAIL errno=13'
+assert_line "layers: what the second layer enumerates stays usable" \
+    "$WORK/tmpscope.txt" 'RESULT layers_sibling_write -> OK'
+assert_line "layers: creation outside the second layer's enumeration is denied" \
+    "$WORK/tmpscope.txt" 'RESULT layers_mkdir_at_root -> FAIL errno=13'
+assert_line "layers: a fresh file in an enumerated parent is denied too" \
+    "$WORK/tmpscope.txt" 'RESULT layers_create_in_enumerated_parent -> FAIL errno=13'
+
+# Make-only: a grant with every MAKE_* right and no WRITE_FILE cannot even
+# create a file with content, because the create-with-write open needs
+# WRITE_FILE from a covering rule. Scratch use dies with the shape.
+assert_line "make-only: a fresh create-with-write is denied" \
+    "$WORK/tmpscope.txt" 'RESULT makeonly_fresh_create -> FAIL errno=13'
+assert_line "make-only: editing a pre-existing file is denied" \
+    "$WORK/tmpscope.txt" 'RESULT makeonly_preexisting_write -> FAIL errno=13'
+assert_line "make-only: appending is denied" \
+    "$WORK/tmpscope.txt" 'RESULT makeonly_preexisting_append -> FAIL errno=13'
+assert_line "make-only: unlink is denied" \
+    "$WORK/tmpscope.txt" 'RESULT makeonly_preexisting_unlink -> FAIL errno=13'
+assert_line "make-only: mkdir still works" \
+    "$WORK/tmpscope.txt" 'RESULT makeonly_fresh_dir -> OK'
+assert_line "make-only: writing inside the fresh directory is denied" \
+    "$WORK/tmpscope.txt" 'RESULT makeonly_fresh_dir_create -> FAIL errno=13'
+
+# Bounded: an enumeration that grants a directory wholesale leaves every
+# shape under it open, so the walk must reach every shape, at any depth.
+assert_line "bounded: a shape under a granted-but-unwalked directory is open" \
+    "$WORK/tmpscope.txt" 'RESULT bounded_unwalked_parent_shape -> OK'
+
 printf '\n=========================================\n'
 printf 'pass=%s fail=%s\n' "$PASS" "$FAIL"
 printf '=========================================\n'

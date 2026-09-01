@@ -5,6 +5,10 @@
 # A person or a continuous-integration job can run this test. The test builds
 # the workspace, runs three sessions and checks ten assertions. The test
 # writes a summary and returns a non-zero code when one assertion fails.
+# The summary goes to standard error, so a caller that pipes standard output
+# away (`| tee`, `| head`) still sees the verdict; such a caller reads the
+# exit code with PIPESTATUS, because the code of a pipeline is the code of
+# its last command.
 #
 # The test touches no real database. The fake psql client in demo/bin only
 # prints. The git steps use a throwaway repository. Every temporary file
@@ -111,22 +115,30 @@ assert_exit_nonzero() {
 }
 
 # Checks that a text holds a fixed string.
+#
+# The grep reads the haystack from a temporary file of the shell, not from a
+# pipe: `printf | grep -q` answers the match by leaving the pipe early, and
+# under load a writer that still has more bytes than the pipe holds can die of
+# SIGPIPE. With `pipefail` on, that turned a found match into a failed
+# assertion (measured: five false failures in 3000 probes under load, writer
+# status 141, grep status 0). The here-string form has no pipe and no such
+# failure mode.
 assert_contains() {
     local name="$1" haystack="$2" needle="$3"
-    if printf '%s\n' "$haystack" | grep -q -F -- "$needle"; then
+    if grep -q -F -- "$needle" <<<"$haystack"; then
         pass "$name"
     else
         fail "$name" "the text holds no [$needle]"
-        printf '%s\n' "$haystack" | head -n 20 | sed -e 's/^/       | /'
+        head -n 20 <<<"$haystack" | sed -e 's/^/       | /'
     fi
 }
 
 # Checks that a text does not hold a fixed string.
 assert_not_contains() {
     local name="$1" haystack="$2" needle="$3"
-    if printf '%s\n' "$haystack" | grep -q -F -- "$needle"; then
+    if grep -q -F -- "$needle" <<<"$haystack"; then
         fail "$name" "the text holds [$needle], but it must not"
-        printf '%s\n' "$haystack" | grep -F -- "$needle" | head -n 5 | sed -e 's/^/       | /'
+        grep -F -- "$needle" <<<"$haystack" | head -n 5 | sed -e 's/^/       | /' || true
     else
         pass "$name"
     fi
@@ -135,11 +147,11 @@ assert_not_contains() {
 # Checks that a text matches an extended regular expression.
 assert_matches() {
     local name="$1" haystack="$2" pattern="$3"
-    if printf '%s\n' "$haystack" | grep -q -E -- "$pattern"; then
+    if grep -q -E -- "$pattern" <<<"$haystack"; then
         pass "$name"
     else
         fail "$name" "the text matches no [$pattern]"
-        printf '%s\n' "$haystack" | head -n 20 | sed -e 's/^/       | /'
+        head -n 20 <<<"$haystack" | sed -e 's/^/       | /'
     fi
 }
 
@@ -426,6 +438,32 @@ assert_eq "K7 the write asks no question either" \
 assert_contains "K8 the write names the write rule" \
     "$(file_text "$WORK_DIR/kw.stderr")" "filesystem.credentials.write"
 
+# The same shape OUTSIDE the hidden prefixes: a .ssh under the work tree
+# (equivalently under /tmp) is writable as far as the floor is concerned —
+# the /tmp and work-tree grants cover it — so this write keeps its question.
+# The pack denies it and explains it; that is the contract of
+# docs/LANDLOCK-CONTRACT.md for credential shapes in writable trees.
+TRACE_KT="$WORK_DIR/trace-kt.jsonl"
+
+status_kt=0
+(
+    cd "$PROJECT_DIR"
+    "$BINARY" run --approve deny --trace "$TRACE_KT" \
+        -- sh -c "mkdir -p .ssh && printf backdoor > .ssh/id_afw_e2e_tmp"
+) >"$WORK_DIR/kt.stdout" 2>"$WORK_DIR/kt.stderr" || status_kt=$?
+
+assert_exit_nonzero "K9 a .ssh created in the work tree is not written silently" \
+    "$status_kt"
+assert_eq "K10 the write keeps its question (the floor does not cover it)" \
+    "1" "$(afw_trace_matches "$TRACE_KT" '"type" *: *"approval_requested"')"
+assert_contains "K11 the question names the credential write rule" \
+    "$(file_text "$WORK_DIR/kt.stderr")" "filesystem.credentials.write"
+if [ -e "$PROJECT_DIR/.ssh/id_afw_e2e_tmp" ]; then
+    assert_eq "K12 the key file was never created" "absent" "present"
+else
+    assert_eq "K12 the key file was never created" "absent" "absent"
+fi
+
 # ---------------------------------------------------------------------------
 # T. Tamper and quarantine: the seeded techniques of the bypass harness fire
 #    every time, the ruling is one question, and the quarantine holds the
@@ -588,20 +626,111 @@ assert_contains "T22 the discrepancy trace replays with the rules" \
     "$REPLAY_CB" "correlation.sensor.silent-subtree"
 
 # ---------------------------------------------------------------------------
+# U. io_uring: the ring road is held at the call boundary, reported by the
+#    pack, and refused when the host chooses the deny. The technique of the
+#    bypass harness (evade-15) performed an open with write intent through
+#    one io_uring_enter and produced zero events in every filter mode; the
+#    filter now holds io_uring_setup and io_uring_enter, the rule of the
+#    tamper pack reports every call, and a local rule file that replaces
+#    the rule with a deny closes the road completely — the shipped posture
+#    of [af-12], decided on the measured numbers
+#    (docs/DECISIONS.md, 2026-09-01): a normal node session makes the
+#    calls on its own, so a default deny would fire on everyday work.
+#    The negative side is the benign corpus (research/bypass/benign.sh)
+#    and the in-file tests of policies/tamper.yaml.
+# ---------------------------------------------------------------------------
+
+printf '\n%sU — the io_uring ring is held, reported, and refusable%s\n' "$AFW_BOLD" "$AFW_RESET"
+
+cc -O2 -o "$WORK_DIR/uring" "$REPO_ROOT/research/bypass/techniques/uring.c"
+
+# U1–U5: the shipped posture. The calls are held and seen — the zero-events
+# gap is closed as visibility — the rule reports, and no question stands,
+# so the road itself stays open and the marker of the technique appears.
+TRACE_U="$WORK_DIR/trace-u.jsonl"
+status_u=0
+"$BINARY" run --approve deny --retention all --trace "$TRACE_U" \
+    -- "$WORK_DIR/uring" "$WORK_DIR/u-marker.txt" \
+    >"$WORK_DIR/u.stdout" 2>"$WORK_DIR/u.stderr" || status_u=$?
+
+assert_exit "U1 the reported ring session runs to its end" 0 "$status_u"
+assert_eq "U2 the trace holds the held ring calls" \
+    "2" "$(afw_trace_matches "$TRACE_U" '"type" *: *"io_uring"')"
+assert_eq "U3 the io_uring rule fired as a report on every held call" \
+    "2" "$(afw_trace_matches "$TRACE_U" '"type" *: *"policy_decision".*"rule_id" *: *"tamper.bypass.io-uring"')"
+assert_eq "U4 the report asks nothing" \
+    "0" "$(afw_trace_matches "$TRACE_U" '"decision" *: *"(approval_required|deny|terminate)"')"
+[ -f "$WORK_DIR/u-marker.txt" ] && pass "U5 the road itself stays open under the shipped posture" || \
+    fail "U5 the road itself stays open under the shipped posture"
+
+# U6–U10: the host-requirement enforcement, from a local rule file that
+# replaces the report with a deny. The filter already holds the calls, so
+# the deny is complete: the ring never performs anything.
+LOCAL_POLICY="$WORK_DIR/uring-deny.yaml"
+cat >"$LOCAL_POLICY" <<'POLICY'
+version: 1
+name: local.uring-deny
+description: The host-requirement enforcement of the io_uring decision — replace the report with a deny for the sessions that load this file.
+rules:
+  - id: tamper.bypass.io-uring
+    title: io_uring use inside the session
+    category: tamper
+    risk: blocked
+    decision: deny
+    reason: This host refuses the ring road inside the firewall — the call is refused before the ring performs anything, and the program sees an ordinary permission error.
+    match:
+      action: io_uring
+      io_uring: [io_uring_setup, io_uring_enter]
+    tests:
+      - name: a ring setup is denied
+        expect: deny
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        io_uring: { call: setup }
+POLICY
+
+TRACE_UD="$WORK_DIR/trace-ud.jsonl"
+status_ud=0
+"$BINARY" run --approve deny --retention all --policy "$LOCAL_POLICY" --trace "$TRACE_UD" \
+    -- "$WORK_DIR/uring" "$WORK_DIR/ud-marker.txt" \
+    >"$WORK_DIR/ud.stdout" 2>"$WORK_DIR/ud.stderr" || status_ud=$?
+
+assert_exit_nonzero "U6 the local deny stops the ring session" "$status_ud"
+if [ -e "$WORK_DIR/ud-marker.txt" ]; then
+    fail "U7 the marker of the ring write was never created"
+else
+    pass "U7 the marker of the ring write was never created"
+fi
+assert_eq "U8 the trace holds the held ring call" \
+    "1" "$(afw_trace_matches "$TRACE_UD" '"type" *: *"io_uring"')"
+assert_eq "U9 the local deny decided the call" \
+    "1" "$(afw_trace_matches "$TRACE_UD" '"type" *: *"policy_decision".*"decision" *: *"deny"')"
+assert_contains "U10 the session explains the refusal and names the rule" \
+    "$(file_text "$WORK_DIR/ud.stderr")" "tamper.bypass.io-uring"
+assert_contains "U11 the technique saw an ordinary permission error" \
+    "$(file_text "$WORK_DIR/ud.stdout")" "blocked"
+
+# ---------------------------------------------------------------------------
 # Summary.
 # ---------------------------------------------------------------------------
 
-printf '\n%sSummary%s\n' "$AFW_BOLD" "$AFW_RESET"
-printf 'passed: %d\n' "$PASS_COUNT"
-printf 'failed: %d\n' "$FAIL_COUNT"
+# The summary goes to standard error on purpose. Standard output is what a
+# caller pipes away (`tests/e2e.sh | tee log`), and a reader that leaves the
+# pipe early can kill the writes — the verdict must not depend on the health
+# of that pipe. The exit code stays the contract: non-zero when any assertion
+# failed. A caller that pipes the output reads the code with `PIPESTATUS`
+# (measured: piped through `head -1`, the script died with 141 before its own
+# exit, and the bare `$?` of the pipeline was the reader's 0).
+printf '\n%sSummary%s\n' "$AFW_BOLD" "$AFW_RESET" >&2
+printf 'passed: %d\n' "$PASS_COUNT" >&2
+printf 'failed: %d\n' "$FAIL_COUNT" >&2
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    printf '\nthe following assertions failed:\n'
+    printf '\nthe following assertions failed:\n' >&2
     for name in "${FAILED_NAMES[@]}"; do
-        printf '  %s%s%s\n' "$AFW_RED" "$name" "$AFW_RESET"
+        printf '  %s%s%s\n' "$AFW_RED" "$name" "$AFW_RESET" >&2
     done
     exit 1
 fi
 
-printf '%severy assertion passed%s\n' "$AFW_GREEN" "$AFW_RESET"
+printf '%severy assertion passed%s\n' "$AFW_GREEN" "$AFW_RESET" >&2
 exit 0

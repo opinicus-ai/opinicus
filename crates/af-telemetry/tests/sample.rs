@@ -601,3 +601,23 @@ fn the_tree_names_real_files_by_hash_and_the_outbox_counts_them() {
             .expect("a sample file is a sample");
     assert_eq!(back, samples[0]);
 }
+
+/// A sample file is created for its owner only.
+///
+/// A sample names the machine and its sessions even after redaction, and it
+/// sits in a shared home's data directory, so the file must carry the mode
+/// 0600 whatever the umask of the command that wrote it is.
+#[test]
+fn a_sample_file_is_created_for_its_owner_only() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let samples = build_samples(&session_events(), &all_scopes(), &options());
+    let path = write_sample(dir.path(), &samples[0]).expect("write the sample");
+
+    let mode = std::fs::metadata(&path).expect("stat").mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "a sample names this machine's sessions; no other local user may read it"
+    );
+}

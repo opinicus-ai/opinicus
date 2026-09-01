@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use af_core::{Action, EvalContext, MarkScope, Pid, ProcessInfo, SessionMemory, TimestampNanos};
 use regex::Regex;
 
+use crate::facts::{AdvisoryPath, GroundFacts, GroundPath, PathFact};
 use crate::glob::Glob;
 use crate::source::{ActionKind, DistinctKey, MatchSource, VarResolveTarget, Words};
 
@@ -51,6 +52,8 @@ pub(crate) struct Matcher {
     ancestor_depth_at_least: Option<usize>,
     env: Vec<(String, Option<Regex>)>,
     signal_target: Vec<SignalTarget>,
+    io_uring_calls: Vec<String>,
+    evidence_target: Vec<af_core::EvidenceKind>,
     tamper: Vec<String>,
     discrepancy: Vec<String>,
     not: Option<Box<Matcher>>,
@@ -58,9 +61,98 @@ pub(crate) struct Matcher {
     any_of: Vec<Matcher>,
     /// True when `any_of` is present but holds no condition.
     empty_any_of: bool,
+    /// True when this condition, or any condition below it, names the path
+    /// of a file open.
+    ///
+    /// An exception that names a file path is dead — see
+    /// [`Matcher::matches_ground`] — and this flag is how the engine knows
+    /// without walking the tree at every action.
+    names_path: bool,
     marked: Option<MarkedCondition>,
     baseline_missing: Option<BaselineCondition>,
     var_resolves: Option<VarResolvesCondition>,
+}
+
+/// The path facts that one evaluation may read.
+///
+/// One rule condition runs under exactly one view, and the view is the
+/// pointer-derived-facts invariant made operational. A path read out of the
+/// memory of the judged program (`AdvisoryPath`) was measured wrong 47.6%
+/// of the time under two threads (`docs/DETECTION-RESEARCH.md` section 2),
+/// so it may be read exactly where a matching condition pushes the verdict
+/// toward holding the action:
+///
+/// * The body of a rule reads every fact. A refusal always held (measured:
+///   2000 of 2000 refused calls never ran) and a question or a report is at
+///   worst honest about a wrong name.
+///
+/// * Every position that lets a held action continue reads ground facts
+///   only: the exception of a rule that holds, and any block under an odd
+///   number of `not`s inside the body, because a match there quiets the
+///   rule — the same thing an exception does. The ground text accessor
+///   carries the runtime guard: a fact whose marking was flipped fires the
+///   guard instead of deciding.
+#[derive(Clone, Copy)]
+struct PathView<'a> {
+    /// The text of every path fact: advisory or ground.
+    any: Option<&'a str>,
+    /// The ground path of the action, when it has one.
+    ground: Option<GroundPath<'a>>,
+    /// True in a position where a matching condition lets a held action
+    /// continue. Only the ground fact may be read there.
+    allow_position: bool,
+}
+
+impl<'a> PathView<'a> {
+    /// The view of a rule body: every fact is readable.
+    fn body(subject: &'a Subject<'_>) -> Self {
+        Self::facts(subject).in_allow_position(false)
+    }
+
+    /// The view of an exception: ground facts only.
+    fn exception(subject: &'a Subject<'_>) -> Self {
+        Self::facts(subject).in_allow_position(true)
+    }
+
+    /// Gathers both path facts of a subject.
+    fn facts(subject: &'a Subject<'_>) -> Self {
+        Self {
+            any: subject.path.as_ref().map(PathFact::as_str),
+            ground: subject.ground_facts().path().copied(),
+            allow_position: false,
+        }
+    }
+
+    /// Returns the same view in the given position.
+    fn in_allow_position(self, allow_position: bool) -> Self {
+        Self {
+            allow_position,
+            ..self
+        }
+    }
+
+    /// The view below one `not`: a match pushes the verdict the other way.
+    fn negated(self) -> Self {
+        Self {
+            allow_position: !self.allow_position,
+            ..self
+        }
+    }
+
+    /// Returns the path text this evaluation may read.
+    ///
+    /// The allow-position arm consults [`GroundPath::allow_text`], which
+    /// asserts the runtime origin of the fact: an allow that consults an
+    /// advisory fact dressed as ground fires the guard. A condition that
+    /// names no path never calls this, so a flipped marking it does not
+    /// consume stays quiet.
+    fn text(&self) -> Option<&str> {
+        if self.allow_position {
+            self.ground.map(|path| path.allow_text())
+        } else {
+            self.any
+        }
+    }
 }
 
 /// A compiled question about a mark of an earlier action.
@@ -164,6 +256,8 @@ impl Matcher {
             ancestor_depth_at_least: source.ancestor_depth_at_least,
             env: compile_env(source.env.as_ref())?,
             signal_target: compile_signal_targets(source.signal_target.as_ref())?,
+            io_uring_calls: words(&source.io_uring),
+            evidence_target: compile_evidence_targets(source.evidence_target.as_ref())?,
             tamper: words(&source.tamper),
             discrepancy: words(&source.discrepancy),
             not: match &source.not {
@@ -173,6 +267,7 @@ impl Matcher {
             all_of: compile_list(source.all_of.as_deref())?,
             any_of: compile_list(source.any_of.as_deref())?,
             empty_any_of,
+            names_path: names_path(source),
             marked: compile_marked(source)?,
             baseline_missing: compile_baseline(source)?,
             var_resolves: compile_var_resolves(source)?,
@@ -212,7 +307,39 @@ impl Matcher {
     }
 
     /// Returns true when every condition of the block matches the action.
+    ///
+    /// This is the evaluation of a rule **body**, and it reads every fact:
+    /// a rule that refuses, asks or reports may match on a path read out of
+    /// the memory of the judged program, because a refusal always held
+    /// (measured: 2000 of 2000 refused calls never ran) and a question or a
+    /// report is at worst honest about a wrong name. A `not` block inside
+    /// the body is the exception-shaped position, and the view flips below
+    /// it — see [`PathView`].
     pub(crate) fn matches(&self, subject: &Subject<'_>) -> bool {
+        self.matches_with(subject, &PathView::body(subject))
+    }
+
+    /// Returns true when the exception matches the action.
+    ///
+    /// This is the evaluation of an **exception**, the one condition that
+    /// allows a stopped action: a matched exception switches a rule that
+    /// holds off, and the action then continues on the default allow. Such
+    /// a match accepts ground facts only — [`GroundFacts`] has no
+    /// constructor from an advisory path — and an exception that names a
+    /// file path anywhere in its tree is **dead**: it never holds, whatever
+    /// the marking, because no read out of the judged program's memory may
+    /// decide whether a rule that holds stays quiet. The lint names the dead
+    /// exception at load time; the runtime guard behind [`PathView::text`]
+    /// catches a fact whose marking was flipped.
+    pub(crate) fn matches_ground(&self, subject: &Subject<'_>) -> bool {
+        if self.names_path {
+            return false;
+        }
+        self.matches_with(subject, &PathView::exception(subject))
+    }
+
+    /// Evaluates one condition block under one view of the path facts.
+    fn matches_with(&self, subject: &Subject<'_>, path: &PathView<'_>) -> bool {
         if let Some(kind) = self.action {
             if kind != subject.kind {
                 return false;
@@ -241,7 +368,7 @@ impl Matcher {
             let Some(exe) = subject.exe else {
                 return false;
             };
-            if !self.exe_glob.iter().any(|g| g.matches(exe)) {
+            if !self.exe_glob.iter().any(|g| g.matches(exe.as_str())) {
                 return false;
             }
         }
@@ -262,30 +389,34 @@ impl Matcher {
             return false;
         }
         if !self.path.is_empty() {
-            match subject.path {
-                Some(path) if self.path.iter().any(|p| p == path) => {}
+            match path.text() {
+                Some(text) if self.path.iter().any(|p| p == text) => {}
                 _ => return false,
             }
         }
         if !self.path_prefix.is_empty() {
-            match subject.path {
-                Some(path)
+            match path.text() {
+                Some(text)
                     if self
                         .path_prefix
                         .iter()
-                        .any(|p| path.starts_with(p.as_str())) => {}
+                        .any(|p| text.starts_with(p.as_str())) => {}
                 _ => return false,
             }
         }
         if !self.path_glob.is_empty() {
-            match subject.path {
-                Some(path) if self.path_glob.iter().any(|g| g.matches(path)) => {}
+            match path.text() {
+                Some(text) if self.path_glob.iter().any(|g| g.matches(text)) => {}
                 _ => return false,
             }
         }
         if !self.cwd_prefix.is_empty() {
             match subject.cwd {
-                Some(cwd) if self.cwd_prefix.iter().any(|p| cwd.starts_with(p.as_str())) => {}
+                Some(cwd)
+                    if self
+                        .cwd_prefix
+                        .iter()
+                        .any(|p| cwd.as_str().starts_with(p.as_str())) => {}
                 _ => return false,
             }
         }
@@ -294,7 +425,7 @@ impl Matcher {
                 if self
                     .cwd_not_prefix
                     .iter()
-                    .any(|p| cwd.starts_with(p.as_str()))
+                    .any(|p| cwd.as_str().starts_with(p.as_str()))
                 {
                     return false;
                 }
@@ -328,8 +459,8 @@ impl Matcher {
             }
         }
         if let Some(pattern) = &self.path_matches {
-            match subject.path {
-                Some(path) if pattern.is_match(path) => {}
+            match path.text() {
+                Some(text) if pattern.is_match(text) => {}
                 _ => return false,
             }
         }
@@ -361,6 +492,21 @@ impl Matcher {
         {
             return false;
         }
+        if !self.io_uring_calls.is_empty() {
+            let Some(call) = subject.io_uring_call else {
+                return false;
+            };
+            if !self.io_uring_calls.iter().any(|want| want == call) {
+                return false;
+            }
+        }
+        if !self.evidence_target.is_empty()
+            && !subject
+                .evidence_target
+                .is_some_and(|target| self.evidence_target.contains(&target))
+        {
+            return false;
+        }
         if !self.tamper.is_empty() {
             let Some(kind) = subject.tamper_kind else {
                 return false;
@@ -378,17 +524,21 @@ impl Matcher {
             }
         }
         if let Some(inner) = &self.not {
-            if inner.matches(subject) {
+            // A `not` turns a match into the other direction, so the view
+            // flips with it: a path condition under an odd number of `not`s
+            // quiets the rule when it matches, which is the allow-shaped
+            // position, and only ground facts may decide that.
+            if inner.matches_with(subject, &path.negated()) {
                 return false;
             }
         }
-        if !self.all_of.iter().all(|m| m.matches(subject)) {
+        if !self.all_of.iter().all(|m| m.matches_with(subject, path)) {
             return false;
         }
         if self.empty_any_of {
             return false;
         }
-        if !self.any_of.is_empty() && !self.any_of.iter().any(|m| m.matches(subject)) {
+        if !self.any_of.is_empty() && !self.any_of.iter().any(|m| m.matches_with(subject, path)) {
             return false;
         }
         if let Some(condition) = &self.marked {
@@ -475,6 +625,16 @@ impl Matcher {
             ActionKind::SignalSend,
             !self.signal_target.is_empty(),
         );
+        add(
+            "io_uring",
+            ActionKind::IoUring,
+            !self.io_uring_calls.is_empty(),
+        );
+        add(
+            "evidence_target",
+            ActionKind::FileOpen,
+            !self.evidence_target.is_empty(),
+        );
         add("tamper", ActionKind::Tamper, !self.tamper.is_empty());
         add(
             "discrepancy",
@@ -510,6 +670,8 @@ impl Matcher {
             && self.ancestor_depth_at_least.is_none()
             && self.env.is_empty()
             && self.signal_target.is_empty()
+            && self.io_uring_calls.is_empty()
+            && self.evidence_target.is_empty()
             && self.tamper.is_empty()
             && self.discrepancy.is_empty()
             && self.not.is_none()
@@ -534,6 +696,29 @@ impl Matcher {
     /// Returns the mark that this block asks about, when it asks about one.
     pub(crate) fn marked(&self) -> Option<&MarkedCondition> {
         self.marked.as_ref()
+    }
+
+    /// Returns the names of the path fields this block uses.
+    ///
+    /// The lint uses this on exceptions: the path of a file open is read out
+    /// of the memory of the judged program, an exception is a match that
+    /// allows, and such a match accepts ground facts only — so a path
+    /// condition in an exception can never hold.
+    pub(crate) fn path_field_names(&self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = Vec::new();
+        if !self.path.is_empty() {
+            out.push("path");
+        }
+        if !self.path_prefix.is_empty() {
+            out.push("path_prefix");
+        }
+        if !self.path_glob.is_empty() {
+            out.push("path_glob");
+        }
+        if self.path_matches.is_some() {
+            out.push("path_matches");
+        }
+        out
     }
 }
 
@@ -626,7 +811,6 @@ fn compile_var_resolves(
 fn words(source: &Option<Words>) -> Vec<String> {
     source.as_ref().map(|w| w.0.clone()).unwrap_or_default()
 }
-
 fn globs(source: &Option<Words>) -> Vec<Glob> {
     source
         .as_ref()
@@ -676,6 +860,26 @@ fn compile_signal_targets(source: Option<&Words>) -> Result<Vec<SignalTarget>, C
         .collect()
 }
 
+/// Reads the words of `evidence_target` and checks every one of them.
+///
+/// The words are the labels of [`af_core::EvidenceKind`] — the B.5 facts of
+/// the audit trail: files the launcher itself opened before the session ran.
+fn compile_evidence_targets(
+    source: Option<&Words>,
+) -> Result<Vec<af_core::EvidenceKind>, CompileError> {
+    let Some(words) = source else {
+        return Ok(Vec::new());
+    };
+    words
+        .0
+        .iter()
+        .map(|word| {
+            af_core::EvidenceKind::from_rule_word(word)
+                .map_err(|message| format!("field `evidence_target`: {message}"))
+        })
+        .collect()
+}
+
 fn compile_list(source: Option<&[MatchSource]>) -> Result<Vec<Matcher>, CompileError> {
     let Some(list) = source else {
         return Ok(Vec::new());
@@ -683,22 +887,47 @@ fn compile_list(source: Option<&[MatchSource]>) -> Result<Vec<Matcher>, CompileE
     list.iter().map(Matcher::compile).collect()
 }
 
+/// Returns true when the condition tree names the path of a file open
+/// anywhere — at this block or below a `not`, an `all_of` or an `any_of`.
+///
+/// The exceptions of a rule that holds are dead when they name a file path,
+/// and the flag must see through every grouping a rule file can write.
+fn names_path(source: &MatchSource) -> bool {
+    let words_of = |field: &Option<Words>| field.as_ref().is_some_and(|w| !w.0.is_empty());
+    words_of(&source.path)
+        || words_of(&source.path_prefix)
+        || words_of(&source.path_glob)
+        || source.path_matches.is_some()
+        || source.not.as_ref().is_some_and(|inner| names_path(inner))
+        || source
+            .all_of
+            .as_ref()
+            .is_some_and(|list| list.iter().any(names_path))
+        || source
+            .any_of
+            .as_ref()
+            .is_some_and(|list| list.iter().any(names_path))
+}
+
 /// Every fact of one action, in the form that a match needs.
 ///
 /// The engine builds the subject one time for each evaluation and gives it to
-/// every rule. The command line is joined one time only.
+/// every rule. The command line is joined one time only. The path facts carry
+/// their provenance — see [`crate::facts`] — and the wrapping happens here,
+/// at the one point where a path of the action becomes matchable: a held
+/// file open wraps as advisory, the paths of the exec boundary as ground.
 #[derive(Debug)]
 pub(crate) struct Subject<'a> {
     kind: ActionKind,
     action_program: Option<&'a str>,
     process_program: &'a str,
-    exe: Option<&'a str>,
+    exe: Option<GroundPath<'a>>,
     argv: &'a [String],
     argv_joined: String,
-    cwd: Option<&'a str>,
+    cwd: Option<GroundPath<'a>>,
     action_env: Option<&'a BTreeMap<String, String>>,
     process_env: &'a BTreeMap<String, String>,
-    path: Option<&'a str>,
+    path: Option<PathFact<'a>>,
     write: Option<bool>,
     host: Option<&'a str>,
     addr: Option<&'a str>,
@@ -709,6 +938,8 @@ pub(crate) struct Subject<'a> {
     subtree_root: Pid,
     memory: &'a SessionMemory,
     signal_target: Option<SignalTarget>,
+    io_uring_call: Option<&'a str>,
+    evidence_target: Option<af_core::EvidenceKind>,
     tamper_kind: Option<&'a str>,
     discrepancy_kind: Option<&'a str>,
 }
@@ -730,10 +961,14 @@ impl<'a> Subject<'a> {
             kind: kind_of(ctx.action),
             action_program: None,
             process_program: process.program_name(),
-            exe: process.exe.as_deref(),
+            // The process facts come from the exec stop, where `execve` has
+            // destroyed every other thread of the program: no thread is left
+            // that could rewrite them (`docs/DETECTION-RESEARCH.md` section
+            // 2), so they are ground facts.
+            exe: process.exe.as_deref().map(GroundPath::new),
             argv: &process.argv,
             argv_joined: String::new(),
-            cwd: process.cwd.as_deref(),
+            cwd: process.cwd.as_deref().map(GroundPath::new),
             action_env: None,
             process_env: &process.env,
             path: None,
@@ -747,6 +982,8 @@ impl<'a> Subject<'a> {
             subtree_root: ctx.subtree_root(),
             memory,
             signal_target: None,
+            io_uring_call: None,
+            evidence_target: None,
             tamper_kind: None,
             discrepancy_kind: None,
         };
@@ -764,19 +1001,35 @@ impl<'a> Subject<'a> {
                     Some(program.as_str())
                 };
                 if let Some(path) = exe.as_deref() {
-                    subject.exe = Some(path);
+                    // The program path of an exec action is read at the exec
+                    // stop, after `execve` destroyed every other thread: a
+                    // ground fact.
+                    subject.exe = Some(GroundPath::new(path));
                 }
                 if !argv.is_empty() {
                     subject.argv = argv;
                 }
                 if let Some(dir) = cwd.as_deref() {
-                    subject.cwd = Some(dir);
+                    subject.cwd = Some(GroundPath::new(dir));
                 }
                 subject.action_env = Some(env);
             }
             Action::FileOpen { path, write } => {
-                subject.path = Some(path.as_str());
+                // The path of a held open is the one the collector read out
+                // of the memory of the judged program at the stop
+                // (`docs/ARCHITECTURE.md` section 3a, step 4). It is
+                // advisory: under two threads it named a file the kernel
+                // did not open 47.6% of the time, so it may refuse, ask and
+                // report, and it can never be the reason the action
+                // continues.
+                subject.path = Some(PathFact::Advisory(AdvisoryPath::new(path.as_str())));
                 subject.write = Some(*write);
+                // The B.5 facts of the audit trail answer the one question a
+                // tamper rule may ask about a file open: is the path a file
+                // the firewall itself opened? A path that names no such file
+                // is not a fact of the firewall, and no rule of this shape
+                // may fire on it.
+                subject.evidence_target = ctx.session.evidence_kind(path);
             }
             Action::NetworkConnect { host, addr, port } => {
                 subject.host = host.as_deref();
@@ -809,6 +1062,9 @@ impl<'a> Subject<'a> {
             }
             Action::Tamper { kind, .. } => {
                 subject.tamper_kind = Some(kind.label());
+            }
+            Action::IoUring { call } => {
+                subject.io_uring_call = Some(call.label());
             }
             Action::Discrepancy { kind, .. } => {
                 subject.discrepancy_kind = Some(kind.label());
@@ -936,7 +1192,7 @@ impl<'a> Subject<'a> {
     pub(crate) fn distinct_key(&self, kind: DistinctKey) -> Option<String> {
         match kind {
             DistinctKey::None => None,
-            DistinctKey::Path => self.path.map(str::to_string),
+            DistinctKey::Path => self.path.as_ref().map(|path| path.as_str().to_string()),
             DistinctKey::Host => self.host.or(self.addr).map(str::to_string),
             DistinctKey::Program => self
                 .action_program
@@ -969,6 +1225,21 @@ impl<'a> Subject<'a> {
         self.memory
     }
 
+    /// Returns the ground facts of this action: the facts a match that
+    /// **allows** the action may consume.
+    ///
+    /// The ground path is the only fact that needs gathering — the paths of
+    /// the exec boundary sit on the subject already, typed as ground. A
+    /// path read out of the memory of the judged program is not here, and
+    /// nothing can put it here: [`GroundFacts`] takes a [`GroundPath`], and
+    /// no conversion from an advisory path exists.
+    pub(crate) fn ground_facts(&self) -> GroundFacts<'a> {
+        GroundFacts::new(match self.path {
+            Some(PathFact::Ground(path)) => Some(path),
+            _ => None,
+        })
+    }
+
     /// Returns the value of an environment name of the action or the process.
     fn env_value(&self, name: &str) -> Option<&str> {
         if let Some(env) = self.action_env {
@@ -988,6 +1259,7 @@ fn kind_of(action: &Action) -> ActionKind {
         Action::NetworkConnect { .. } => ActionKind::NetworkConnect,
         Action::Input { .. } => ActionKind::Input,
         Action::SignalSend { .. } => ActionKind::SignalSend,
+        Action::IoUring { .. } => ActionKind::IoUring,
         Action::Tamper { .. } => ActionKind::Tamper,
         Action::Discrepancy { .. } => ActionKind::Discrepancy,
     }
@@ -1003,4 +1275,395 @@ fn basename(path: &str) -> &str {
 /// empty value also produces when the token carries a trailing slash.
 fn without_trailing_slash(path: &str) -> &str {
     path.trim_end_matches('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::AdvisoryPath;
+    use crate::PolicySet;
+    use af_core::{Action, Decision, EvalContext, PolicyEngine, ProcessInfo, SessionMeta};
+
+    /// A rule file with one rule that holds every write open unless a
+    /// ground path says otherwise, one rule whose exception names the path
+    /// the monitor read (the unsound allowlist of the race, the exact shape
+    /// that `research/spikes/seccomp-unotify/src/toctou_open.c` measured),
+    /// and one rule that shows the parity: a path under two `not`s is a
+    /// condition of the body again, so every fact is readable.
+    const RULES: &str = "
+version: 1
+name: test.race
+rules:
+  - id: test.race.deny-write
+    title: Deny every write open
+    category: test
+    risk: blocked
+    decision: deny
+    reason: test
+    match:
+      action: file_open
+      write: true
+      not: { path_glob: '**/f_*.txt' }
+  - id: test.race.ask-etc
+    title: Ask before a write under /etc
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: test
+    match: { action: file_open, write: true, path_prefix: [/etc] }
+    exceptions:
+      - path_prefix: /etc/static
+  - id: test.race.double-not
+    title: A path under two nots is a body condition
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: test
+    match:
+      action: file_open
+      write: true
+      not: { not: { path_prefix: /etc } }
+";
+
+    /// A rule file whose exception names a fact of the exec boundary, which
+    /// no thread of the judged program can rewrite after the stop.
+    const GROUND_RULES: &str = "
+version: 1
+name: test.ground
+rules:
+  - id: test.ground.ask-curl
+    title: Ask before curl runs
+    category: test
+    risk: approval_required
+    decision: approval_required
+    reason: test
+    match: { action: exec, program: [curl] }
+    exceptions:
+      - argv_contains: [--version]
+";
+
+    fn context(action: &Action) -> (SessionMeta, ProcessInfo) {
+        let session = SessionMeta::new(vec!["bash".to_string()], "/work".to_string());
+        let process = ProcessInfo {
+            pid: 100,
+            comm: "sh".to_string(),
+            argv: vec!["sh".to_string()],
+            ..Default::default()
+        };
+        let _ = EvalContext::new(&session, action, &process, &[]);
+        (session, process)
+    }
+
+    /// Evaluates one action against one rule file.
+    fn verdict_of(rules: &str, action: &Action) -> af_core::Verdict {
+        let set = PolicySet::from_str(rules, "test").expect("the rule file loads");
+        let (session, process) = context(action);
+        let ctx = EvalContext::new(&session, action, &process, &[]);
+        set.evaluate(&ctx)
+    }
+
+    /// The negative of the compile gate: a rule that stops or asks still
+    /// matches a path read out of the memory of the judged program. A
+    /// refusal always held — measured, 2000 of 2000 refused calls never ran
+    /// — and a question is honest at worst about a wrong name.
+    #[test]
+    fn a_rule_that_stops_or_asks_matches_a_path_read_from_the_judged_program() {
+        let open = Action::FileOpen {
+            path: "/etc/passwd".to_string(),
+            write: true,
+        };
+        let verdict = verdict_of(RULES, &open);
+        assert_eq!(verdict.decision, Decision::Deny);
+        assert!(
+            verdict
+                .matches
+                .iter()
+                .any(|m| m.rule_id == "test.race.ask-etc"),
+            "the question must still fire on the advisory path: {:?}",
+            verdict.matches
+        );
+
+        let elsewhere = Action::FileOpen {
+            path: "/work/f_b.txt".to_string(),
+            write: true,
+        };
+        assert_eq!(verdict_of(RULES, &elsewhere).decision, Decision::Deny);
+    }
+
+    /// The invariant itself, in its exception form: the one match that
+    /// allows an action — the exception of a rule that holds — never
+    /// consumes a path read out of the memory of the judged program. The
+    /// read can name `/etc/static/manifest` while the kernel opens
+    /// `/etc/passwd`, so the exception is dead and the question stands.
+    #[test]
+    fn an_exception_never_allows_on_a_path_read_from_the_judged_program() {
+        let set = PolicySet::from_str(RULES, "test").expect("the rule file loads");
+        let (session, process) = context(&Action::Exec {
+            exe: None,
+            program: "sh".to_string(),
+            argv: vec!["sh".to_string()],
+            cwd: None,
+            env: Default::default(),
+        });
+        for read in ["/etc/static/manifest", "/etc/passwd"] {
+            let action = Action::FileOpen {
+                path: read.to_string(),
+                write: true,
+            };
+            let ctx = EvalContext::new(&session, &action, &process, &[]);
+            let subject = Subject::new(&ctx);
+            assert_eq!(
+                subject.path,
+                Some(PathFact::Advisory(AdvisoryPath::new(read))),
+                "the subject must wrap the open path as advisory"
+            );
+            let rule = &set.rules[1];
+            assert!(
+                rule.matches(&subject),
+                "the question must stand: the exception names a path, and the path is advisory"
+            );
+        }
+    }
+
+    /// The same invariant under a `not`: a path condition below an odd
+    /// number of negations quiets the rule when it matches, which is the
+    /// allow-shaped position, so the raced read cannot make the rule go
+    /// quiet there either. Below an even number the condition belongs to
+    /// the body again, and every fact is readable.
+    #[test]
+    fn a_not_block_never_quiets_a_rule_on_a_raced_read() {
+        let set = PolicySet::from_str(RULES, "test").expect("the rule file loads");
+        let (session, process) = context(&Action::Exec {
+            exe: None,
+            program: "sh".to_string(),
+            argv: vec!["sh".to_string()],
+            cwd: None,
+            env: Default::default(),
+        });
+        // One `not`: the read can say `f_a.txt` or `f_b.txt`, and neither
+        // side may quiet the deny.
+        for read in ["/work/f_a.txt", "/work/f_b.txt"] {
+            let action = Action::FileOpen {
+                path: read.to_string(),
+                write: true,
+            };
+            let ctx = EvalContext::new(&session, &action, &process, &[]);
+            let subject = Subject::new(&ctx);
+            assert!(
+                set.rules[0].matches(&subject),
+                "the deny must hold: the `not` names `{read}`, but the path is advisory"
+            );
+        }
+        // Two `not`s: the condition is a body condition again, so the
+        // advisory read fires the question, exactly as a plain `path_prefix`
+        // would.
+        let action = Action::FileOpen {
+            path: "/etc/passwd".to_string(),
+            write: true,
+        };
+        let ctx = EvalContext::new(&session, &action, &process, &[]);
+        assert!(set.rules[2].matches(&Subject::new(&ctx)));
+        let elsewhere = Action::FileOpen {
+            path: "/work/app/.env".to_string(),
+            write: true,
+        };
+        let ctx = EvalContext::new(&session, &elsewhere, &process, &[]);
+        assert!(!set.rules[2].matches(&Subject::new(&ctx)));
+    }
+
+    /// An exception that names a fact of the exec boundary still holds, so
+    /// the gate costs the quiet rules nothing.
+    #[test]
+    fn an_exception_still_allows_on_a_fact_of_the_exec_boundary() {
+        let plain = Action::Exec {
+            exe: Some("/usr/bin/curl".to_string()),
+            program: "curl".to_string(),
+            argv: vec!["curl".to_string(), "https://example.com".to_string()],
+            cwd: None,
+            env: Default::default(),
+        };
+        assert_eq!(
+            verdict_of(GROUND_RULES, &plain).decision,
+            Decision::ApprovalRequired
+        );
+
+        let excepted = Action::Exec {
+            exe: Some("/usr/bin/curl".to_string()),
+            program: "curl".to_string(),
+            argv: vec!["curl".to_string(), "--version".to_string()],
+            cwd: None,
+            env: Default::default(),
+        };
+        assert_eq!(
+            verdict_of(GROUND_RULES, &excepted).decision,
+            Decision::Allow
+        );
+    }
+
+    /// A report rule keeps its note on a path read out of the memory of the
+    /// judged program, and the note decides nothing: the verdict is the
+    /// default allow of a quiet action, carried at the report's risk.
+    #[test]
+    fn a_report_rule_notes_a_path_read_from_the_judged_program_and_decides_nothing() {
+        let set = PolicySet::builtin().expect("the built-in pack loads");
+        let open = Action::FileOpen {
+            path: "/home/dev/.ssh/id_rsa".to_string(),
+            write: false,
+        };
+        let (session, process) = context(&open);
+        let ctx = EvalContext::new(&session, &open, &process, &[]);
+        let verdict = set.evaluate(&ctx);
+        assert_eq!(
+            verdict.decision,
+            Decision::Allow,
+            "a note can never make the decision stronger than the default"
+        );
+        assert!(
+            verdict
+                .matches
+                .iter()
+                .any(|m| m.rule_id == "filesystem.credentials.read"),
+            "the report must still fire: {:?}",
+            verdict.matches
+        );
+        assert!(verdict
+            .matches
+            .iter()
+            .all(|m| !m.decision.needs_intervention()));
+    }
+
+    /// The runtime guard behind the types: an allow-shaped position (the
+    /// `not` block of the deny rule, which quiets the rule when it matches)
+    /// consults the ground fact, and a fact whose marking was flipped fires
+    /// the guard instead of deciding.
+    #[test]
+    #[should_panic(expected = "an allow consumed the path")]
+    fn the_guard_fires_when_an_allow_consumes_a_flipped_marking() {
+        let set = PolicySet::from_str(RULES, "test").expect("the rule file loads");
+        let (session, process) = context(&Action::Exec {
+            exe: None,
+            program: "sh".to_string(),
+            argv: vec!["sh".to_string()],
+            cwd: None,
+            env: Default::default(),
+        });
+        let action = Action::FileOpen {
+            path: "/work/f_a.txt".to_string(),
+            write: true,
+        };
+        let ctx = EvalContext::new(&session, &action, &process, &[]);
+        let mut subject = Subject::new(&ctx);
+        // The mutation: the advisory path dressed as ground. The type says
+        // ground, the origin tag says advisory, and the allow path checks
+        // the tag.
+        let forged = AdvisoryPath::new("/work/f_a.txt").forged_as_ground();
+        subject.path = Some(PathFact::Ground(forged));
+        let rule = &set.rules[0];
+        rule.matches(&subject);
+    }
+
+    /// The race mutation harness.
+    ///
+    /// The pairs are the shape of the measured race
+    /// (`research/spikes/seccomp-unotify/src/toctou_open.c`): thread A opens
+    /// one shared path buffer, thread B rewrites `f_a.txt` and `f_b.txt`
+    /// into it, and the truth is what `readlink("/proc/self/fd/N")` says the
+    /// kernel opened. Every round flips the marking of the read path to
+    /// ground — the drift the invariant exists to catch — and one of the two
+    /// catchers must take every mutated allow: the guard fires when the
+    /// allow-shaped position (the `not` block of the deny rule) consults the
+    /// forged fact, and the dead exception of the ask rule never consults
+    /// any path at all, so the raced read can never quiet either rule. The
+    /// honest marking always leaves the refusal standing.
+    ///
+    /// The sequence is a fixed xorshift, not a random source: the engine
+    /// keeps its determinism rule, and the harness replays the same 1000
+    /// rounds on every run.
+    #[test]
+    fn the_invariant_catches_every_flipped_marking_of_the_race() {
+        let set = PolicySet::from_str(RULES, "test").expect("the rule file loads");
+        let rule = &set.rules[0];
+        let asking = &set.rules[1];
+        let (session, process) = context(&Action::Exec {
+            exe: None,
+            program: "sh".to_string(),
+            argv: vec!["sh".to_string()],
+            cwd: None,
+            env: Default::default(),
+        });
+
+        let mut seed: u64 = 0x0AF1_2EED_4760_0001;
+        let mut caught = 0;
+        let mut held = 0;
+        for _ in 0..1000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let read = if seed & 1 == 0 {
+                "/work/f_a.txt"
+            } else {
+                "/work/f_b.txt"
+            };
+            let action = Action::FileOpen {
+                path: read.to_string(),
+                write: true,
+            };
+            let ctx = EvalContext::new(&session, &action, &process, &[]);
+
+            // The honest marking: the refusal holds, whichever side the race
+            // picked, because the `not` block of the deny cannot see an
+            // advisory path.
+            let subject = Subject::new(&ctx);
+            assert!(
+                rule.matches(&subject),
+                "the deny must hold on the honest marking of `{read}`"
+            );
+            held += 1;
+
+            // The flipped marking: the guard must catch the allow that the
+            // `not` block would make.
+            let mut mutated = Subject::new(&ctx);
+            let forged = AdvisoryPath::new(read).forged_as_ground();
+            mutated.path = Some(PathFact::Ground(forged));
+            let fired =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rule.matches(&mutated)));
+            assert!(
+                fired.is_err(),
+                "the guard must catch the flipped marking of `{read}`"
+            );
+            caught += 1;
+
+            // The same race under the ask rule, whose exception names a
+            // path: the exception is dead for the honest marking and stays
+            // dead for the flipped one, so the raced read can never quiet
+            // the rule through it — the structural catcher.
+            let etc = if seed & 2 == 0 {
+                "/etc/static/manifest"
+            } else {
+                "/etc/passwd"
+            };
+            let action = Action::FileOpen {
+                path: etc.to_string(),
+                write: true,
+            };
+            let ctx = EvalContext::new(&session, &action, &process, &[]);
+            assert!(
+                asking.matches(&Subject::new(&ctx)),
+                "the ask must stand on the honest marking of `{etc}`: the exception is dead"
+            );
+            let mut mutated = Subject::new(&ctx);
+            let forged = AdvisoryPath::new(etc).forged_as_ground();
+            mutated.path = Some(PathFact::Ground(forged));
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    asking.matches(&mutated)
+                ))
+                .is_ok(),
+                "the dead exception must hold the ask even for a fact that claims to be ground: `{etc}`"
+            );
+        }
+        assert_eq!(caught, 1000, "every flipped allow was caught");
+        assert_eq!(held, 1000, "every honest refusal stood");
+        println!("race mutation harness: {caught} of 1000 flipped markings caught by the guard, {held} of 1000 honest refusals held");
+    }
 }

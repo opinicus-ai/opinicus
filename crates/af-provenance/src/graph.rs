@@ -146,6 +146,7 @@ impl ProcessGraph {
             EventKind::FileOpen { .. }
             | EventKind::NetworkConnect { .. }
             | EventKind::SignalSend { .. }
+            | EventKind::IoUring { .. }
             | EventKind::Tamper { .. }
             | EventKind::Discrepancy { .. }
             | EventKind::FileRead { .. }
@@ -744,6 +745,7 @@ fn empty_session(session_id: SessionId) -> SessionMeta {
         detection: None,
         monitor_pid: 0,
         sensor: None,
+        trace: None,
     }
 }
 

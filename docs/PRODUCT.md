@@ -74,16 +74,22 @@ Not a missed attack. **Too many questions.**
 A user who is asked too often switches the protection off. Then the protection
 is zero, and the missed attack does not matter any more.
 
-So the rule pack is deliberately unbalanced:
+So the rule pack is deliberately unbalanced — 161 rules, counted with
+`agent-firewall policy list --json` and classified by
+`research/spikes/landlock/tests/count-rules.py` (the io_uring report of
+[af-12] is the newest):
 
 | Behaviour | Rules |
 | --- | --- |
-| Stop the action and ask, or block it | 70 |
-| Report only, and stay quiet | 77 |
+| Stop the action and ask, or block it | 77 |
+| Report only, and stay quiet | 84 |
 
 Six of the questions are not asked at all any more: the Landlock kernel
 floor answers them in the kernel, before the program starts, with no
-supervisor in the loop and at a measured cost of 1.0×. Quiet by
+supervisor in the loop and at a measured cost of 0.98×–1.07× on the bench
+workloads — no cost within the noise of the measurement
+(`research/spikes/landlock/FINDINGS.md`; `research/bench/floor.sh` measures
+the product with the floor on and off and shows the same). Quiet by
 construction is the cheapest quiet there is.
 
 Only an operation that destroys data or infrastructure with no simple way back

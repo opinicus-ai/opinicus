@@ -30,8 +30,10 @@ pub use identity::{
     IdentifiedAgent, SessionDetach, TAG_THRESHOLD,
 };
 pub use memory::{MarkScope, MemoryEffect, SessionMemory};
-pub use process::{Action, DiscrepancyKind, InputSource, ProcessInfo, ProcessKey, TamperKind};
-pub use session::{AgentKind, AgentMeta, SensorMeta, SessionId, SessionMeta};
+pub use process::{
+    Action, DiscrepancyKind, InputSource, IoUringCall, ProcessInfo, ProcessKey, TamperKind,
+};
+pub use session::{AgentKind, AgentMeta, EvidenceKind, SensorMeta, SessionId, SessionMeta};
 pub use traits::{
     ApprovalOutcome, ApprovalRequest, Approver, EvalContext, EventSink, PolicyEngine,
     ProvenanceView,

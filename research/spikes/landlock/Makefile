@@ -18,7 +18,8 @@ PROGS = $(BIN)/afw-landlock \
         $(BIN)/fs-probe \
         $(BIN)/escape-test \
         $(BIN)/tcp-listener \
-        $(BIN)/rule-specificity
+        $(BIN)/rule-specificity \
+        $(BIN)/tmp-scope
 
 all: $(PROGS)
 
@@ -41,6 +42,9 @@ $(BIN)/tcp-listener: src/tcp_listener.c | $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 $(BIN)/rule-specificity: src/rule_specificity.c src/landlock_common.h | $(BIN)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+$(BIN)/tmp-scope: src/tmp_scope.c src/landlock_common.h | $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 probe: $(BIN)/probe-abi

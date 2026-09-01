@@ -39,8 +39,11 @@ pub fn supported_actions(filter: SyscallFilter) -> Vec<&'static str> {
         kinds.push("file_open");
         kinds.push("network_connect");
         // The filter holds a signal only when its target is the monitor
-        // itself, so the kind exists exactly when the filter does.
+        // itself, so the kind exists exactly when the filter does. The two
+        // io_uring calls are held in every mode that installs the filter,
+        // so the ring road reaches the engine exactly when the filter does.
         kinds.push("signal_send");
+        kinds.push("io_uring");
     }
     kinds
 }

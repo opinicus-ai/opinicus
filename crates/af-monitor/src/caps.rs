@@ -19,7 +19,7 @@ use nix::unistd::Pid as NixPid;
 
 use af_core::MonitorCapability;
 
-use crate::tracer::TRACE_OPTIONS;
+use crate::tracer::{close_beyond_stdio, TRACE_OPTIONS};
 use crate::{seccomp, SyscallFilter};
 
 /// How long the probe waits for its own test process.
@@ -101,6 +101,8 @@ pub fn capabilities(filter: SyscallFilter) -> Vec<MonitorCapability> {
 
     caps.push(probe_kernel_floor());
 
+    caps.push(probe_uring_host());
+
     caps.push(probe_unprivileged());
     caps
 }
@@ -132,7 +134,7 @@ fn probe_syscall_filter(filter: SyscallFilter) -> Vec<MonitorCapability> {
     }
 
     let file_detail = if filter.observes_read_opens() {
-        "every open of a 64-bit program reaches the firewall, a read included; a rule about the path of a read can fire"
+        "every open that a 64-bit program asks for with a call of its own reaches the firewall, a read included; a rule about the path of a read can fire"
     } else {
         "only an open that asks to change the file reaches the firewall; a rule that needs the path of a read stays silent, use `--syscall-filter all-opens` for it"
     };
@@ -140,16 +142,58 @@ fn probe_syscall_filter(filter: SyscallFilter) -> Vec<MonitorCapability> {
         available_with(
             "syscall_filter",
             &format!(
-                "a seccomp filter in mode {} holds the calls that a rule can judge; it reads the call table of a 64-bit program, and it lets a 32-bit program through with a warning",
+                "a seccomp filter in mode {} holds the calls that a rule can judge; it reads the call table of a 64-bit program, it lets a 32-bit program through with a warning, and it holds io_uring_setup and io_uring_enter in every installed mode, so no ring operation crosses the filter unseen",
                 filter.label()
             ),
         ),
         available_with("file_open_events", file_detail),
         available_with(
             "network_events",
-            "every outgoing connection of a 64-bit program to an IPv4 or an IPv6 address reaches the firewall; a local socket is passed by",
+            "the outgoing connect of a 64-bit program to an IPv4 or an IPv6 address reaches the firewall when the program makes the call itself; a local socket is passed by",
         ),
     ]
+}
+
+/// Reads the host's io_uring posture and reports it as the host-requirement
+/// fact it is.
+///
+/// The filter holds the two ring calls in every installed mode and the
+/// built-in rule reports them, but the road itself stays open: a host that
+/// must close it at kernel grade sets the sysctl, and the user has to know
+/// which state this machine is in (`docs/DECISIONS.md`, 2026-09-01).
+fn probe_uring_host() -> MonitorCapability {
+    let read = fs::read_to_string("/proc/sys/kernel/io_uring_disabled")
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok());
+    match read {
+        Some(0) => available_with(
+            "io_uring_host",
+            "kernel.io_uring_disabled is 0: the ring road is open. The firewall holds \
+             io_uring_setup and io_uring_enter at the call boundary and reports every \
+             call; refusing the road itself is a host requirement — set the sysctl to 2, \
+             or load a local rule file that replaces tamper.bypass.io-uring with a deny",
+        ),
+        Some(1) => available_with(
+            "io_uring_host",
+            "kernel.io_uring_disabled is 1: this host refuses new io_uring instances for \
+             processes without a ring already open, which closes the road at kernel grade",
+        ),
+        Some(2) => available_with(
+            "io_uring_host",
+            "kernel.io_uring_disabled is 2: this host refuses io_uring for every process \
+             without CAP_SYS_ADMIN — the road is closed at kernel grade",
+        ),
+        other => MonitorCapability::missing(
+            "io_uring_host",
+            format!(
+                "cannot read the io_uring posture of this kernel ({}); the firewall holds \
+                 and reports the ring calls anyway",
+                other
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unreadable".into())
+            ),
+        ),
+    }
 }
 
 /// Reports whether this machine can carry the kernel floor.
@@ -221,9 +265,16 @@ fn probe_launch() -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // SAFETY: the closure only calls ptrace, which is safe in a forked child.
+    // SAFETY: the closure only calls ptrace and marks flags of descriptors
+    // of the forked child, which are safe in a forked child. The probe gets
+    // the same launch hygiene as a session: nothing beyond stdio survives
+    // its `execve`.
     unsafe {
-        command.pre_exec(|| ptrace::traceme().map_err(std::io::Error::from));
+        command.pre_exec(|| {
+            ptrace::traceme().map_err(std::io::Error::from)?;
+            close_beyond_stdio();
+            Ok(())
+        });
     }
     let child = command
         .spawn()
@@ -233,8 +284,42 @@ fn probe_launch() -> Result<(), String> {
     let result = probe_steps(pid);
 
     let _ = kill(pid, Signal::SIGKILL);
-    let _ = wait_bounded(pid, PROBE_TIMEOUT);
+    reap_probe(pid);
     result
+}
+
+/// Walks the probe process to its final exit and reaps that exit.
+///
+/// The trace options carry `PTRACE_O_TRACEEXIT`, so a probe that reached its
+/// own end stops once more before it dies. Taking that stop without letting
+/// the process continue would leave it half-dead: the next monitor session
+/// of the same process — the test program — would reap its exit with
+/// `waitpid(-1)` and report a process that never belonged to it. The loop
+/// answers an exit stop with a continue and waits for the real exit, so no
+/// state of the probe outlives the probe.
+fn reap_probe(pid: NixPid) {
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::__WALL)) {
+            Ok(WaitStatus::StillAlive) => {}
+            Ok(WaitStatus::PtraceEvent(_, _, event))
+                if event == ptrace::Event::PTRACE_EVENT_EXIT as i32 =>
+            {
+                // The stop before the end. Only a continue lets the process
+                // die, and only the exit after it is the final status.
+                let _ = ptrace::cont(pid, None);
+            }
+            Ok(_) => return,
+            Err(Errno::EINTR) => {}
+            // No child left: something else reaped the exit already.
+            Err(Errno::ECHILD) => return,
+            Err(_) => return,
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        sleep(Duration::from_millis(1));
+    }
 }
 
 /// Runs the single steps of the probe on the test process.

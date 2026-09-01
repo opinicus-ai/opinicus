@@ -18,8 +18,9 @@
 //! kills there never runs the dangerous program.
 //!
 //! A small `seccomp` filter adds the second point. It runs in the kernel and
-//! holds a file open with write intent, and every outgoing connection, before
-//! the call happens. The monitor then sees what a program does **after** it
+//! holds the write-intent open and the outgoing `connect` of a program —
+//! the calls the program makes itself — before the call happens. The
+//! monitor then sees what a program does **after** it
 //! started, which the exec stop can never show. [`SyscallFilter`] chooses how
 //! wide that filter is, and `Off` gives exactly the behaviour of the versions
 //! before it existed.
@@ -101,14 +102,25 @@ pub const DEFAULT_MAX_INPUT_BYTES: usize = 64 * 1024;
 ///
 /// | Mode | What the monitor sees | Measured cost |
 /// | --- | --- | --- |
-/// | [`SyscallFilter::WriteOnly`] | an open that can change a file, and every connection | 1.16× to 1.33× |
-/// | [`SyscallFilter::AllOpens`] | every open and every connection | 1.33× to 1.92× |
+/// | [`SyscallFilter::WriteOnly`] | an open that can change a file, and every `connect` the program asks for itself | 1.16× to 1.33× |
+/// | [`SyscallFilter::AllOpens`] | every open and every `connect` the program asks for itself | 1.33× to 1.92× |
 /// | [`SyscallFilter::Off`] | nothing beyond a new program | no cost above the `ptrace` monitor |
 ///
+/// Every row means the calls the program makes itself. An operation
+/// submitted through an `io_uring` ring makes no per-operation call, so the
+/// filter holds the two ring calls themselves — `io_uring_setup` and
+/// `io_uring_enter` — in every mode that installs it, which closes the
+/// measured zero-events gap as visibility: every ring call reaches the
+/// engine, and the shipped rule reports it (the deny of a host that wants
+/// it is a local rule file; `docs/DECISIONS.md`, 2026-09-01). A descriptor
+/// the tree did not open itself needs no call at all and stays a named gap
+/// (`docs/THREAT-MODEL.md` §5).
+///
 /// The difference is not the mechanism, it is the number of times the
-/// supervisor has to wake up. A read-only open is 99.7% of the open traffic
-/// of a normal build, and the kernel drops all of it in `WriteOnly` because
-/// it can test the `flags` argument itself.
+/// supervisor has to wake up. On the measured W2 file workload — a
+/// synthetic harness workload, not a real build tree — 99.7% of the opens
+/// only read, and the kernel drops all of it in `WriteOnly` because it
+/// can test the `flags` argument itself.
 ///
 /// Every number above is measured **against the `ptrace` monitor**, and not
 /// against a session with no firewall. The monitor itself is the larger part

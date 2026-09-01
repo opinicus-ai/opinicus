@@ -258,7 +258,11 @@ fn is_secret_name(name: &str) -> bool {
 ///
 /// The monitor keeps a name only when the name is on the allow list. It
 /// replaces the value with [`REDACTED`] when the name looks like a secret,
-/// because a rule can still use the presence of the name.
+/// because a rule can still use the presence of the name. A value that
+/// survives both checks can still hold credentials in the userinfo of a
+/// URL — `DATABASE_URL` is on the list because a rule needs the host it
+/// names, and the name carries no secret marker — so the password of the
+/// userinfo is masked with [`mask_userinfo`] before the value is kept.
 pub fn keep_env(name: &str, value: &str, extra_allowlist: &[String]) -> Option<String> {
     let allowed =
         DEFAULT_ENV_ALLOWLIST.contains(&name) || extra_allowlist.iter().any(|entry| entry == name);
@@ -268,7 +272,60 @@ pub fn keep_env(name: &str, value: &str, extra_allowlist: &[String]) -> Option<S
     if is_secret_name(name) {
         return Some(REDACTED.to_string());
     }
-    Some(value.to_string())
+    Some(mask_userinfo(value))
+}
+
+/// Masks the password of URL userinfo in a kept environment value.
+///
+/// `DATABASE_URL` and `DOCKER_HOST` sit on the allow list without a secret
+/// marker, and their value can be a URL whose userinfo holds credentials:
+/// `postgres://app:hunter2@db.internal/app`. The monitor keeps the scheme,
+/// the user name and everything behind the `@` — rules match on the host
+/// and the database name, not on the password — and replaces only the
+/// password with [`REDACTED`]: `postgres://app:<redacted>@db.internal/app`.
+/// A value that is no URL, and a URL whose userinfo holds no password, stay
+/// as they are. This closes the pattern of [RESEARCH.md §4] for the names
+/// that carry no secret marker of their own.
+///
+/// [RESEARCH.md §4]: https://github.com/opinicus-ai/opinicus/blob/main/docs/RESEARCH.md
+pub fn mask_userinfo(value: &str) -> String {
+    let Some(scheme_end) = value.find("://") else {
+        return value.to_string();
+    };
+    let mut bytes = value[..scheme_end].bytes();
+    let scheme_ok = bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'-' || byte == b'.'
+        });
+    if !scheme_ok {
+        return value.to_string();
+    }
+    let authority_start = scheme_end + "://".len();
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|at| authority_start + at)
+        .unwrap_or(value.len());
+    let authority = &value[authority_start..authority_end];
+    // The userinfo ends at the last `@` of the authority. A password can
+    // itself hold an `@`; cutting at the last one masks the whole password
+    // and errs toward redaction.
+    let Some(userinfo_end) = authority.rfind('@') else {
+        return value.to_string();
+    };
+    let userinfo = &authority[..userinfo_end];
+    let Some(password_start) = userinfo.find(':').map(|at| at + 1) else {
+        return value.to_string();
+    };
+    if password_start == userinfo.len() {
+        return value.to_string();
+    }
+    let cut = authority_start + password_start;
+    format!(
+        "{}{}{}",
+        &value[..cut],
+        REDACTED,
+        &value[authority_start + userinfo_end..]
+    )
 }
 
 /// Reads the environment of a process and keeps only what a rule needs.

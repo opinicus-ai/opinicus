@@ -318,11 +318,14 @@ session, static binaries and all, fires nothing.
 Two pieces of this exist today in fail-closed form: `PTRACE_O_EXITKILL` kills
 the tree if the monitor dies, and a traced call with no monitor returns
 `ENOSYS`, so a process breaks rather than going unobserved
-([ARCHITECTURE.md](ARCHITECTURE.md) §4). What does not exist yet is the
-sensing side: firewall-owned session identity (the requirement B.5 of
+([ARCHITECTURE.md](ARCHITECTURE.md) §4). The sensing side shipped on
+2026-08-31 with M4: firewall-owned session identity (the requirement B.5 of
 [DETECTION-REQUIREMENTS.md](DETECTION-REQUIREMENTS.md)), liveness and
-teardown observation (B.6), and the quarantine flow as an interactive state.
-The `evade` axis of `research/threats/` already catalogs the attacker side.
+teardown observation (B.6), and the quarantine flow as an interactive
+state — the monitor suspends the tree, prints the evidence chain and takes
+one ruling, exercised end to end by e2e T12
+([ARCHITECTURE.md](ARCHITECTURE.md) §3d). The `evade` axis of
+`research/threats/` already catalogs the attacker side.
 
 ---
 

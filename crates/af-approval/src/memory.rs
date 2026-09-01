@@ -132,6 +132,7 @@ fn arguments_of(action: &Action) -> String {
         Action::Input { source, data } => format!("{source:?} {data}"),
         Action::SignalSend { target, signal } => format!("{target} {signal}"),
         Action::Tamper { kind, detail } => format!("{kind} {detail}"),
+        Action::IoUring { call } => call.label().to_string(),
         Action::Discrepancy { kind, detail } => format!("{kind} {detail}"),
     }
 }

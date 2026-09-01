@@ -37,7 +37,9 @@ without a trigger makes no sample.
 The sample file is pretty-printed JSON, one file per sample, named
 `sample-<session>-<number>.json` in a local **outbox** directory. A text
 editor is a complete inspector; `agent-firewall telemetry inspect` adds a
-summary line.
+summary line. Both the sample files and the consent file below are created
+with the permission mode `0600` (`af-telemetry` `write_private`), because
+they name the machine and its sessions even after redaction.
 
 ## 2. The consent flow
 
@@ -163,7 +165,11 @@ backend of DIRECTION.md §8 **does not exist**: not a server, not a client,
 not a stub, not an upload queue. The dependency tree says so
 (`cargo tree -p af-telemetry`): `af-core`, `serde`, `serde_json` — no
 socket library among them, and no code in the workspace opens a network
-connection for telemetry.
+connection for telemetry. The tree is enforced, not just described:
+`crates/af-telemetry/tests/dependency_contract.rs` pins the direct set and
+the shipped closure and fails `cargo test -p af-telemetry` on any change,
+and the root `deny.toml` bans the network-capable crates workspace-wide
+([RELEASE.md](RELEASE.md)).
 
 A sample's complete life is local:
 

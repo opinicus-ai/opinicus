@@ -850,6 +850,8 @@ mod tests {
         meta.sensor = Some(af_core::SensorMeta {
             preload: preload.to_string(),
             instances: vec![10],
+            trace: None,
+            registration: None,
         });
         product(
             0,

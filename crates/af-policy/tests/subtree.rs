@@ -75,6 +75,7 @@ fn session(root_pid: Pid) -> SessionMeta {
         monitor_pid: 0,
         sensor: None,
         baseline: BTreeMap::new(),
+        trace: None,
     }
 }
 
