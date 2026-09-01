@@ -1,0 +1,12 @@
+429: {"code":"1302","message":"Rate limit reached for requests"}
+Retro written to `/home/vfeenstr/devel/lab/opinicus-56sol/docs/retros/i-have-an-update-on.md`.
+
+**Top three findings**
+
+1. **Placeholder-args workflow launch** (9326440c/5bb7f76e): the skill's args contract mandates inlining the full LEDGER.md into `args`, but that arg is dead code in the script — the agent placeholder'd it, had to kill the run, and the user got a scary failure notification. The contract, not the agent, is the root cause.
+2. **rohrpost interface reverse-engineered (12 calls) while the full SKILL.md was visible in a listing the agent itself requested** (result of 9a024c72) — it read the worthless venv shim `/home/vfeenstr/.local/bin/rp` instead; an affordance existed and was pointed at but unused.
+3. **Fat-prompt synthesis failure** (aa266fca): the ad-hoc HF deep-dive inlined researcher findings into a prompt and died with "invalid agent request" — the rake the threat-research script's own comment warns about; workflow-authoring guidance needs to live in the skill, not in one script's comments.
+
+**Proposal counts**: 3 skill-update, 2 rule-update (AGENTS.md), 1 doc-update, 1 rule-update (AGENTS.md, limits-list propagation) — total 7, each with before/after text in the retro.
+
+**Undecided without you**: whether `glm-5.3` stays in your global `~/.pi/agent/models.json` (backup exists), and whether the rohrpost skill should be skm-installed globally — which would make the AGENTS.md pointer a fallback rather than the primary fix.
