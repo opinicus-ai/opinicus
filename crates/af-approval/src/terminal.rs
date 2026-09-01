@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::console::{Answer, Console, TtyConsole};
 use crate::memory::SessionMemory;
 use crate::mode::ApprovalMode;
-use crate::prompt::render_prompt;
+use crate::prompt::{countdown_line, render_prompt};
 
 /// Time that the approver waits for an answer when nobody sets a limit.
 ///
@@ -181,10 +181,19 @@ impl TerminalApprover {
     }
 
     /// Asks the question on the terminal and reads the answer.
+    ///
+    /// The deadline threads through every render of the prompt, so the user
+    /// sees how much answer time remains — in the box, at the first question,
+    /// and again on every re-ask after a word the firewall does not know.
+    /// The number is progress, never power: the read itself enforces the
+    /// deadline, a timeout still denies, and no line this function writes can
+    /// change an outcome (`Answer::TimedOut` → deny is untouched by the
+    /// rendering).
     fn ask(&mut self, req: &ApprovalRequest<'_>) -> ApprovalOutcome {
-        let prompt = render_prompt(req, self.color);
         let timeout = self.timeout;
         let deadline = timeout.map(|limit| Instant::now() + limit);
+        let left = || deadline.map(|end| end.saturating_duration_since(Instant::now()));
+        let prompt = render_prompt(req, self.color, left());
 
         let console = match self.console() {
             Some(console) => console,
@@ -199,16 +208,17 @@ impl TerminalApprover {
         console.write_text(&format!("\n{prompt}answer [a/s/d/t]: "));
 
         for attempt in 1..=MAX_ANSWERS {
-            let left = deadline.map(|end| end.saturating_duration_since(Instant::now()));
-            match console.read_line(left) {
+            match console.read_line(left()) {
                 Answer::Line(text) => match parse_answer(&text) {
                     Some(outcome) => {
                         console.write_text(&format!("agent-firewall: {}\n", outcome.label()));
                         return outcome;
                     }
                     None if attempt < MAX_ANSWERS => {
-                        console
-                            .write_text("agent-firewall: answer a, s, d or t.\nanswer [a/s/d/t]: ");
+                        console.write_text(&format!(
+                            "agent-firewall: answer a, s, d or t.{}\nanswer [a/s/d/t]: ",
+                            progress(left())
+                        ));
                     }
                     None => {
                         console.write_text(
@@ -294,6 +304,18 @@ fn describe(req: &ApprovalRequest<'_>) -> String {
         .unwrap_or("(no rule matched)");
     let summary = display::sanitize(&display::truncate(&req.action.summary(), MAX_SUMMARY));
     format!("rule {rule} — {summary}")
+}
+
+/// The countdown half-line of a re-ask, empty when no deadline exists.
+///
+/// The re-ask already says what the firewall accepts; this adds the answer
+/// time that remains at this moment, so the countdown moves while the user
+/// sits on a bad answer.
+fn progress(left: Option<Duration>) -> String {
+    match left {
+        Some(left) => format!(" {}", countdown_line(left)),
+        None => String::new(),
+    }
 }
 
 /// Writes one line to standard error.
@@ -499,6 +521,85 @@ mod tests {
         assert!(
             watch.text().contains("no answer after 30 seconds"),
             "{}",
+            watch.text()
+        );
+    }
+
+    /// The countdown is rendering, and rendering must never turn a timeout
+    /// into an allow: the deny of the deadline is the deny of the approver,
+    /// whatever the lines around it say.
+    #[test]
+    fn the_countdown_renders_and_the_timeout_still_denies() {
+        let fixture = Fixture::psql("DROP DATABASE prod");
+        let console = FakeConsole::new(vec![Answer::TimedOut]);
+        let watch = console.watch();
+        let mut approver = TerminalApprover::new(ApprovalMode::Ask)
+            .with_timeout(Some(Duration::from_secs(30)))
+            .with_color(false)
+            .with_console(console);
+
+        assert_eq!(approver.request(&fixture.request()), ApprovalOutcome::Deny);
+        let text = watch.text();
+        // The exact second can be 30 or 29: an instant passes between the
+        // deadline and the render. The claim under test is that the prompt
+        // names the answer time at all, and that the deadline denies.
+        let countdown = text
+            .lines()
+            .find(|line| line.contains("s left to answer, then the firewall denies"))
+            .unwrap_or_else(|| panic!("the prompt must say how much answer time remains:\n{text}"));
+        assert!(
+            countdown.contains("30s left") || countdown.contains("29s left"),
+            "the countdown names the seconds of the limit:\n{text}"
+        );
+        assert!(
+            text.contains("no answer after 30 seconds; deny"),
+            "the deadline itself is unchanged by the rendering:\n{text}"
+        );
+    }
+
+    /// The countdown moves with the session: a re-ask renders the answer
+    /// time of that moment, not of the first question.
+    #[test]
+    fn a_re_ask_refreshes_the_countdown() {
+        let fixture = Fixture::psql("DROP DATABASE prod");
+        let console =
+            FakeConsole::new(vec![Answer::Line("maybe".into()), Answer::Line("d".into())]);
+        let watch = console.watch();
+        let mut approver = TerminalApprover::new(ApprovalMode::Ask)
+            .with_timeout(Some(Duration::from_secs(120)))
+            .with_color(false)
+            .with_console(console);
+
+        assert_eq!(approver.request(&fixture.request()), ApprovalOutcome::Deny);
+        let text = watch.text();
+        let first = text
+            .find("s left to answer")
+            .expect("the first question counts down");
+        let again = text
+            .rfind("s left to answer")
+            .expect("the re-ask counts down again");
+        assert!(
+            again > first,
+            "the countdown must render again after a bad answer:\n{text}"
+        );
+        assert!(text.contains("answer a, s, d or t"), "{text}");
+    }
+
+    /// A session that waits without a limit must not claim one.
+    #[test]
+    fn no_timeout_means_no_countdown() {
+        let fixture = Fixture::psql("DROP DATABASE prod");
+        let console = FakeConsole::new(vec![Answer::Line("d".into())]);
+        let watch = console.watch();
+        let mut approver = TerminalApprover::new(ApprovalMode::Ask)
+            .with_timeout(None)
+            .with_color(false)
+            .with_console(console);
+
+        assert_eq!(approver.request(&fixture.request()), ApprovalOutcome::Deny);
+        assert!(
+            !watch.text().contains("left to answer"),
+            "a question without a deadline names no time:\n{}",
             watch.text()
         );
     }

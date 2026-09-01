@@ -6,6 +6,9 @@
 # ... but the rohrpost ticket store is git-native and tracked.
 !.rohrpost/log.jsonl
 !.rohrpost/tickets.jsonl
+# ... and a committed test fixture holds no user data, only synthetic
+# events with synthetic secrets, so the report path can be tested.
+!crates/af-cli/tests/fixtures/*.jsonl
 
 # Working directory of the demonstration and of the end-to-end test.
 /tmp

@@ -46,7 +46,7 @@ impl ScriptedApprover {
 
 impl Approver for ScriptedApprover {
     fn request(&mut self, req: &ApprovalRequest<'_>) -> ApprovalOutcome {
-        self.seen.push(render_prompt(req, false));
+        self.seen.push(render_prompt(req, false, None));
         self.answers.pop_front().unwrap_or(ApprovalOutcome::Deny)
     }
 }

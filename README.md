@@ -122,7 +122,13 @@ $ agent-firewall run --trace session.jsonl -- claude
 
 Every descendant process of the agent stays part of the session. The
 firewall writes its own text to standard error, so the output of the agent
-stays clean on standard output.
+stays clean on standard output. Every run also leaves a durable plain-text
+session log — `${XDG_STATE_HOME:-$HOME/.local/state}/agent-firewall/
+sessions/<session id>.log`, mode `0600` — with one line per
+support-relevant event; the CLI prints the path when the session ends, and
+a session that ends with an intervention prints a plain-text *what ran,
+what was stopped, what to do now* block. [INCIDENTS.md](INCIDENTS.md) is
+the guide for reading all of it.
 
 | Command | Function |
 | --- | --- |
@@ -137,6 +143,7 @@ stays clean on standard output.
 | `telemetry sample <TRACE>` | Builds redacted samples of a trace into the outbox. |
 | `telemetry inspect <SAMPLE>` | Prints a sample file. |
 | `telemetry destroy [--all]` | Deletes samples from the outbox. |
+| `report <TRACE>` | Writes a redacted false-positive report bundle (see [INCIDENTS.md](INCIDENTS.md)). |
 | `doctor` | Reports what the monitor can observe on this machine. |
 
 Options of `run`:
@@ -147,6 +154,8 @@ Options of `run`:
 | `--no-builtin-policies` | Does not load the rule pack inside the binary. |
 | `--trace <PATH>` | Writes the normalized events as JSON Lines. |
 | `--approve <MODE>` | `ask`, `allow` or `deny`. The default is `ask` on a terminal and `deny` without one. |
+| `--ci` | Runs a deterministic headless session (see below). Cannot be combined with `--approve`. |
+| `--summary <PATH>` | Writes a machine-readable JSON session summary when the session ends. |
 | `--approval-timeout <S>` | Denies when nobody answers in this many seconds. |
 | `--syscall-filter <MODE>` | `write-only` (the default), `all-opens` or `off`. See below. |
 | `--print-tree` | Prints the process tree when the session ends. |
@@ -210,6 +219,11 @@ Exit codes:
 | 3 | The firewall stopped the session. |
 | 2 | Usage error. |
 
+When a session exits `3`, [INCIDENTS.md](INCIDENTS.md) answers the
+questions that follow — *was anything executed?* (precisely, from the
+exec-stop guarantee), where the evidence is, how to replay it, and how to
+report a false positive.
+
 ## Run the demonstration and the test
 
 ```console
@@ -246,6 +260,43 @@ states the whole contract — the guarantees, the advisory layers, the
 measured bypasses and the phrasing rules that keep the claims honest —
 and [SECURITY.md](SECURITY.md) is the disclosure and false-positive or
 false-negative report path.
+
+### Headless CI mode and exit codes
+
+A job that runs an agent with nobody watching needs the questions gone,
+not answered late at night:
+
+```console
+$ agent-firewall run --ci --summary summary.json --trace session.jsonl -- claude -p "fix the flaky test"
+$ echo $?
+3
+```
+
+`--ci` is the CI shape of `--approve deny`: every decision a rule leaves
+to a person resolves to **deny**, deterministically — no terminal is
+opened and no prompt is written, also not when one is attached — and the
+two flags cannot be combined, so a job's posture is one line that no
+copy-pasted `--approve` can weaken. The alpha banner stays, because a CI
+guard is still alpha.
+
+The exit code is the contract a pipeline branches on (`run --help` prints
+the same table):
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The session ended, and the firewall stopped nothing. |
+| `3` | The firewall stopped an action (a rule denial, a refusal or a ruling); the session did not run to its end. |
+| `2` | The firewall could not run the session at all (an unknown option, a policy that cannot load, a monitor failure). |
+| `N` | The program of the session exited with code `N`, when the session ran to its end (for example `7` after `exit 7`). |
+| `128+N` | The program of the session died of signal `N`. |
+
+`--summary <PATH>` writes the machine-readable record of the session when
+it ends: every rule decision with its rule id, its evidence line and its
+provenance chain, the counts of denied, reported and quarantined actions
+and of the questions an interactive session would have asked, and the exit
+code. The decisions come from the session's own `policy_decision` events,
+so `agent-firewall replay` of the trace confirms them — every deny maps to
+a rule id, and no summary claims more than the record proves.
 
 ### Telemetry: off, granular, local
 
@@ -372,9 +423,9 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 | `crates/af-provenance` | The provenance graph. It answers which process started which process. |
 | `crates/af-policy` | The deterministic policy engine, the rule format and the rule pack inside the binary. |
 | `crates/af-approval` | The approval layer. It asks the user on the terminal and remembers a session decision. |
-| `crates/af-recorder` | The trace writer and the trace reader for JSON Lines. |
+| `crates/af-recorder` | The trace writer and reader for JSON Lines, and the durable plain-text session log. |
 | `crates/af-correlate` | The correlation engine: expected view versus observed view. |
-| `crates/af-telemetry` | Redaction-first packaging of optional telemetry samples: consent, scopes, the local outbox. No network code. |
+| `crates/af-telemetry` | Redaction-first packaging of optional telemetry samples: consent, scopes, the local outbox, the false-positive report. No network code. |
 | `crates/af-cli` | The `agent-firewall` command. It connects all layers. |
 | `policies/` | Policy files in the readable source format. |
 | `research/` | The research areas: mechanism spikes, the shared benchmark, and the threat catalogue with its ledger. Read [research/README.md](research/README.md). |
@@ -391,6 +442,10 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
   the alpha: what it guarantees, what is advisory, what is bypassable and
   what is unknown, every claim with its source. [SECURITY.md](SECURITY.md)
   is the disclosure and report path that goes with it.
+* [INCIDENTS.md](INCIDENTS.md) — the operational guide for a stopped
+  session: the exit-code table, the precise answer to *exit 3 — was
+  anything executed?*, how to read the session log, how to replay the
+  evidence, and how to report a false positive.
 * [PROJECT.md](PROJECT.md) — the idea, the principles and the plan.
 * [docs/DECISIONS.md](docs/DECISIONS.md) — the dated decision log; the
   newest entry wins.

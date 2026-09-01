@@ -5,6 +5,8 @@
 //! the action, what the action does, which rule matched, and what the user
 //! can answer.
 
+use std::time::Duration;
+
 use af_core::{display, ApprovalRequest, RiskLevel};
 
 /// Left part of the top border.
@@ -45,10 +47,21 @@ const RESET: &str = "\u{1b}[0m";
 /// `color` switches the colour of the risk level on. The function writes no
 /// colour when `color` is false, so a log file stays clean.
 ///
+/// `countdown` is the answer time that remains at the moment of the render.
+/// The prompt then says how long the user has, and that the firewall denies
+/// after it ([`countdown_line`]). The number is a fact of the render, not a
+/// clock: the approver re-renders the line each time it asks again, and the
+/// deadline itself is enforced by the read, where a timeout still denies.
+/// Rendering can never turn a timeout into an allow.
+///
 /// The function removes every control character from the text of the
 /// process. A hostile program can write escape codes into its command line,
 /// and those codes must never reach the terminal of the user.
-pub fn render_prompt(req: &ApprovalRequest<'_>, color: bool) -> String {
+pub fn render_prompt(
+    req: &ApprovalRequest<'_>,
+    color: bool,
+    countdown: Option<Duration>,
+) -> String {
     let risk = req.verdict.risk;
     let mut lines: Vec<Line> = Vec::new();
 
@@ -68,6 +81,9 @@ pub fn render_prompt(req: &ApprovalRequest<'_>, color: bool) -> String {
         None,
         color,
     );
+    if let Some(left) = countdown {
+        add_line(&mut lines, countdown_line(left), None, color);
+    }
 
     let explanation = display::explain(req.ancestry, req.process, req.action, req.verdict);
     let mut after_risk_label = false;
@@ -156,6 +172,17 @@ fn wrap(text: &str) -> Vec<String> {
     parts
 }
 
+/// Returns the line that says how much answer time remains.
+///
+/// A fraction of a second still names the second it belongs to, so the line
+/// never says `0s` while an answer could still arrive within the limit. The
+/// line names the consequence, because the consequence is the point: no
+/// answer denies.
+pub fn countdown_line(left: Duration) -> String {
+    let seconds = left.as_secs().max(1);
+    format!("{seconds}s left to answer, then the firewall denies")
+}
+
 /// Returns the title of the box, for example `approval required`.
 fn title_of(risk: RiskLevel) -> String {
     risk.label().replace('-', " ")
@@ -223,7 +250,7 @@ mod tests {
     #[test]
     fn the_prompt_holds_the_chain_the_rule_the_operation_and_the_answers() {
         let fixture = Fixture::psql("DROP DATABASE customer_prod");
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
 
         assert!(
             text.contains("┌─ Agent Firewall ─ approval required"),
@@ -250,7 +277,7 @@ mod tests {
     #[test]
     fn the_prompt_holds_the_session_and_the_working_directory() {
         let fixture = Fixture::psql("DROP DATABASE customer_prod");
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
         assert!(text.contains("session afw-test-session"), "{text}");
         assert!(text.contains("Claude Code"), "{text}");
         assert!(text.contains("cwd /home/dev/project"), "{text}");
@@ -260,7 +287,7 @@ mod tests {
     fn the_prompt_removes_terminal_escape_codes() {
         let hostile = "DROP DATABASE prod\u{1b}[2J\u{1b}[1;31mSAFE\u{7}";
         let fixture = Fixture::psql(hostile);
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
 
         assert!(!text.contains('\u{1b}'), "{text}");
         assert!(!text.contains('\u{7}'), "{text}");
@@ -271,14 +298,14 @@ mod tests {
     fn a_hostile_working_directory_cannot_write_escape_codes() {
         let mut fixture = Fixture::psql("DROP DATABASE prod");
         fixture.process.cwd = Some("/home/dev/\u{1b}[2Jgone".to_string());
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
         assert!(!text.contains('\u{1b}'), "{text}");
     }
 
     #[test]
     fn colour_marks_the_risk_level() {
         let fixture = Fixture::psql("DROP DATABASE prod");
-        let text = render_prompt(&fixture.request(), true);
+        let text = render_prompt(&fixture.request(), true, None);
         assert!(
             text.contains(&format!("{RED}approval required{RESET}")),
             "{text}"
@@ -293,7 +320,7 @@ mod tests {
     fn a_suspicious_action_is_yellow() {
         let mut fixture = Fixture::psql("DROP DATABASE prod");
         fixture.set_risk(RiskLevel::Suspicious);
-        let text = render_prompt(&fixture.request(), true);
+        let text = render_prompt(&fixture.request(), true, None);
         assert!(
             text.contains(&format!("{YELLOW}suspicious{RESET}")),
             "{text}"
@@ -305,21 +332,21 @@ mod tests {
     fn a_low_risk_action_gets_no_colour() {
         let mut fixture = Fixture::psql("DROP DATABASE prod");
         fixture.set_risk(RiskLevel::Low);
-        let text = render_prompt(&fixture.request(), true);
+        let text = render_prompt(&fixture.request(), true, None);
         assert!(!text.contains('\u{1b}'), "{text}");
     }
 
     #[test]
     fn no_colour_means_no_escape_code() {
         let fixture = Fixture::psql("DROP DATABASE prod");
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
         assert!(!text.contains('\u{1b}'), "{text}");
     }
 
     #[test]
     fn every_line_of_the_box_has_a_border() {
         let fixture = Fixture::psql("DROP DATABASE customer_prod");
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with('┌'));
         assert!(lines[lines.len() - 1].starts_with('└'));
@@ -331,7 +358,7 @@ mod tests {
     #[test]
     fn the_borders_have_the_same_width() {
         let fixture = Fixture::psql("DROP DATABASE customer_prod");
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
         let lines: Vec<&str> = text.lines().collect();
         let first = lines[0].chars().count();
         let last = lines[lines.len() - 1].chars().count();
@@ -343,7 +370,7 @@ mod tests {
     fn a_long_command_line_goes_to_the_next_line() {
         let long = "DROP DATABASE ".to_string() + &"x".repeat(400);
         let fixture = Fixture::psql(&long);
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
         for line in text.lines() {
             assert!(
                 line.chars().count() <= MAX_CONTENT + 2,
@@ -357,7 +384,38 @@ mod tests {
     fn a_request_without_a_rule_still_gets_a_prompt() {
         let mut fixture = Fixture::psql("DROP DATABASE prod");
         fixture.verdict.matches.clear();
-        let text = render_prompt(&fixture.request(), false);
+        let text = render_prompt(&fixture.request(), false, None);
         assert!(text.contains("(no rule matched)"), "{text}");
+    }
+
+    #[test]
+    fn the_prompt_names_the_answer_time_when_a_deadline_exists() {
+        let fixture = Fixture::psql("DROP DATABASE prod");
+        let text = render_prompt(&fixture.request(), false, Some(Duration::from_secs(118)));
+        assert!(
+            text.contains("118s left to answer, then the firewall denies"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_countdown_never_names_zero_seconds_while_an_answer_can_arrive() {
+        assert_eq!(
+            countdown_line(Duration::from_secs(30)),
+            "30s left to answer, then the firewall denies"
+        );
+        // A fraction of a second still belongs to its second, so the line
+        // never claims that no time is left while the read still waits.
+        assert_eq!(
+            countdown_line(Duration::from_millis(200)),
+            "1s left to answer, then the firewall denies"
+        );
+    }
+
+    #[test]
+    fn a_prompt_without_a_deadline_names_no_time() {
+        let fixture = Fixture::psql("DROP DATABASE prod");
+        let text = render_prompt(&fixture.request(), false, None);
+        assert!(!text.contains("left to answer"), "{text}");
     }
 }

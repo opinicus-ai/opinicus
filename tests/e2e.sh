@@ -3,8 +3,9 @@
 # End-to-end test of the Agent Firewall.
 #
 # A person or a continuous-integration job can run this test. The test builds
-# the workspace, runs three sessions and checks ten assertions. The test
-# writes a summary and returns a non-zero code when one assertion fails.
+# the workspace, runs the sessions below and checks their assertions. The
+# test writes a summary and returns a non-zero code when one assertion
+# fails.
 # The summary goes to standard error, so a caller that pipes standard output
 # away (`| tee`, `| head`) still sees the verdict; such a caller reads the
 # exit code with PIPESTATUS, because the code of a pipeline is the code of
@@ -708,6 +709,76 @@ assert_contains "U10 the session explains the refusal and names the rule" \
     "$(file_text "$WORK_DIR/ud.stderr")" "tamper.bypass.io-uring"
 assert_contains "U11 the technique saw an ordinary permission error" \
     "$(file_text "$WORK_DIR/ud.stdout")" "blocked"
+
+# ---------------------------------------------------------------------------
+# V. The headless CI guard of [af-13]: run --ci denies deterministically,
+#    no terminal is opened, the exit code follows the contract of
+#    `run --help`, and --summary writes the machine-readable session record
+#    whose decisions a replay of the same trace confirms. The alpha
+#    disclosure stays: a CI guard is still alpha.
+# ---------------------------------------------------------------------------
+
+printf '\n%sV — the headless CI guard%s\n' "$AFW_BOLD" "$AFW_RESET"
+
+SUMMARY_V="$WORK_DIR/summary-v.json"
+TRACE_V="$WORK_DIR/trace-v.jsonl"
+MARKER_V="$WORK_DIR/marker-v.txt"
+
+status_v=0
+(
+    cd "$PROJECT_DIR"
+    AFW_DEMO_MARKER="$MARKER_V" \
+        "$BINARY" run --ci --summary "$SUMMARY_V" --trace "$TRACE_V" -- bash ./agent-sim.sh
+) >"$WORK_DIR/v.stdout" 2>"$WORK_DIR/v.stderr" || status_v=$?
+
+stderr_v="$(file_text "$WORK_DIR/v.stderr")"
+summary_v="$(file_text "$SUMMARY_V")"
+
+assert_exit "V1 the ci session is stopped with the contract code 3" 3 "$status_v"
+assert_contains "V2 the ci mode announces the deterministic posture" \
+    "$stderr_v" "ci mode: every question resolves to deny"
+assert_not_contains "V3 no prompt was written" "$stderr_v" "answer [a/s/d/t]"
+assert_contains "V4 the alpha banner stays in ci mode" \
+    "$stderr_v" "not a production security boundary"
+assert_not_contains "V5 the dangerous statement never ran" \
+    "$(file_text "$MARKER_V")" "DROP DATABASE"
+assert_contains "V6 the summary names the rule that was denied" \
+    "$summary_v" 'database.destructive.drop-database'
+assert_contains "V7 the summary carries the blocked exit code" \
+    "$summary_v" '"exit_code": 3'
+# One held verdict can match more than one rule (the drop also writes to a
+# production host), so the count is at least one and never zero.
+assert_matches "V8 the summary counts the denied action(s)" \
+    "$summary_v" '"denied": [1-9]'
+assert_contains "V9 the summary counts the question nobody had to answer" \
+    "$summary_v" '"questions": 1'
+assert_contains "V10 the resolved decision is a deny of that rule" \
+    "$summary_v" '"resolved": "deny"'
+
+# The replay of the same trace under the built-in pack finds the rule the
+# summary names: the record proves what the summary claims.
+run_capture "$BINARY" replay "$TRACE_V"
+assert_contains "V11 the replay of the ci trace confirms the denied rule" \
+    "$RUN_OUTPUT" "database.destructive.drop-database"
+
+# A clean ci session: exit 0, and a summary with zero denials.
+SUMMARY_VQ="$WORK_DIR/summary-vq.json"
+status_vq=0
+"$BINARY" run --ci --summary "$SUMMARY_VQ" -- sh -c 'echo quiet' \
+    >"$WORK_DIR/vq.stdout" 2>"$WORK_DIR/vq.stderr" || status_vq=$?
+
+assert_exit "V12 a clean ci session ends with code 0" 0 "$status_vq"
+assert_contains "V13 the clean summary holds zero denials" \
+    "$(file_text "$SUMMARY_VQ")" '"denied": 0'
+
+# The two flags refuse to combine, so a job's posture is one line that no
+# copy-pasted `--approve` can weaken by accident.
+status_vw=0
+"$BINARY" run --ci --approve allow -- sh -c 'echo quiet' \
+    >"$WORK_DIR/vw.stdout" 2>"$WORK_DIR/vw.stderr" || status_vw=$?
+assert_exit_nonzero "V14 ci refuses an --approve flag" "$status_vw"
+assert_contains "V15 the error names the conflict" \
+    "$(file_text "$WORK_DIR/vw.stderr")" "--approve"
 
 # ---------------------------------------------------------------------------
 # Summary.

@@ -47,6 +47,6 @@ mod testing;
 
 pub use memory::SessionMemory;
 pub use mode::ApprovalMode;
-pub use prompt::render_prompt;
+pub use prompt::{countdown_line, render_prompt};
 pub use scripted::ScriptedApprover;
 pub use terminal::{ApproverStats, TerminalApprover};

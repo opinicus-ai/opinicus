@@ -413,7 +413,12 @@ fn monitor_of_unended_session(events: &[Event]) -> Option<af_core::Pid> {
 }
 
 /// Finds the session metadata of a trace, or makes a replacement.
-fn session_of(events: &[Event]) -> SessionMeta {
+/// Returns the session metadata of a recorded event stream.
+///
+/// A session that never wrote its start event — the monitor died before it
+/// could — still reads back with an honest fallback. Shared with the
+/// session summary, which is built from the same record.
+pub(crate) fn session_of(events: &[Event]) -> SessionMeta {
     for event in events {
         if let EventKind::SessionStart { meta, .. } = &event.kind {
             return (**meta).clone();

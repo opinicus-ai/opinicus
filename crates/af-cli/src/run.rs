@@ -22,15 +22,23 @@ use af_monitor::{
     SyscallFilter, TreeControl,
 };
 use af_provenance::ProcessGraph;
-use af_recorder::{FanoutSink, MemorySink, Retention, StreamSink, TraceWriter};
+use af_recorder::{FanoutSink, MemorySink, Retention, SessionLog, StreamSink, TraceWriter};
 use anyhow::{bail, Context, Result};
 
 use crate::cli::RunArgs;
 use crate::normalize;
 use crate::policy_cmds::load_policy;
+use crate::summary;
 
 /// The exit code that the firewall returns when it stopped the session.
 pub const EXIT_BLOCKED: i32 = 3;
+
+/// The exit code that the firewall returns when it cannot run the session.
+///
+/// An unknown option, a policy that cannot load and a monitor failure all
+/// answer this code; the entry point uses it for every error. The contract
+/// is part of the help text of `run`.
+pub const EXIT_ERROR: i32 = 2;
 
 /// Prints the alpha disclosure on standard error, before a session starts.
 ///
@@ -71,6 +79,11 @@ pub fn run(args: RunArgs) -> Result<i32> {
         bail!("no command given after `--`");
     }
     print_banner();
+    if args.ci {
+        eprintln!(
+            "agent-firewall: ci mode: every question resolves to deny, and no terminal is opened"
+        );
+    }
 
     let cwd = match &args.cwd {
         Some(dir) => dir.clone(),
@@ -139,7 +152,33 @@ pub fn run(args: RunArgs) -> Result<i32> {
     // the packaging at the end of the run needs no trace file. The handle is
     // shared with the fanout, which owns the writing end.
     let telemetry_sink = args.telemetry.then(SharedMemory::default);
-    let sink = build_sink(&args, telemetry_sink.clone())?;
+    // A session with `--summary` does the same: the summary is built from
+    // the session's own events after the session ended, so it needs no
+    // trace file either.
+    let summary_sink = args.summary.is_some().then(SharedMemory::default);
+    // The durable session log of [af-13]: every run leaves a plain-text
+    // record of what the session did, whatever the terminal did with its
+    // scrollback. A failure to open the log degrades to a warning — a
+    // machine with no state directory still gets its session — and the
+    // run reports at its end where the log is.
+    let session_log_path = SessionLog::default_path(session.session_id.as_str());
+    let session_log = match SessionLog::open(&session_log_path) {
+        Ok(log) => Some(log),
+        Err(error) => {
+            eprintln!(
+                "agent-firewall: cannot open the session log {}: {error}",
+                session_log_path.display()
+            );
+            None
+        }
+    };
+    let session_log_opened = session_log.is_some();
+    let sink = build_sink(
+        &args,
+        telemetry_sink.clone(),
+        summary_sink.clone(),
+        session_log,
+    )?;
 
     let mut handler = FirewallHandler {
         memory: SessionMemory::with_baseline(session.baseline.clone()),
@@ -164,6 +203,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         kernel_rules: BTreeSet::new(),
         kernel_denied: Vec::new(),
         pending_tamper: None,
+        stops: Vec::new(),
     };
 
     let capabilities = Monitor::capabilities(syscall_filter);
@@ -224,18 +264,58 @@ pub fn run(args: RunArgs) -> Result<i32> {
         eprintln!(
             "agent-firewall: the session ended with {interventions} action(s) that needed a decision"
         );
+        // The plain-text answer to "what ran, what was stopped, what do I do
+        // now" of [af-13] — the human-readable sibling of the JSON summary
+        // of `--summary`, which never duplicates it: this block is text for
+        // the person at the terminal, that file is a record for a tool.
+        eprint!(
+            "{}",
+            session_end_summary(&SessionEnd {
+                session: &handler.session,
+                process_count: handler.graph.len(),
+                interventions,
+                stops: &handler.stops,
+                log_path: Some(&session_log_path),
+                trace: args.trace.as_deref(),
+                replay: replay_command(&args.trace, &args.policy),
+            })
+        );
+    } else if session_log_opened {
+        // A quiet session needs no block, but the log is still the record
+        // of what ran; one line says where it is.
+        eprintln!(
+            "agent-firewall: session log: {}",
+            session_log_path.display()
+        );
     }
 
-    if blocked {
-        return Ok(EXIT_BLOCKED);
+    // The exit code is the contract that `run --help` names: 3 when the
+    // firewall stopped something, otherwise the code (or the signal, as
+    // 128+N) of the program, and 0 for a session that ended quietly.
+    let exit_code = if blocked {
+        EXIT_BLOCKED
+    } else if let Some(code) = outcome.exit_code {
+        code
+    } else if let Some(signal) = outcome.signal {
+        128 + signal
+    } else {
+        0
+    };
+
+    // The summary is written after the session ended and after the trace is
+    // flushed, from the session's own events. It adds no question and reads
+    // no live monitor state, so a summary of a trace-backed session is a
+    // function of that trace — the same record a replay evaluates.
+    if let (Some(path), Some(shared)) = (&args.summary, &summary_sink) {
+        summary::write(&summary::build(&shared.events(), exit_code, args.ci), path)
+            .with_context(|| format!("cannot write the summary to {}", path.display()))?;
+        eprintln!(
+            "agent-firewall: session summary written to {}",
+            path.display()
+        );
     }
-    if let Some(code) = outcome.exit_code {
-        return Ok(code);
-    }
-    if let Some(signal) = outcome.signal {
-        return Ok(128 + signal);
-    }
-    Ok(0)
+
+    Ok(exit_code)
 }
 
 /// Reads the filter mode from a command-line value.
@@ -258,6 +338,13 @@ fn parse_landlock_mode(text: &str) -> Result<af_monitor::LandlockMode> {
 
 /// Reads the approval mode from the command-line options.
 fn approval_mode(args: &RunArgs) -> Result<ApprovalMode> {
+    // `--ci` answers every question itself, with the safe answer. The flag
+    // cannot be combined with `--approve`, so the two branches never fight,
+    // and the answer here is what makes a CI session deterministic: a job
+    // must not depend on whether a terminal happens to be attached.
+    if args.ci {
+        return Ok(ApprovalMode::AutoDeny);
+    }
     match args.approve.as_deref() {
         None => Ok(ApprovalMode::automatic()),
         Some(text) => match ApprovalMode::parse(text) {
@@ -269,12 +356,25 @@ fn approval_mode(args: &RunArgs) -> Result<ApprovalMode> {
 
 /// Makes the event sink from the command-line options.
 ///
-/// `telemetry` is the shared memory sink of a session that opted in, or
-/// `None`.
-fn build_sink(args: &RunArgs, telemetry: Option<SharedMemory>) -> Result<Box<dyn EventSink>> {
+/// `telemetry` is the shared memory sink of a session that opted in, and
+/// `summary` the one of a session with `--summary`; both are `None`
+/// without their flag. `session_log` is the durable plain-text log of
+/// [af-13], when its directory opened.
+fn build_sink(
+    args: &RunArgs,
+    telemetry: Option<SharedMemory>,
+    summary: Option<SharedMemory>,
+    session_log: Option<SessionLog>,
+) -> Result<Box<dyn EventSink>> {
     let mut sinks: Vec<Box<dyn EventSink>> = Vec::new();
     if let Some(memory) = telemetry {
         sinks.push(Box::new(memory));
+    }
+    if let Some(memory) = summary {
+        sinks.push(Box::new(memory));
+    }
+    if let Some(log) = session_log {
+        sinks.push(Box::new(log));
     }
     if let Some(path) = &args.trace {
         let retention = parse_retention(&args.retention)?;
@@ -289,6 +389,104 @@ fn build_sink(args: &RunArgs, telemetry: Option<SharedMemory>) -> Result<Box<dyn
         sinks.push(Box::new(StreamSink::human(io::stderr())));
     }
     Ok(Box::new(FanoutSink::with(sinks)))
+}
+
+/// The facts of a session that ended, in the shape the summary prints.
+struct SessionEnd<'a> {
+    /// The session that ran.
+    session: &'a SessionMeta,
+    /// How many processes the session created.
+    process_count: usize,
+    /// How many actions needed a decision.
+    interventions: usize,
+    /// What the session stopped.
+    stops: &'a [Stop],
+    /// Where the durable log of the session is, when it opened.
+    log_path: Option<&'a Path>,
+    /// The trace file of the session, when one was written.
+    trace: Option<&'a Path>,
+    /// The exact command that replays the evidence, when a trace exists.
+    replay: Option<String>,
+}
+
+/// Draws the plain-text session-end block: what ran, what was stopped, what
+/// to do now.
+///
+/// The block answers the three questions a person has when a session ends
+/// with an intervention, in order, without JSON — the machine-readable
+/// record of the same session is `--summary`. Every stopped action names
+/// its rule, because the rule is what a report talks about. The exact
+/// replay command names the trace file and the policy flags of the session,
+/// so a replay sees the same rules the live session saw.
+fn session_end_summary(end: &SessionEnd<'_>) -> String {
+    let mut out = String::new();
+    out.push_str("agent-firewall: ── what ran, what was stopped, what to do now ──\n");
+    out.push_str(&format!(
+        "agent-firewall: ran: {} process(es) under {} (cwd {})\n",
+        end.process_count,
+        display::sanitize(&end.session.command.join(" ")),
+        display::sanitize(&end.session.cwd)
+    ));
+    if end.stops.is_empty() {
+        out.push_str(&format!(
+            "agent-firewall: stopped: {} action(s) needed a decision; the session allowed every one\n",
+            end.interventions
+        ));
+    } else {
+        out.push_str(&format!(
+            "agent-firewall: stopped: {} action(s) needed a decision; {} stopped:\n",
+            end.interventions,
+            end.stops.len()
+        ));
+        for stop in end.stops {
+            out.push_str(&format!(
+                "agent-firewall:   · rule {}: {} — {}\n",
+                stop.rule, stop.what, stop.how
+            ));
+        }
+    }
+    out.push_str("agent-firewall: next:\n");
+    if let Some(path) = end.log_path {
+        out.push_str(&format!(
+            "agent-firewall:   · read the session log: {}\n",
+            path.display()
+        ));
+    }
+    match &end.replay {
+        Some(replay) => {
+            out.push_str(&format!(
+                "agent-firewall:   · replay the evidence: {replay}\n"
+            ));
+            let trace = end
+                .trace
+                .map(|trace| trace.display().to_string())
+                .unwrap_or_else(|| "<trace>".to_string());
+            out.push_str(&format!(
+                "agent-firewall:   · a rule you disagree with? INCIDENTS.md — report it: agent-firewall report {trace}\n"
+            ));
+        }
+        None => out.push_str(
+            "agent-firewall:   · no trace was written; run again with --trace <PATH> to keep one\n",
+        ),
+    }
+    out
+}
+
+/// Builds the exact command that replays the evidence of this session.
+///
+/// The command names the trace file and every `--policy` flag of the
+/// session, so the replay evaluates the same rules the live session did —
+/// the replay is deterministic, and its answer must be the session's.
+fn replay_command(trace: &Option<PathBuf>, policy: &crate::cli::PolicyOptions) -> Option<String> {
+    let trace = trace.as_ref()?;
+    let mut command = format!("agent-firewall replay {}", trace.display());
+    for path in &policy.policy {
+        command.push_str(&format!(" --policy {}", path.display()));
+    }
+    if policy.no_builtin {
+        command.push_str(" --no-builtin-policies");
+    }
+    Some(command)
 }
 
 /// Reads a retention mode from text.
@@ -400,9 +598,27 @@ struct FirewallHandler {
     /// handler parks the fact here, and the monitor takes it after the state
     /// change, suspends the tree and hands it to [`FirewallHandler::rule_tamper`].
     pending_tamper: Option<SensedTamper>,
+    /// What the session stopped, for the end-of-session summary.
+    ///
+    /// Every entry is one action the firewall denied or terminated — also a
+    /// refusal the user gave at a prompt — with the rule that held it. The
+    /// list feeds the plain-text "what ran, what was stopped, what now" block
+    /// of [af-13]; the machine-readable sibling of the same session is the
+    /// JSON summary of `--summary`, built from the trace events.
+    stops: Vec<Stop>,
 }
 
 impl FirewallHandler {
+    /// Remembers one action the session stopped, for the summary.
+    ///
+    /// `how` names the way it was stopped in the words the summary prints.
+    fn note_stop(&mut self, rule: &str, what: &str, how: &'static str) {
+        self.stops.push(Stop {
+            rule: rule.to_string(),
+            what: display::truncate(&display::sanitize(what), 160),
+            how,
+        });
+    }
     /// Sends one event to the graph, to storage and to the identity ledger.
     ///
     /// The graph applies the event first, so the agent tag that the event
@@ -785,7 +1001,7 @@ impl FirewallHandler {
             self.session.session_id.clone(),
             process.pid,
             EventKind::QuarantineResolved {
-                rule: rule_id,
+                rule: rule_id.clone(),
                 outcome,
             },
         ));
@@ -796,10 +1012,16 @@ impl FirewallHandler {
                 // A quarantine sits on an action that a refusal can stop
                 // completely: a signal that never runs, a program that never
                 // starts. Deny keeps the same meaning it has everywhere else.
+                self.note_stop(&rule_id, &action.summary(), "denied by the ruling");
                 Intercept::Refuse
             }
             ApprovalOutcome::TerminateSession => {
                 self.blocked = true;
+                self.note_stop(
+                    &rule_id,
+                    &action.summary(),
+                    "the session ended by the ruling",
+                );
                 Intercept::TerminateSession
             }
         }
@@ -909,7 +1131,7 @@ impl FirewallHandler {
             self.session.session_id.clone(),
             process.pid,
             EventKind::ApprovalResolved {
-                rule_id,
+                rule_id: rule_id.clone(),
                 outcome,
                 waited_ms,
             },
@@ -919,10 +1141,16 @@ impl FirewallHandler {
             ApprovalOutcome::Allow | ApprovalOutcome::AllowForSession => Intercept::Continue,
             ApprovalOutcome::Deny => {
                 self.blocked = true;
+                self.note_stop(&rule_id, &action.summary(), "denied by the answer");
                 Intercept::Deny
             }
             ApprovalOutcome::TerminateSession => {
                 self.blocked = true;
+                self.note_stop(
+                    &rule_id,
+                    &action.summary(),
+                    "the session ended by the answer",
+                );
                 Intercept::TerminateSession
             }
         }
@@ -1017,6 +1245,13 @@ impl FirewallHandler {
         verdict: &Verdict,
         held: Held<'_>,
     ) -> Intercept {
+        // The rule that the summary names when this stop ends the session:
+        // the strongest match of the verdict, the same choice the question
+        // would show.
+        let rule_id = verdict
+            .top_match()
+            .map(|matched| matched.rule_id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
         // The kernel floor may already have answered this verdict. A rule
         // whose class the kernel enforces needs no question: the kernel
         // refuses the action whatever the user says, so asking would offer a
@@ -1078,10 +1313,12 @@ impl FirewallHandler {
         let answer = match verdict.decision {
             af_core::Decision::Deny => {
                 self.blocked = true;
+                self.note_stop(&rule_id, &action.summary(), "denied by the rule");
                 held.deny
             }
             af_core::Decision::Terminate => {
                 self.blocked = true;
+                self.note_stop(&rule_id, &action.summary(), "the session ended by the rule");
                 Intercept::TerminateSession
             }
             _ => match self.ask(process, ancestry, action, verdict) {
@@ -1096,8 +1333,17 @@ impl FirewallHandler {
     }
 }
 
-/// What differs between the two stops that wait for a decision.
-///
+/// One action the session stopped, in the shape the summary prints.
+struct Stop {
+    /// The rule that held the action.
+    rule: String,
+    /// What the action was, one sanitized line.
+    what: String,
+    /// How it was stopped.
+    how: &'static str,
+}
+
+/// What differs between the two stops that wait for a decision.///
 /// `deny` is the intercept that a `Decision::Deny` verdict, and a user's
 /// refusal, produce at the stop — an exec holds the exec itself, so it
 /// answers `Intercept::Deny`; a system call has not happened yet, so it
@@ -1701,6 +1947,7 @@ rules:
             kernel_rules: BTreeSet::new(),
             kernel_denied: Vec::new(),
             pending_tamper: None,
+            stops: Vec::new(),
         };
         (handler, events)
     }
@@ -2271,6 +2518,143 @@ not json at all
         assert_eq!(
             evidence_path(Path::new("../../trace.jsonl"), cwd),
             "/trace.jsonl"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The session-end summary of [af-13]: the human-readable sibling of
+    // the JSON summary, driven straight from the same facts.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_summary_names_what_ran_what_was_stopped_and_what_to_do() {
+        let session = SessionMeta::new(
+            vec!["bash".to_string(), "migrate.sh".to_string()],
+            "/work".to_string(),
+        );
+        let stops = vec![
+            Stop {
+                rule: "database.destructive.drop-database".to_string(),
+                what: "psql -c DROP DATABASE customer_prod".to_string(),
+                how: "denied by the answer",
+            },
+            Stop {
+                rule: "tamper.quarantine".to_string(),
+                what: "signal 9 to process 900".to_string(),
+                how: "the session ended by the ruling",
+            },
+        ];
+        let text = session_end_summary(&SessionEnd {
+            session: &session,
+            process_count: 5,
+            interventions: 3,
+            stops: &stops,
+            log_path: Some(Path::new(
+                "/home/dev/.local/state/agent-firewall/sessions/x.log",
+            )),
+            trace: Some(Path::new("./trace.jsonl")),
+            replay: Some(
+                replay_command(
+                    &Some(PathBuf::from("./trace.jsonl")),
+                    &crate::cli::PolicyOptions {
+                        policy: vec![PathBuf::from("policies/extra.yaml")],
+                        no_builtin: true,
+                    },
+                )
+                .unwrap(),
+            ),
+        });
+
+        // What ran.
+        assert!(
+            text.contains("ran: 5 process(es) under bash migrate.sh (cwd /work)"),
+            "{text}"
+        );
+        // What was stopped: every rule, and what the action was.
+        assert!(
+            text.contains("3 action(s) needed a decision; 2 stopped"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rule database.destructive.drop-database"),
+            "{text}"
+        );
+        assert!(text.contains("DROP DATABASE customer_prod"), "{text}");
+        assert!(text.contains("rule tamper.quarantine"), "{text}");
+        // What to do now: the log, the exact replay command with the policy
+        // flags, and the report path.
+        assert!(
+            text.contains(
+                "read the session log: /home/dev/.local/state/agent-firewall/sessions/x.log"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("replay the evidence: agent-firewall replay ./trace.jsonl --policy policies/extra.yaml --no-builtin-policies"),
+            "{text}"
+        );
+        assert!(
+            text.contains("report it: agent-firewall report ./trace.jsonl"),
+            "{text}"
+        );
+        assert!(text.contains("INCIDENTS.md"), "{text}");
+    }
+
+    #[test]
+    fn a_summary_without_stops_says_the_session_allowed_everything() {
+        let session = SessionMeta::new(vec!["claude".to_string()], "/home/dev/app".to_string());
+        let text = session_end_summary(&SessionEnd {
+            session: &session,
+            process_count: 2,
+            interventions: 1,
+            stops: &[],
+            log_path: None,
+            trace: None,
+            replay: None,
+        });
+        assert!(
+            text.contains("1 action(s) needed a decision; the session allowed every one"),
+            "{text}"
+        );
+        assert!(
+            text.contains("no trace was written; run again with --trace <PATH> to keep one"),
+            "{text}"
+        );
+        assert!(!text.contains("replay the evidence"), "{text}");
+    }
+
+    #[test]
+    fn a_denied_action_is_remembered_for_the_summary() {
+        // A rule that denies: the stop must carry the rule and the action,
+        // so the summary names them at the end of the session.
+        let deny_policy = "
+version: 1
+name: test.deny
+rules:
+  - id: test.deny.curl
+    title: Test deny curl
+    category: test
+    risk: blocked
+    decision: deny
+    reason: The rule denies.
+    match:
+      action: exec
+      program: [curl]
+";
+        let (mut handler, _events) = handler_for(deny_policy, vec![]);
+        let mut curl = rm_process(400, "a");
+        curl.exe = Some("/usr/bin/curl".to_string());
+        curl.comm = "curl".to_string();
+        curl.argv = vec!["curl".to_string(), "https://exfil.example".to_string()];
+
+        let answer = handler.on_exec(&curl, &[], None, &ExecSensed::default(), &mut NoTree);
+
+        assert_eq!(answer, Intercept::Deny);
+        assert_eq!(handler.stops.len(), 1);
+        assert_eq!(handler.stops[0].rule, "test.deny.curl");
+        assert!(
+            handler.stops[0].what.contains("curl"),
+            "the summary names the action"
         );
     }
 
