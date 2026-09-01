@@ -49,13 +49,14 @@ for round in $(seq 1 "$ROUNDS"); do
         useradd -m bench 2>/dev/null || true
         echo "bench ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/bench
         chmod 440 /etc/sudoers.d/bench
-        chown -R bench:bench /root/opinicus
+        mv /root/opinicus /home/bench/opinicus
+        chown -R bench:bench /home/bench/opinicus
         curl -sSf https://sh.rustup.rs | su bench -c "sh -s -- -y --default-toolchain stable --profile minimal" >/dev/null
-        su bench -c "cd /root/opinicus && . \$HOME/.cargo/env && cargo build --release 2>&1 | tail -1"
+        su bench -c "cd /home/bench/opinicus && . \$HOME/.cargo/env && cargo build --release 2>&1 | tail -1"
         # Scope 3 is one-way — and the VM is disposable, so the sweep takes
         # the full road: SCOPE3=1 measures all four scopes, and the VM dies
         # afterwards (the lab exists precisely for this).
-        su bench -c "cd /root/opinicus && SCOPE3=1 research/bypass/hostile.sh" | tee /root/artifacts/hostile-round.'"$round"'.txt
+        su bench -c "cd /home/bench/opinicus && SCOPE3=1 research/bypass/hostile.sh" | tee /root/artifacts/hostile-round.'"$round"'.txt
     '
 done
 printf 'vm-lab: matrices in work/artifacts/\n'
