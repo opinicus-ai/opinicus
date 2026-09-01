@@ -30,6 +30,7 @@
 #![warn(missing_docs)]
 
 pub mod redaction;
+pub mod report;
 pub mod sample;
 mod sha256;
 
@@ -40,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use report::{build_report, write_report, FalsePositiveReport, REPORT_SCHEMA};
 pub use sample::{
     build_samples, default_outbox_path, list_samples, write_sample, AgentIdentity, Options,
     ProcessNode, Sample, SampleReason, SignalLine, DEFAULT_WINDOW, MAX_CONTENT_CHARS,

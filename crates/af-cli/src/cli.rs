@@ -33,8 +33,28 @@ pub enum Command {
     /// Works with optional telemetry: consent, samples, inspection.
     #[command(subcommand)]
     Telemetry(TelemetryCommand),
+    /// Validates a trace and writes a redacted false-positive report.
+    ///
+    /// The report is a local JSON bundle the user can attach to the
+    /// false-positive issue template: secrets are redacted, observed
+    /// content is omitted, identifiers are pseudonymized. Nothing is sent
+    /// anywhere.
+    Report(ReportArgs),
     /// Reports what the monitor can observe on this machine.
     Doctor(DoctorArgs),
+}
+
+/// Arguments of the `report` sub-command.
+#[derive(Debug, clap::Args)]
+pub struct ReportArgs {
+    /// The trace file to report on, as written by `run --trace`.
+    #[arg(value_name = "TRACE")]
+    pub trace: PathBuf,
+
+    /// Writes the report here instead of the working directory
+    /// (`agent-firewall-report-<session>.json`).
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
 }
 
 /// Arguments of the `doctor` sub-command.

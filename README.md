@@ -122,7 +122,13 @@ $ agent-firewall run --trace session.jsonl -- claude
 
 Every descendant process of the agent stays part of the session. The
 firewall writes its own text to standard error, so the output of the agent
-stays clean on standard output.
+stays clean on standard output. Every run also leaves a durable plain-text
+session log — `${XDG_STATE_HOME:-$HOME/.local/state}/agent-firewall/
+sessions/<session id>.log`, mode `0600` — with one line per
+support-relevant event; the CLI prints the path when the session ends, and
+a session that ends with an intervention prints a plain-text *what ran,
+what was stopped, what to do now* block. [INCIDENTS.md](INCIDENTS.md) is
+the guide for reading all of it.
 
 | Command | Function |
 | --- | --- |
@@ -137,6 +143,7 @@ stays clean on standard output.
 | `telemetry sample <TRACE>` | Builds redacted samples of a trace into the outbox. |
 | `telemetry inspect <SAMPLE>` | Prints a sample file. |
 | `telemetry destroy [--all]` | Deletes samples from the outbox. |
+| `report <TRACE>` | Writes a redacted false-positive report bundle (see [INCIDENTS.md](INCIDENTS.md)). |
 | `doctor` | Reports what the monitor can observe on this machine. |
 
 Options of `run`:
@@ -211,6 +218,11 @@ Exit codes:
 | exit code of the child | The child ended, and the firewall stopped nothing. |
 | 3 | The firewall stopped the session. |
 | 2 | Usage error. |
+
+When a session exits `3`, [INCIDENTS.md](INCIDENTS.md) answers the
+questions that follow — *was anything executed?* (precisely, from the
+exec-stop guarantee), where the evidence is, how to replay it, and how to
+report a false positive.
 
 ## Run the demonstration and the test
 
@@ -411,9 +423,9 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
 | `crates/af-provenance` | The provenance graph. It answers which process started which process. |
 | `crates/af-policy` | The deterministic policy engine, the rule format and the rule pack inside the binary. |
 | `crates/af-approval` | The approval layer. It asks the user on the terminal and remembers a session decision. |
-| `crates/af-recorder` | The trace writer and the trace reader for JSON Lines. |
+| `crates/af-recorder` | The trace writer and reader for JSON Lines, and the durable plain-text session log. |
 | `crates/af-correlate` | The correlation engine: expected view versus observed view. |
-| `crates/af-telemetry` | Redaction-first packaging of optional telemetry samples: consent, scopes, the local outbox. No network code. |
+| `crates/af-telemetry` | Redaction-first packaging of optional telemetry samples: consent, scopes, the local outbox, the false-positive report. No network code. |
 | `crates/af-cli` | The `agent-firewall` command. It connects all layers. |
 | `policies/` | Policy files in the readable source format. |
 | `research/` | The research areas: mechanism spikes, the shared benchmark, and the threat catalogue with its ledger. Read [research/README.md](research/README.md). |
@@ -430,6 +442,10 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary.
   the alpha: what it guarantees, what is advisory, what is bypassable and
   what is unknown, every claim with its source. [SECURITY.md](SECURITY.md)
   is the disclosure and report path that goes with it.
+* [INCIDENTS.md](INCIDENTS.md) — the operational guide for a stopped
+  session: the exit-code table, the precise answer to *exit 3 — was
+  anything executed?*, how to read the session log, how to replay the
+  evidence, and how to report a false positive.
 * [PROJECT.md](PROJECT.md) — the idea, the principles and the plan.
 * [docs/DECISIONS.md](docs/DECISIONS.md) — the dated decision log; the
   newest entry wins.

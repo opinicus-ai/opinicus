@@ -21,7 +21,7 @@ The system has seven layers and one shared contract.
 | Provenance engine | `af-provenance` | Builds the causal graph of the processes, answers ancestry questions, and carries the agent identity of the session through the graph. |
 | Policy engine | `af-policy` | Matches deterministic rules against an action and returns a verdict, and what the session must remember. |
 | Approval layer | `af-approval` | Asks the user, and remembers an answer for the session. |
-| Recorder | `af-recorder` | Writes the events as JSON Lines and reads a trace again. |
+| Recorder | `af-recorder` | Writes the events as JSON Lines and reads a trace again; writes the durable plain-text session log. |
 
 The shared contract is `af-core`. It holds the event schema, the process
 facts, the decisions and the traits between the layers. No layer depends on
@@ -870,6 +870,25 @@ A trace can hold command lines and paths of the user. Handle a trace like a
 log file with private data. A trace file is created with the permission
 mode `0600` (`af-recorder` `TraceWriter::create`), so the other local users
 of a shared machine cannot read it, and `.gitignore` ignores `*.jsonl`.
+
+Every `run` also writes a **durable plain-text session log** — one file per
+session, `${XDG_STATE_HOME:-$HOME/.local/state}/agent-firewall/sessions/
+<session id>.log`, also `0600` — with one line per support-relevant event:
+the start and end of the session, every decision that was not a plain
+allow (always with the rule id), every question and answer, every
+quarantine, every sensed tamper fact, every kernel-floor denial
+(`af-recorder` `SessionLog`). The log needs no `--trace`: it exists so a
+record survives the terminal whatever the session's flags were, and a
+session that nothing stopped writes only its start and end. The CLI prints
+the log path when the session ends, and a session that ended with an
+intervention also prints the plain-text block of [INCIDENTS.md](../INCIDENTS.md):
+what ran, what was stopped (with rule ids), and the exact replay command.
+The machine-readable sibling of that block is the JSON session summary of
+`run --summary`; the false-positive report path is `run`'s sibling command
+`agent-firewall report <trace>`, which validates a trace and writes a
+redacted bundle (`af-telemetry` `report`) that never carries environment
+values or observed content. INCIDENTS.md is the operational guide that
+holds the whole path.
 
 ## 6. Session memory
 

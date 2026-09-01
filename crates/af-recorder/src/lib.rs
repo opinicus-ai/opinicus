@@ -38,10 +38,12 @@
 mod human;
 mod reader;
 mod retention;
+mod session_log;
 mod sink;
 mod writer;
 
 pub use reader::{read_trace, TraceReader};
 pub use retention::Retention;
+pub use session_log::SessionLog;
 pub use sink::{FanoutSink, MemorySink, StreamSink};
 pub use writer::{TraceWriter, WriterStats};

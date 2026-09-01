@@ -6,6 +6,33 @@ otherwise. Each entry names its evidence.
 
 ---
 
+## 2026-09-01 — Session logs are XDG state; the countdown is rendering, never power
+
+Two decisions of `[af-13]` (M12, the operational half):
+
+**The durable session log lives in
+`${XDG_STATE_HOME:-$HOME/.local/state}/agent-firewall/sessions/`.** The XDG
+base directory specification assigns state that persists between runs and
+is not portable — logs, history — to `$XDG_STATE_HOME`, and this repository
+already keeps the classes apart: telemetry consent in `$XDG_CONFIG_HOME`
+(`af-telemetry` `Consent::default_path`), the telemetry outbox in
+`$XDG_DATA_HOME` (`af-telemetry` `default_outbox_path`). The session log
+completes the set — one directory per XDG class, so a user who wants the
+logs gone removes one directory and touches nothing else. The file is
+`0600` like a trace file (`af-recorder` `TraceWriter::create`), appended and
+never truncated, and every line is flushed so the record survives the way
+the session ended. A session that nothing stopped logs only its start and
+end: the interruption budget ([PRODUCT.md](PRODUCT.md) §5) holds for the
+log too. Evidence: `af-recorder` `SessionLog`, INCIDENTS.md.
+
+**The approval-timeout countdown renders the remaining seconds and nothing
+else.** The prompt box names the answer window, and every re-ask after a
+word the firewall does not know refreshes it (`af-approval` `countdown_line`).
+The deny-safe law is unchanged and tested: the read enforces the deadline,
+a timeout still denies, and no line the renderer writes can change an
+outcome — rendering must never turn a timeout into an allow
+(`af-approval` `terminal::tests::the_countdown_renders_and_the_timeout_still_denies`).
+
 ## 2026-09-01 — The io_uring road is held and reported; refusing it is a host requirement
 
 The decision of `[af-12]` / EXP-T1, on measurement and not on preference:
