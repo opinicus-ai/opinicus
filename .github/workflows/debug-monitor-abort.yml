@@ -1,0 +1,40 @@
+# One-shot diagnostic: catch the rare IO-safety abort in af-monitor's test
+# suite with a backtrace. Not part of the gate; dispatch manually.
+name: debug-monitor-abort
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Loop the monitor suite until it aborts
+        env:
+          RUST_BACKTRACE: full
+          RUST_LIB_BACKTRACE: full
+        run: |
+          mkdir -p /tmp/looplog
+          for i in $(seq 1 200); do
+            printf '=== iteration %d ===\n' "$i"
+            if ! cargo test -p af-monitor --lib > "/tmp/looplog/iter-$i.log" 2>&1; then
+              printf 'iteration %d failed; full log follows\n' "$i"
+              cat "/tmp/looplog/iter-$i.log"
+              exit 1
+            fi
+            printf 'iteration %d green\n' "$i"
+          done
+          printf '200 iterations green, no abort\n'
+      - name: Upload the loop log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: monitor-abort-hunt
+          path: /tmp/looplog/
+          if-no-files-found: warn
