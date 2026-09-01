@@ -40,12 +40,22 @@ for round in $(seq 1 "$ROUNDS"); do
     RESEARCH_VM_LAB=1 "$LAB_DIR/vm-run.sh" sh -c '
         set -euo pipefail
         echo "vm: $(uname -r), yama=$(cat /proc/sys/kernel/yama/ptrace_scope)"
-        dnf -q install -y gcc git python3 tar make perl golang >/dev/null 2>&1 || true
-        curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal >/dev/null
-        . "$HOME/.cargo/env"
-        cd /root/opinicus
-        cargo build --release 2>&1 | tail -1
-        research/bypass/hostile.sh | tee /root/artifacts/hostile-round.'"$round"'.txt
+        dnf -q install -y gcc git python3 tar make perl golang sudo >/dev/null 2>&1 || true
+        # The measurement must run UNPRIVILEGED: yama exempts CAP_SYS_PTRACE
+        # holders at scopes 0-2, so a root-run sweep would measure nothing
+        # (measured 2026-09-01: every attack succeeded-unsensed even at scope
+        # 2 when the sweep ran as root). Only the sysctl changes need root,
+        # and hostile.sh takes those through sudo itself.
+        useradd -m bench 2>/dev/null || true
+        echo "bench ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/bench
+        chmod 440 /etc/sudoers.d/bench
+        chown -R bench:bench /root/opinicus
+        curl -sSf https://sh.rustup.rs | su bench -c "sh -s -- -y --default-toolchain stable --profile minimal" >/dev/null
+        su bench -c "cd /root/opinicus && . \$HOME/.cargo/env && cargo build --release 2>&1 | tail -1"
+        # Scope 3 is one-way — and the VM is disposable, so the sweep takes
+        # the full road: SCOPE3=1 measures all four scopes, and the VM dies
+        # afterwards (the lab exists precisely for this).
+        su bench -c "cd /root/opinicus && SCOPE3=1 research/bypass/hostile.sh" | tee /root/artifacts/hostile-round.'"$round"'.txt
     '
 done
 printf 'vm-lab: matrices in work/artifacts/\n'
