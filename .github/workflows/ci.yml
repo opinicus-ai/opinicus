@@ -50,7 +50,9 @@ permissions:
 
 jobs:
   gate:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # The complete gate verifies Landlock behavior, which is unavailable in
+    # Blacksmith's VM kernel. Keep this capability-sensitive job hosted.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout
