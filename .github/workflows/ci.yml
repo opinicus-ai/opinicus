@@ -16,16 +16,17 @@
 # the policy definition; this pipeline is its dry-run, not a release
 # channel.
 #
-# Runners: GitHub-hosted ubuntu-24.04 for now. The org's Blacksmith
-# installation (app: blacksmith-sh, all repositories) is waiting on their
-# support to allowlist the org, so blacksmith-* labels queue forever until
-# they unblock us. Migrating back is a three-line swap per job:
+# Runners: split. The capability-sensitive gate job (Landlock floor
+# checks, ptrace sessions) stays on GitHub-hosted ubuntu-24.04; the docker
+# and signing jobs run on Blacksmith (app: blacksmith-sh, allowlisted
+# 2026-09-01) with their colocated docker layer cache. If the gate ever
+# moves too, verify Blacksmith's guest kernel exposes Landlock first.
 #
-#   gate:   runs-on: blacksmith-4vcpu-ubuntu-2404
-#   docker: runs-on: blacksmith-2vcpu-ubuntu-2404
-#           useblacksmith/setup-docker-builder@v1   before buildx use
-#           useblacksmith/build-push-action@v2      instead of
-#           docker/build-push-action@v7             (colocated layer cache)
+# Before swapping any runner label, prove pickup with a canary: push a
+# throwaway workflow whose only job is `runs-on: <label>` + `run: echo ok`,
+# and wait for green before migrating the real gate. (2026-08-31: the
+# first migration queued for hours — no runner ever matched until support
+# allowlisted the org; 2026-09-01: the canary returned green in 5 s.)
 #
 # Actions are pinned to their latest major versions; every bundled action
 # runs its node24 runtime. The gate itself needs Rust, Python and one more
