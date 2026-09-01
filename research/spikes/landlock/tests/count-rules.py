@@ -214,6 +214,11 @@ CLASSIFICATION = {
     "correlation.sensor.silent-subtree": ("C", "the judged fact is a discrepancy event replayed from two finished views; a sensor that stopped talking is not a filesystem action, and the floor mediates filesystem rights and the signal scope only"),
     "correlation.action.contradicted": ("C", "the judged fact is a discrepancy event: a connect that crossed the process without crossing libc; the floor handles no network right, and the event is judged after the run, not at a kernel boundary"),
     "correlation.spawn.unreported": ("C", "the judged fact is a discrepancy event: the preload an exec carried and the sensor instance that never registered; an exec's environment and the sensor's registry are nothing the floor sees"),
+    "tamper.evidence.trace-write": ("C", "the trace file is a launcher fact on a user-writable path — wherever the user pointed --trace — and the floor mediates no such fact; the write-open is held by the seccomp filter before it runs, which is what makes the refusal pre-loss"),
+    "tamper.evidence.sensor-record-write": ("C", "the sensor's records are launcher facts on user-writable paths, and the sensor itself writes them from inside instrumented children; the floor sees no fact, and the rule reports"),
+    "tamper.evidence.rohrpost-erase": ("C", "the rule matches the erase verbs and the rohrpost file names in an argument; the floor sees no argument"),
+    "tamper.evidence.rohrpost-write": ("C", "the store sits inside the writable work tree, so the floor grants the write; the rule reports anyway"),
+    "tamper.evidence.transcript-write": ("C", "the transcript stores and history files live under the home, outside the floor's hidden stores; the rule reports anyway"),
 }
 
 

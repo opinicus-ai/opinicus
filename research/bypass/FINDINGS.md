@@ -335,3 +335,72 @@ never ran, so the sensor is honest when it reports nothing for it.
 * The io_uring technique needs no liburing; it sets the ring up through raw
   syscalls and reports which sqe layout the kernel accepted
   (`open_flags` slot on this kernel).
+
+## After M8 — the evidence gate (2026-09-01)
+
+M8 (`[af-9]`) made the firewall's own evidence trail rule-visible. The
+session metadata now carries the trace path the launcher opened
+(`meta.trace`) and, with the in-process sensor active, the sensor's trace
+and registration paths (`meta.sensor.trace`, `meta.sensor.registration`) —
+B.5 facts in the shape of paths, matched by the new `evidence_target`
+field of the rule format. The rules are in `policies/tamper.yaml`; the
+gate script is `./evidence.sh` (run it after `cargo build --release`),
+and two runs gave the same table every time. The negative side is
+`./benign.sh` plus the in-file negative tests — 28 of the pack's 700
+policy tests belong to the five evidence rules, 16 of them negative.
+
+| case | what ran | outcome | evidence (same run) |
+| --- | --- | --- | --- |
+| a1 trace truncation | `open(O_TRUNC)` of the `--trace` file | **prevented** | rule hits 1, quarantines 1, fw exit 3, file intact, no forged line |
+| a2 trace forgery (append) | `open(O_APPEND)` of the `--trace` file | **prevented** | rule hits 1, quarantines 1, fw exit 3, file intact |
+| a3 sensor trace truncation | `open(O_TRUNC)` of `AF_SENSOR_TRACE` | sensed (report) | rule hits 3, quarantines 0; the sensor's own writes are 2 of the 3 |
+| a4 sensor registration truncation | `open(O_TRUNC)` of `AF_SENSOR_REG` | sensed (report) | rule hits 3, quarantines 0, record truncated, report in the firewall's trace |
+| b1 rohrpost log rm | `rm -f .rohrpost/log.jsonl` | **prevented** | rule hits 1, quarantines 1, fw exit 3, log intact |
+| b2 rohrpost log truncate | `sh -c ': > .rohrpost/log.jsonl'` | sensed (report) | rule hits 1, quarantines 0, log emptied, report survives in the firewall's trace |
+| b3 rohrpost log unlink (python) | `python3 -c "import os; os.remove(...)"` | **gap** | rule hits 0, quarantines 0, log gone |
+| c1 transcript rewrite | `open(O_TRUNC)` of a recorded `~/.claude/projects/**.jsonl` | sensed (report) | rule hits 1, quarantines 0, turn dropped, report survives |
+| c2 transcript sed -i | `sed -i /curl/d` of the transcript | sensed (report) | rule hits 1 (the temp-file open inside the store), quarantines 0, turn dropped |
+| c3 shell history truncate | `sh -c ': > $HOME/.bash_history'` | sensed (report) | rule hits 1, quarantines 0, history emptied |
+| d1 trace unlink | `unlink` of the `--trace` file | **gap** | rule hits 0, quarantines 0; the trace file is gone after the session — the recorder writes on its open descriptor, so the record died with the inode when the monitor closed it |
+
+The rules: `tamper.evidence.trace-write` (approval_required + quarantine,
+keyed on the B.5 fact — the launcher is the only writer of the session
+trace, so the question costs a normal session nothing),
+`tamper.evidence.sensor-record-write`, `tamper.evidence.rohrpost-write` and
+`tamper.evidence.transcript-write` (report-level; the reasons are below),
+and `tamper.evidence.rohrpost-erase` (approval_required + quarantine, on
+the erase verbs). The pack grew from 155 to 160 rules (`policy check`).
+
+Three budget calls the gate forced, each with its measurement:
+
+* **The sensor's own records cannot be a question.** The sensor of M2
+  appends to `AF_SENSOR_TRACE` and `AF_SENSOR_REG` with raw
+  `syscall(SYS_openat, ...)` opens from inside every instrumented child —
+  the a3 run shows 2 of its 3 rule hits are the instrument's own writes
+  (the trace append and the registration append of one payload process),
+  and the sensor-active benign corpus of `correlate.sh` produces **72
+  report firings and zero questions** in one normal session (write-only;
+  72 in all-opens, 0 with the filter off — every hit is
+  `tamper.evidence.sensor-record-write`). The instrument's write and the
+  eraser's rewrite are the same open to the filter, so the rule reports
+  where the trace rule quarantines. Quarantining there would have put a
+  question on every event of every sensor-active session — the exact
+  regression the benign corpus exists to catch.
+* **Rohrpost appends and transcript appends are name-keyed reports.** The
+  repository's own workflow writes `.rohrpost/log.jsonl` from inside
+  monitored sessions (`rp` appends, the fold rewrites the snapshot), and
+  an agent harness appends to its active transcript on every turn; an
+  open cannot tell an append from a rewrite, so both stay reports. The
+  erase rule asks only on verbs with no legitimate shape (`rm`, `mv`,
+  `shred`, `truncate`, `unlink` naming the two files).
+* **The two gaps are structural, pre-loss, and named.** The kernel filter
+  holds no `unlink` and no `rename` (documented in
+  `crates/af-monitor/src/seccomp.rs`), so an in-process unlink with no
+  erase verb on any exec (b3) and an unlink of the trace file itself (d1)
+  reach no rule. d1 is the total-loss case: the recorder keeps writing to
+  the unlinked inode and the record dies when the monitor closes it. A
+  same-UID process of the tree can also reach the trace through a symlink
+  or a hard link under another name — the B.5 fact compares the path
+  string, and a different shape answers nothing. Closing these needs
+  `unlink`/`rename` in the filter and the event schema, the same schema
+  work gap 2 of this file already names.

@@ -1,12 +1,15 @@
 version: 1
 name: builtin.tamper
 description: >
-  Attempts to take the firewall's own visibility away. Every rule of this
-  pack keys on the identity of the firewall itself — the monitor process,
-  the session root, the sensor instances this session installed, or an act
-  the firewall itself made — and never on the absence of instrumentation on
-  a foreign process, which a normal toolchain produces every day. Each rule
-  carries its negative test: a normal session stays quiet.
+  Attempts to take the firewall's own visibility or its own evidence away.
+  Every rule of this pack keys on the identity of the firewall itself — the
+  monitor process, the session root, the sensor instances this session
+  installed, an act the firewall itself made, a file the firewall itself
+  opened — or, for io_uring, on the kernel call that would carry work past
+  the held boundaries altogether. None of them keys on the absence of
+  instrumentation on a foreign process, which a normal toolchain produces
+  every day. Each rule carries its negative test: a normal session stays
+  quiet.
 
 rules:
   # The four seeded techniques of the bypass harness, as sensed states.
@@ -137,6 +140,259 @@ rules:
   # raises the detach fact, and the interruption budget wins over the
   # severity.
 
+  # The audit-trail rules of [af-9] (M8): the session's own evidence —
+  # SC evade-25, the evidence-eraser. The first rule keys on the B.5 fact
+  # of the session trace (the path the launcher itself opened), so it costs
+  # a normal session nothing: nothing in a benign corpus writes the
+  # firewall's trace. The sensor's own two records are report-only, because
+  # the sensor itself appends to them from inside every instrumented child
+  # (raw syscalls, once per process) — the instrument's own write and the
+  # eraser's rewrite are the same open to the filter, so the question would
+  # stand on every sensor-active session. The same honesty drives the two
+  # name-keyed report rules below: rp appends to the rohrpost log inside a
+  # ticketed session, and the agent harness appends to its transcript on
+  # every turn. The one question of this group (the erase of the rohrpost
+  # log) keys on verbs with no legitimate shape: nothing appends with rm.
+
+  - id: tamper.evidence.trace-write
+    title: Write into the session's own trace file
+    category: tamper
+    risk: approval_required
+    decision: approval_required
+    quarantine: true
+    reason: A process of the session opens the trace file of this session for writing — to truncate it, or to forge what it holds. The launcher opened this file itself before the session ran, and nothing in the session tree has a legitimate write to it — not even the in-process sensor, which writes its own records — so the fact keys on the firewall's own identity and never on a path name. The call is held before it runs, so a refusal stops the truncation or the forgery before any evidence is lost.
+    match:
+      action: file_open
+      write: true
+      evidence_target: [trace]
+    tests:
+      - name: a write-open of the session trace quarantines the session
+        expect: approval_required
+        trace_path: /tmp/afw/trace.jsonl
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/trace.jsonl, write: true }
+      - name: a session that writes its own files stays quiet
+        expect: allow
+        trace_path: /tmp/afw/trace.jsonl
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, "echo done >> notes.txt"] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/notes.txt, write: true }
+      - name: a file with the trace's name in another directory stays quiet
+        expect: allow
+        trace_path: /tmp/afw/trace.jsonl
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/other/trace.jsonl, write: true }
+      - name: a session that names no trace file stays quiet
+        expect: allow
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/trace.jsonl, write: true }
+      - name: a read of the trace file stays quiet
+        expect: allow
+        trace_path: /tmp/afw/trace.jsonl
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/trace.jsonl, write: false }
+
+  # Report, not a question: the sensor itself opens both of its records from
+  # inside every instrumented child (raw syscalls, once per process), so the
+  # instrument's own append and an eraser's rewrite are the same open to the
+  # filter. Every write-open stands in the firewall's own trace instead,
+  # which is the record that survives the rewrite.
+
+  - id: tamper.evidence.sensor-record-write
+    title: Write into the in-process sensor's own records
+    category: tamper
+    risk: suspicious
+    decision: allow
+    reason: A process of the session opens the sensor's trace file or its registration record for writing. The sensor of this session appends to both from inside every instrumented child — a raw open, once per process — so the instrument's own write and an eraser's rewrite are the same open to the filter, and the question would stand on every sensor-active session. The rule reports instead, and the report in the firewall's own trace is the evidence that survives a rewrite of the sensor's records.
+    match:
+      action: file_open
+      write: true
+      evidence_target: [sensor_trace, sensor_registration]
+    tests:
+      - name: a write-open of the sensor trace is reported
+        expect: allow
+        expect_match: true
+        sensor_trace_path: /tmp/afw/sensor.jsonl
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/sensor.jsonl, write: true }
+      - name: a write-open of the sensor registration record is reported
+        expect: allow
+        expect_match: true
+        sensor_registration_path: /tmp/afw/sensor.reg
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/sensor.reg, write: true }
+      - name: the sensor's own append is the report's honest writer
+        expect: allow
+        expect_match: true
+        sensor_trace_path: /tmp/afw/sensor.jsonl
+        process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/sensor.jsonl, write: true }
+      - name: a session that writes its own files stays quiet
+        expect: allow
+        sensor_trace_path: /tmp/afw/sensor.jsonl
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, "echo done >> notes.txt"] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/notes.txt, write: true }
+      - name: a session with no sensor stays quiet
+        expect: allow
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/sensor.jsonl, write: true }
+      - name: a read of the sensor trace stays quiet
+        expect: allow
+        sensor_trace_path: /tmp/afw/sensor.jsonl
+        process: { pid: 1500, comm: payload, exe: /tmp/payload, argv: [payload] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /tmp/afw/sensor.jsonl, write: false }
+
+  - id: tamper.evidence.rohrpost-erase
+    title: Erase the rohrpost event log or ticket snapshot
+    category: tamper
+    risk: approval_required
+    decision: approval_required
+    quarantine: true
+    reason: A program of the session erases the rohrpost event log or the ticket snapshot (.rohrpost/log.jsonl, .rohrpost/tickets.jsonl) — the work record this repository develops against. The erase verbs have no legitimate shape in that workflow — the rp tool appends events and folds the snapshot, it never removes the log — so the rule keys on the verbs and the two file names together. A delete of build output, a scratch file or any other path stays quiet.
+    match:
+      action: exec
+      program: [rm, shred, truncate, mv, unlink, find, xargs, busybox, sh, bash, zsh, dash, ksh, sudo]
+      all_of:
+        - argv_matches: '(?:^|\s)(?:rm|shred|truncate|mv|unlink)(?:\s|$)'
+        - argv_matches: '(?:^|\s|/)\.rohrpost/(?:log|tickets)\.jsonl(?:\s|$)'
+    tests:
+      - name: a delete of the event log quarantines the session
+        expect: approval_required
+        process: { pid: 1500, comm: rm, exe: /usr/bin/rm, argv: [rm, -f, .rohrpost/log.jsonl], cwd: /work/app }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a delete of the ticket snapshot by absolute path quarantines the session
+        expect: approval_required
+        process: { pid: 1500, comm: rm, exe: /usr/bin/rm, argv: [rm, /work/app/.rohrpost/tickets.jsonl] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a shell that moves the log away quarantines the session
+        expect: approval_required
+        process: { pid: 1500, comm: bash, exe: /usr/bin/bash, argv: [bash, -c, "mv .rohrpost/log.jsonl /tmp/cover.jsonl"] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a delete of build output stays quiet
+        expect: allow
+        process: { pid: 1500, comm: rm, exe: /usr/bin/rm, argv: [rm, -rf, target] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a read of the event log stays quiet
+        expect: allow
+        process: { pid: 1500, comm: grep, exe: /usr/bin/grep, argv: [grep, af-9, .rohrpost/log.jsonl] }
+        ancestry: [{ pid: 1000, comm: bash }]
+      - name: a delete of another file of the store stays quiet
+        expect: allow
+        process: { pid: 1500, comm: rm, exe: /usr/bin/rm, argv: [rm, .rohrpost/config.toml] }
+        ancestry: [{ pid: 1000, comm: bash }]
+
+  # Report, not a question: the repository's own workflow (AGENTS.md) writes
+  # both rohrpost files from inside monitored sessions — rp appends to the
+  # log, the fold rewrites the snapshot — and an open cannot tell an append
+  # from a rewrite, so the question would stand on every legitimate ticket
+  # operation. The report in the firewall's own trace is the evidence that
+  # survives the rewrite of the log.
+
+  - id: tamper.evidence.rohrpost-write
+    title: Write into the rohrpost event log or ticket snapshot
+    category: tamper
+    risk: suspicious
+    decision: allow
+    reason: A process of the session opens the rohrpost event log or the ticket snapshot for writing. The repository's own workflow writes both from inside sessions — rp appends events and the fold rewrites the snapshot — and an open cannot tell an append from a rewrite, so the interruption budget keeps this a report. Every write-open stands in the firewall's own trace, which is the record that survives a rewrite of the log itself.
+    match:
+      action: file_open
+      write: true
+      path_glob: ["**/.rohrpost/log.jsonl", "**/.rohrpost/tickets.jsonl"]
+    tests:
+      - name: a write-open of the event log is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: rp, exe: /usr/local/bin/rp, argv: [rp, comment] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /work/app/.rohrpost/log.jsonl, write: true }
+      - name: a write-open of the ticket snapshot is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: rp, exe: /usr/local/bin/rp, argv: [rp, fold] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /work/app/.rohrpost/tickets.jsonl, write: true }
+      - name: a write to a normal project file stays quiet
+        expect: allow
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, "echo done >> notes.txt"] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /work/app/notes.txt, write: true }
+      - name: a write to another file of the store stays quiet
+        expect: allow
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, "echo >> .rohrpost/config.toml"] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /work/app/.rohrpost/config.toml, write: true }
+      - name: a read of the event log stays quiet
+        expect: allow
+        process: { pid: 1500, comm: rp, exe: /usr/local/bin/rp, argv: [rp, ready] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /work/app/.rohrpost/log.jsonl, write: false }
+
+  # Report, not a question: the honest writer of these files is the agent
+  # harness itself — it appends to the active transcript on every turn, and
+  # an open cannot tell that append from a rewrite that drops turns, so the
+  # question would fire on every turn of a normal agent session. The
+  # git-maintenance lesson again: the budget wins over the severity.
+
+  - id: tamper.evidence.transcript-write
+    title: Write into an agent session transcript or shell history
+    category: tamper
+    risk: suspicious
+    decision: allow
+    reason: A process of the session opens an agent transcript store or a shell history file for writing — .claude/projects, .codex/sessions, .gemini/tmp, .bash_history, .zsh_history anywhere on the machine. The rule reports instead of asking, because the agent harness itself appends to the active transcript on every turn and an open cannot tell that append from a rewrite that drops the turns that contain the mistake. Every write-open stands in the firewall's own trace, which is the record that survives the rewrite.
+    match:
+      action: file_open
+      write: true
+      path_glob:
+        - "**/.claude/projects/**"
+        - "**/.codex/sessions/**"
+        - "**/.gemini/tmp/**"
+        - "**/.bash_history"
+        - "**/.zsh_history"
+    tests:
+      - name: a rewrite of a recorded transcript is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: python3, exe: /usr/bin/python3, argv: [python3, -c, rewrite] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /home/dev/.claude/projects/3f2a/session.jsonl, write: true }
+      - name: the temporary file of an in-place rewrite inside the store is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: sed, exe: /usr/bin/sed, argv: [sed, -i, s/credential//] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /home/dev/.claude/projects/3f2a/session.jsonlXy12, write: true }
+      - name: a rewrite of a shell history file is reported
+        expect: allow
+        expect_match: true
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, ": > ~/.bash_history"] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /home/dev/.bash_history, write: true }
+      - name: a write to a normal project file stays quiet
+        expect: allow
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, "echo done >> src/main.rs"] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /work/app/src/main.rs, write: true }
+      - name: a write to the agent settings stays quiet
+        expect: allow
+        process: { pid: 1500, comm: sh, exe: /bin/sh, argv: [sh, -c, "echo >> ~/.claude/settings.json"] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /home/dev/.claude/settings.json, write: true }
+      - name: a read of a transcript stays quiet
+        expect: allow
+        process: { pid: 1500, comm: grep, exe: /usr/bin/grep, argv: [grep, credential, session.jsonl] }
+        ancestry: [{ pid: 1000, comm: bash }]
+        file_open: { path: /home/dev/.claude/projects/3f2a/session.jsonl, write: false }
+
   - id: tamper.process.outlived
     title: A process was still alive after the session ended
     category: tamper
@@ -161,3 +417,23 @@ rules:
         expect: allow
         process: { pid: 1500, comm: cargo, exe: /usr/bin/cargo, argv: [cargo, build] }
         ancestry: [{ pid: 1000, comm: bash }]
+
+  # The io_uring close of [af-12] (M11, EXP-T1): the ring was the one road
+  # that carried file and network operations past every held boundary — one
+  # measured IORING_OP_OPENAT with write intent produced zero events in
+  # every filter mode (research/bypass/FINDINGS.md, gap 1, evade-15). The
+  # kernel filter now holds io_uring_setup and io_uring_enter at the call
+  # boundary, and this rule sees every call.
+  #
+  # The decision is host-requirement, on the measured numbers and not on
+  # preference (docs/DECISIONS.md, 2026-09-01): a normal node session
+  # makes the calls on its own — 36 in one `npm ci`, 48 in one benign
+  # corpus run, with run-to-run variance — and completes when they are
+  # refused, so a default deny
+  # would fire on a normal tool on every session, which the interruption
+  # budget forbids whatever the severity. The rule therefore reports, and
+  # the enforcement posture is the host: `kernel.io_uring_disabled = 2`
+  # closes the road at kernel grade, and a host that wants the firewall to
+  # close it writes a local file with this identifier and `decision: deny`
+  # — the filter already holds the calls, so the deny is complete
+  # (tests/e2e.sh, section U, proves it end to end).

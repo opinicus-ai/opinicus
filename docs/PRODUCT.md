@@ -74,13 +74,13 @@ Not a missed attack. **Too many questions.**
 A user who is asked too often switches the protection off. Then the protection
 is zero, and the missed attack does not matter any more.
 
-So the rule pack is deliberately unbalanced — 155 rules, counted with
+So the rule pack is deliberately unbalanced — 160 rules, counted with
 `agent-firewall policy list --json`:
 
 | Behaviour | Rules |
 | --- | --- |
-| Stop the action and ask, or block it | 75 |
-| Report only, and stay quiet | 80 |
+| Stop the action and ask, or block it | 77 |
+| Report only, and stay quiet | 83 |
 
 Six of the questions are not asked at all any more: the Landlock kernel
 floor answers them in the kernel, before the program starts, with no

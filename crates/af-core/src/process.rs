@@ -152,6 +152,37 @@ pub enum InputSource {
     Environment,
 }
 
+/// Which of the two `io_uring` calls an action carries.
+///
+/// The kernel filter holds both calls at the call boundary, because the
+/// ring performs its operations inside the kernel: no per-operation system
+/// call ever happens, so no other boundary can see the work. The call name
+/// is a scalar from the registers, so nothing can race it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoUringCall {
+    /// The process asks the kernel for an `io_uring` instance.
+    Setup,
+    /// The process submits work to a ring and waits for its completion.
+    Enter,
+}
+
+impl IoUringCall {
+    /// Returns the label that the rule file and the trace use.
+    pub fn label(&self) -> &'static str {
+        match self {
+            IoUringCall::Setup => "io_uring_setup",
+            IoUringCall::Enter => "io_uring_enter",
+        }
+    }
+}
+
+impl std::fmt::Display for IoUringCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// One action that the policy engine can evaluate.
 ///
 /// The monitor makes an action from one or more normalized events. The
@@ -226,6 +257,19 @@ pub enum Action {
         kind: TamperKind,
         /// The measured facts behind the sense, one line for the evidence.
         detail: String,
+    },
+    /// A process asks the kernel for an `io_uring` instance, or submits work
+    /// to one.
+    ///
+    /// The kernel filter holds both calls before they happen, because a ring
+    /// carries file and network operations past every per-syscall boundary:
+    /// one measured `IORING_OP_OPENAT` with write intent produced zero events
+    /// in every filter mode (`research/bypass/FINDINGS.md`, gap 1). The
+    /// action carries only the name of the call, which is a scalar from the
+    /// registers, so nothing can race it.
+    IoUring {
+        /// Which of the two `io_uring` calls this is.
+        call: IoUringCall,
     },
     /// The expected view and the observed view of one session disagree.
     ///
@@ -354,6 +398,7 @@ impl Action {
             Action::Input { .. } => "input",
             Action::SignalSend { .. } => "signal_send",
             Action::Tamper { .. } => "tamper",
+            Action::IoUring { .. } => "io_uring",
             Action::Discrepancy { .. } => "discrepancy",
         }
     }
@@ -386,6 +431,7 @@ impl Action {
                 format!("signal {signal} to process {target}")
             }
             Action::Tamper { kind, detail } => format!("{kind}: {detail}"),
+            Action::IoUring { call } => format!("{call} call"),
             Action::Discrepancy { kind, detail } => format!("{kind}: {detail}"),
         }
     }

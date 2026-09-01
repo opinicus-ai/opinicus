@@ -173,6 +173,30 @@ fn check_rule(rule: &CompiledRule, remembered: &BTreeSet<&str>, out: &mut Vec<Di
                 format!("exception {index} has no condition, so the rule can never match"),
             );
         }
+        // The path of a file open is read out of the memory of the judged
+        // program, and a match that allows accepts ground facts only
+        // (`docs/DETECTION-RESEARCH.md` section 2), so a path condition in
+        // an exception is dead: it can never switch the rule off. An
+        // exception that must hold has to name something no thread of the
+        // judged program can rewrite — the call, a scalar argument, or a
+        // fact of the exec boundary.
+        let mut path_fields: Vec<&'static str> = Vec::new();
+        exception.walk(&mut |node: &Matcher| {
+            for field in node.path_field_names() {
+                if !path_fields.contains(&field) {
+                    path_fields.push(field);
+                }
+            }
+        });
+        if !path_fields.is_empty() {
+            add(
+                Severity::Error,
+                format!(
+                    "exception {index} names the file path fields {}, but the path of a file open is read out of the memory of the judged program and can change before the call runs, so the exception can never hold; name a fact that no thread of the program can rewrite",
+                    path_fields.join(", ")
+                ),
+            );
+        }
     }
 
     if rule.reason.trim().is_empty() {
@@ -260,6 +284,63 @@ fn check_rule(rule: &CompiledRule, remembered: &BTreeSet<&str>, out: &mut Vec<Di
             Severity::Warning,
             "risk `blocked` means that the action is never allowed, so ask for `deny` or `terminate`"
                 .to_string(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PolicySet;
+
+    /// An exception that names the path of a file open can never hold: the
+    /// path is read out of the memory of the judged program, and a match
+    /// that allows accepts ground facts only. The lint must say so at load
+    /// time, before the author ships a rule that quietly never quiets.
+    #[test]
+    fn an_exception_on_a_file_path_is_an_error() {
+        let set = PolicySet::from_str(
+            "
+version: 1
+name: test.exception
+rules:
+  - id: test.exception.deny-write
+    title: Deny every write open
+    category: test
+    risk: blocked
+    decision: deny
+    reason: test
+    match: { action: file_open, write: true }
+    exceptions:
+      - path_prefix: [/tmp]
+    tests:
+      - name: a write under tmp is quiet
+        expect: allow
+        file_open: { path: /tmp/cache.bin, write: true }
+",
+            "test",
+        )
+        .expect("the rule file loads");
+        let diagnostics = set.lint();
+        let found = diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.message.contains("exception 0"));
+        assert!(
+            found,
+            "the lint must refuse the path-keyed exception: {diagnostics:?}"
+        );
+    }
+
+    /// An exception on a fact of the exec boundary stays quiet: those facts
+    /// are ground, and the whole shipped pack lints clean with the new
+    /// check.
+    #[test]
+    fn the_builtin_pack_lints_clean_under_the_exception_rule() {
+        let set = PolicySet::builtin().expect("the built-in pack loads");
+        assert!(
+            set.lint().is_empty(),
+            "no shipped exception names a file path: {:?}",
+            set.lint()
         );
     }
 }

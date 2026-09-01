@@ -137,6 +137,7 @@ fn summary(event: &Event) -> String {
             let name = signal_name(*signal);
             format!("send {name} to process {target}")
         }
+        EventKind::IoUring { call } => format!("{call} call"),
         EventKind::Tamper { kind, detail } => format!("{kind}: {detail}"),
         EventKind::Discrepancy { kind, detail } => format!("{kind}: {detail}"),
         EventKind::QuarantineStarted { rule, evidence } => {

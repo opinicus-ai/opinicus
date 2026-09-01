@@ -22,9 +22,9 @@
 //!   destroy it. The research backend of [DIRECTION.md §8] is future work
 //!   and nothing in this crate calls it, stubs it or prepares it.
 //!
-//! [DIRECTION.md §7]: https://github.com/agent-firewall/agent-firewall/blob/main/docs/DIRECTION.md
-//! [DIRECTION.md §8]: https://github.com/agent-firewall/agent-firewall/blob/main/docs/DIRECTION.md
-//! [RESEARCH.md §4]: https://github.com/agent-firewall/agent-firewall/blob/main/docs/RESEARCH.md
+//! [DIRECTION.md §7]: https://github.com/opinicus-ai/opinicus/blob/main/docs/DIRECTION.md
+//! [DIRECTION.md §8]: https://github.com/opinicus-ai/opinicus/blob/main/docs/DIRECTION.md
+//! [RESEARCH.md §4]: https://github.com/opinicus-ai/opinicus/blob/main/docs/RESEARCH.md
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -34,6 +34,8 @@ pub mod sample;
 mod sha256;
 
 use std::collections::BTreeSet;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +46,22 @@ pub use sample::{
     MAX_HASH_BYTES, SAMPLE_SCHEMA,
 };
 pub use sha256::{digest as sha256_digest, hex as sha256_hex};
+
+/// Writes bytes to a file that only this user reads.
+///
+/// The consent file and every sample of the outbox name the machine and its
+/// sessions, so both are created with the permission mode 0600 whatever the
+/// umask of the command is. A file that already exists keeps the mode it
+/// has; creation is the moment the mode is fixed.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)
+}
 
 /// One grain of consent.
 ///
@@ -234,13 +252,16 @@ impl Consent {
     }
 
     /// Writes the consent state to a file, making the directory first.
+    ///
+    /// The file is created with the permission mode 0600
+    /// ([`write_private`]), because it names the scopes this user granted.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let text = serde_json::to_string_pretty(self)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        std::fs::write(path, text.as_bytes())
+        write_private(path, text.as_bytes())
     }
 }
 
@@ -311,5 +332,22 @@ mod tests {
         let broken = dir.path().join("broken.json");
         std::fs::write(&broken, b"not json").expect("write");
         assert!(Consent::load(&broken).is_err(), "a broken file must refuse");
+    }
+
+    #[test]
+    fn the_consent_file_is_created_for_its_owner_only() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("telemetry.json");
+        let mut consent = Consent::off();
+        consent.grant(Scope::Actions);
+        consent.save(&path).expect("save the consent");
+
+        let mode = std::fs::metadata(&path).expect("stat").mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the consent state names this user; no other local user may read it"
+        );
     }
 }

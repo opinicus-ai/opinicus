@@ -94,6 +94,7 @@ pub fn session(cwd: &str) -> SessionMeta {
         monitor_pid: 0,
         sensor: None,
         baseline: Default::default(),
+        trace: None,
     }
 }
 

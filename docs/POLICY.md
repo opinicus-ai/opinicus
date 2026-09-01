@@ -88,6 +88,7 @@ implicit **and**.
 | `action` | `network_connect` | A process opens a connection. |
 | `action` | `input` | The monitor captured a script, a standard input stream or another text. |
 | `action` | `signal_send` | A process sends a signal to a process of the firewall. |
+| `action` | `io_uring` | A process asks the kernel for an `io_uring` instance, or submits work to one. |
 | `action` | `tamper` | The firewall sensed a state of its own visibility. |
 | `action` | `discrepancy` | The expected view and the observed view of the session disagree. |
 
@@ -155,6 +156,21 @@ These are the B.5 facts. A rule that keys on them never fires on the
 signals of a normal session, because no normal program signals the monitor,
 the session root by firewall order, or a sensor instance the firewall
 installed.
+
+### Ring (`io_uring`)
+
+The kernel filter holds both `io_uring` calls before they happen, because a
+ring performs file and network operations inside the kernel with no
+per-operation system call: without the hold, the ring road crosses no
+boundary at all (`research/bypass/FINDINGS.md`, gap 1).
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `io_uring` | list | The call must be one of the list: `io_uring_setup` or `io_uring_enter`. |
+
+The action reaches the engine only when the filter is installed, so a rule
+of this shape never fires in a session with `--syscall-filter off`, and a
+session that asks for no ring never raises the action at all.
 
 ### Tamper (`tamper`)
 
@@ -537,6 +553,21 @@ keeps the rule quiet.
 An exception with no condition is a load-time lint error, because it would
 switch the rule off for every action.
 
+An exception is the one match that **allows** a stopped action, so it holds
+on facts that no thread of the judged program can rewrite: the command line
+of the exec boundary, a scalar of the call, a fact of the firewall. A path
+condition (`path`, `path_prefix`, `path_glob`, `path_matches`) anywhere in
+an exception is a load-time lint error, and the exception is **dead** — it
+never holds — because the path of a file open is read out of the memory of
+the judged program and can change before the call runs: measured, it named
+the wrong file 47.6% of the time under two threads
+(`docs/DETECTION-RESEARCH.md` section 2). The same holds for a path
+condition under an odd number of `not`s inside the `match` block: a match
+there quiets the rule, which is the same thing an exception does, so the
+condition reads ground facts only. The engine carries the same rule in its
+types (`docs/ARCHITECTURE.md` section 3a): no conversion exists from an
+advisory path into the facts an allow may rest on.
+
 Three ways to make a rule narrow, from the most local to the widest:
 
 1. `argv_not_matches` or `not` inside the `match` block. Use it when the case
@@ -714,24 +745,24 @@ those programs in `program` and asks for the real command with `argv_matches`:
 | `policies/process.yaml` | 33 | Programs from temporary places, hidden payloads, deep shell chains. |
 | `policies/memory.yaml` | 7 | Chains, bursts, sweeps and a remote that the session did not know. |
 | `policies/allowlist.yaml` | 5 | Known safe forms of commands that look dangerous. |
-| `policies/tamper.yaml` | 5 | Attempts on the firewall itself: a signal to the monitor, a detached descendant, a killed program that came back, a stripped sensor preload, a process that outlived the session. |
+| `policies/tamper.yaml` | 11 | Attempts on the firewall itself, its own evidence, and its held boundaries: a signal to the monitor, a detached descendant, a killed program that came back, a stripped sensor preload, a process that outlived the session, a write into the session's trace file, a write into the sensor's own records, an erase of the rohrpost log, a write into the rohrpost log, a write into an agent transcript or shell history, io_uring use inside the session. |
 | `policies/correlation.yaml` | 3 | The two views of the session disagree: a sensor gone quiet inside a living process, an action that crossed the process without crossing the sensor, a child that inherited the sensor but never loaded it. |
-| **Total** | **155** | |
+| **Total** | **161** | |
 
-Of the 155 rules, 9 answer `deny`, 66 answer `approval_required` and 80 stay
+Of the 161 rules, 9 answer `deny`, 68 answer `approval_required` and 84 stay
 quiet with `allow`. The rules that stop an action only look at commands that
 destroy data. A normal development session — `git status`, `cargo build`,
 `npm test`, `psql -c "SELECT ..."`, `kubectl get pods` — matches no rule at
 all and produces no note.
 
-Five of the 66 questions are quarantines, and two of the five tamper rules
-report instead of asking. Of the three correlation rules, two quarantine —
+Seven of the 68 questions are quarantines, and six of the eleven tamper
+rules report instead of asking. Of the three correlation rules, two quarantine —
 the silent sensor and the unreported spawn, whose negatives the benign
 corpus exercised — and one reports: the contradicted connection, because
 the corpus is offline and its negative has no evidence yet
 (`research/bypass/correlate.sh`).
 
-Six of the 66 questions are answered by the kernel instead of the user. When
+Six of the 68 questions are answered by the kernel instead of the user. When
 the Landlock floor of the monitor is active (the default), the session does
 not ask `filesystem.etc.write`, `filesystem.delete.system-path`,
 `filesystem.delete.mount-root`, `filesystem.device.truncate`,

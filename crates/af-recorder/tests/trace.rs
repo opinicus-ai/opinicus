@@ -329,6 +329,27 @@ fn write_trace(
     writer.stats()
 }
 
+/// A trace file is created for its owner only.
+///
+/// A trace holds command lines, paths, environment names and observed
+/// text, so it is created with the permission mode 0600 whatever the umask
+/// of the session is. The proof is the mode of the file on disk.
+#[test]
+fn a_trace_file_is_created_for_its_owner_only() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = temp_dir();
+    let path = dir.path().join("mode.jsonl");
+    let (_, events) = demo_session();
+    write_trace(&path, Retention::All, &events);
+
+    let mode = std::fs::metadata(&path).expect("stat the trace").mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "a trace holds private data of the session; no other local user may read it"
+    );
+}
+
 /// The writer numbers the events from 1 upwards, without a hole.
 #[test]
 fn the_writer_numbers_every_event() {

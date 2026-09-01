@@ -7,6 +7,68 @@ otherwise. Each entry names its evidence.
 ---
 
 
+
+## 2026-09-01 — The Rohrpost incident is recorded, and the store gets a snapshot rule
+
+On 2026-08-31 the repository lost uncommitted ticketing state during a
+review window that was supposed to be read-only, and a commit message
+described a filing its own commit did not contain. This entry records what
+is established, what is not, and the rules adopted so that a future loss is
+at least detectable.
+
+**Established** (evidence: [PROJECT-REVIEW.md](PROJECT-REVIEW.md) §2.5).
+Commit `c7ca6f0` (2026-08-31 22:26:07) says it files `[af-9]` "as
+AF-an4nm7", but the commit touches only `research/threats/LEDGER.md` and
+`research/threats/scenarios/evade.md` — no `.rohrpost` change. At 22:41,
+when the first review workflow started, the working tree held
+`.rohrpost/log.jsonl` and `.rohrpost/tickets.jsonl` modified and
+uncommitted: an open ticket `AF-an4nm7` ("[af-9] Sense audit-trail
+tampering: trace writes, history and transcript erasure") and one more log
+event — ten tickets and 34 events against HEAD's nine and 33. Both files'
+mtimes fall inside the review window (22:55:34). By 23:31 the tree was
+clean and matched HEAD exactly; the ticket existed nowhere in tracked
+state, and its title survived only in a review transcript. What is proven:
+the uncommitted state of an open ticket and one log event no longer exists,
+was destroyed during a window that was supposed to be read-only, and the
+HEAD commit message misdescribed its own content.
+
+**Not established.** What destroyed the state. A `git` path-restore (which
+leaves no reflog entry), an `rp` operation, and human action all remain
+possible; no available evidence distinguishes them, and this entry does not
+choose. The read-only `rp` commands are excluded as re-writers — in this
+window, not the original one: on 2026-09-01, `rp ready`, `rp list`,
+`rp log`, `rp stats` and `rp doctor` (rohrpost 0.1.0) left the store
+byte-identical at every hash — `log.jsonl`
+`9d1b92b011f4f50406d3bcc8e31920e24d9ad6c23b2310a72b2392d4e4eda433`,
+`tickets.jsonl`
+`b20afed972eeef9ba41ef2d328914baccc1c97bbf04d5ec291df74f737956ef1` —
+with `rp doctor` all clear, including `snapshot_matches`: a fresh fold of
+the 49-event log reproduces the 24-ticket snapshot (cold fold 0.757 ms,
+median). Neither "nothing was lost" nor any specific content loss beyond
+the record above is claimed.
+
+**Rules adopted.**
+
+* **Snapshot before any agent workflow.** `scripts/rohrpost-snapshot.sh`
+  records the commit, the `.rohrpost` porcelain status and the sha256 of
+  both store files under `.rohrpost/snapshots/`; its `--check` re-hashes
+  and exits non-zero on drift. Read-only means byte-identical, proven,
+  not assumed. Snapshots are local fingerprints, not history.
+* **Tickets live committed.** A ticket that exists only in the working
+  tree does not exist. An `rp` operation that creates or changes a ticket
+  is committed in the same work unit, before any other workflow runs
+  against the repository.
+* **A commit message matches its commit.** No message may claim a filing
+  or a change its commit does not contain. A wrong message is corrected by
+  a follow-up commit that names it; history is not rewritten.
+
+Evidence: [PROJECT-REVIEW.md](PROJECT-REVIEW.md) §2.5 and §8 (P0-8); the
+hash-stability measurement above; snapshot `20260901T002617Z` (rev
+`3450cf8`), whose `--check` closed green at the end of this entry's own
+workflow. Remediation is tracked as M8 (`AF-xa01k3`,
+[docs/MILESTONES.md](MILESTONES.md)).
+
+---
 ## 2026-09-01 — L0 is built: the kernel floor ships in the monitor
 
 Supersedes one line of the 2026-08-28 stack entry below, which says "L0 is

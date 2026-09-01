@@ -13,6 +13,10 @@
 # Local agent workspace.
 .lavish/
 
+# Rohrpost pre-workflow snapshots: local working-state fingerprints,
+# regenerable (scripts/rohrpost-snapshot.sh).
+.rohrpost/snapshots/
+
 # Editor and desktop files.
 *~
 *.swp
@@ -36,3 +40,6 @@ research/bypass/results/
 
 # Agent-identity gate runs (regenerable).
 research/detection/results/
+
+# The compiled stand-in of the io_uring compatibility matrix.
+research/bypass/standin/uring-standin

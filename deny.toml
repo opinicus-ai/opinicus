@@ -1,0 +1,80 @@
+# cargo-deny configuration — the supply-chain half of the gate ([af-11], M10).
+#
+# Checked by scripts/gate.sh (`cargo deny check advisories bans licenses
+# sources`) and by CI on every push. The same no-network contract that
+# [bans] enforces tree-wide is additionally pinned per-crate by
+# crates/af-telemetry/tests/dependency_contract.rs, so `cargo test -p
+# af-telemetry` fails even without this file being installed.
+
+[advisories]
+# A yanked version in Cargo.lock is a build nobody can reproduce from the
+# index; an unmaintained dependency in a security tool is an incident
+# waiting for a CVE. Both stop the gate; both are fixed by a deliberate
+# Cargo.lock/Cargo.toml bump, never by an ignore entry added in passing.
+# ("all" = unmaintained advisories are denied for workspace and transitive
+# crates alike.)
+yanked = "deny"
+unmaintained = "all"
+
+[bans]
+# Network-capable crates are banned workspace-wide.
+#
+# Why workspace-wide is honest here: `cargo tree --workspace -e
+# normal,build,dev` holds none of these crates today (checked 2026-09-01,
+# [af-11]); the tree is serde/clap/nix/libc-sized. The ban therefore breaks
+# nothing that exists and exists to keep it that way — the repository's
+# product is a local boundary whose telemetry crate promises "no socket, no
+# client, no sender" (docs/TELEMETRY.md §4). Nothing in this workspace has
+# a reason to speak HTTP; the day one genuinely does, the ban entry is
+# removed for that crate in a reviewed commit that also rewrites the
+# no-network claim — the gate failing loudly is the point.
+#
+# Scope, stated honestly: this is a dependency-graph tripwire, not a
+# capability sandbox. It catches a client stack arriving through Cargo; it
+# does not catch std::net inside a dependency's code. The runtime boundary
+# is Landlock, not this list.
+deny = [
+    # async runtimes and their transports
+    "tokio",
+    "mio",
+    "actix-rt",
+    "actix-web",
+    # HTTP/1.1 + HTTP/2 client and server stacks
+    "http",
+    "h2",
+    "hyper",
+    "hyper-util",
+    "reqwest",
+    "ureq",
+    "surf",
+    "isahc",
+    "attohttpc",
+    "minreq",
+    # curl bindings
+    "curl",
+    "curl-sys",
+    # websocket clients
+    "tungstenite",
+    "websocket",
+]
+
+[licenses]
+# The allow list is exactly what the workspace tree holds today, no more.
+# Every dual-licensed crate in the tree (ryu: Apache-2.0 OR BSL-1.0;
+# rustix/linux-raw-sys: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT;
+# r-efi: MIT OR Apache-2.0 OR LGPL-2.1-or-later; aho-corasick/memchr:
+# Unlicense OR MIT) offers MIT or Apache-2.0 as one alternative, so those
+# two plus Unicode-3.0 (required by unicode-ident's
+# "(MIT OR Apache-2.0) AND Unicode-3.0") cover every crate. BSD and ISC
+# appear nowhere in the tree and are deliberately NOT pre-allowed: adding a
+# license is a reviewed change that names the crate that needs it.
+allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+confidence-threshold = 0.93
+
+[sources]
+# Crates come from crates.io or from this repository; anything else (a git
+# dependency, a vendored tarball, a mirror) stops the gate.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["sparse+https://index.crates.io/"]
+allow-git = []

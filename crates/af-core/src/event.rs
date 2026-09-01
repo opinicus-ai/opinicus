@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     decision::Verdict,
     identity::{AgentTag, SessionDetach},
-    process::{Action, DiscrepancyKind, ProcessInfo, TamperKind},
+    process::{Action, DiscrepancyKind, IoUringCall, ProcessInfo, TamperKind},
     session::{SessionId, SessionMeta},
     traits::ApprovalOutcome,
     Pid, TimestampNanos,
@@ -209,6 +209,17 @@ pub enum EventKind {
         /// Signal number.
         signal: i32,
     },
+    /// A process asked the kernel for an `io_uring` instance, or submitted
+    /// work to one.
+    ///
+    /// The kernel filter holds both calls before they happen. The event is
+    /// the evidence that the ring road reached a boundary at all: without
+    /// the hold, a ring performs its operations inside the kernel and no
+    /// event of any kind can appear.
+    IoUring {
+        /// Which of the two `io_uring` calls the process made.
+        call: IoUringCall,
+    },
     /// The firewall sensed a state of its own visibility that a rule judges.
     ///
     /// The event is evidence, whatever the rules say about it: a trace holds
@@ -392,6 +403,7 @@ impl EventKind {
             EventKind::FileOpen { .. } => "file_open",
             EventKind::NetworkConnect { .. } => "network_connect",
             EventKind::SignalSend { .. } => "signal_send",
+            EventKind::IoUring { .. } => "io_uring",
             EventKind::Tamper { .. } => "tamper",
             EventKind::Discrepancy { .. } => "discrepancy",
             EventKind::FileRead { .. } => "file_read",

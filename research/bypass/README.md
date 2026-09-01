@@ -16,6 +16,7 @@ attacks arrive on purpose? The numbers live in [FINDINGS.md](FINDINGS.md).
 | `tamper.sh` | the `[af-4]` gate: the four seeded tamper techniques must fire every time, the quarantine rules must hold the tree, and the report rules must not ask; the negative side is `benign.sh` |
 | `correlate.sh` | the `[af-5]` gate: `agent-firewall correlate` compares the sensor's record with the monitor's trace on the seeded discrepancy techniques and on the benign corpus, and the three rules of `policies/correlation.yaml` ship only on the benign side firing zero |
 | `benign-gate.sh` | the fast benign gate of `[af-10]`: one representative corpus mode (write-only) end to end plus a FAIL-scan of the whole `results/benign-summary.txt`; wired into `scripts/gate.sh` after quiet-check |
+| `evidence.sh` | the `[af-9]` gate: the seeded audit-trail erasures (trace truncation and forgery, sensor-record truncation, rohrpost history erasure, transcript tampering, the unlink gaps) must land on their measured outcome — prevented, sensed or an explicit gap; the negative side is `benign.sh` and the in-file negative tests of `policies/tamper.yaml` |
 | `run.sh` | everything, then the classification, then the corpus |
 | `results/` | raw runs (regenerable, not committed) |
 
@@ -27,6 +28,7 @@ python3 orchestrate.py  # the runs only
 python3 classify.py     # re-print the matrix from results/
 ./benign.sh all-opens   # the corpus at one filter mode
 ./benign-gate.sh        # the fast gate step: one mode end to end, plus a FAIL-scan of the summary
+./evidence.sh            # the [af-9] audit-trail gate: every seeded erasure lands on its measured outcome
 ./tamper.sh             # the tamper gate of [af-4]
 ./correlate.sh          # the correlation gate of [af-5]
 ```

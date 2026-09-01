@@ -36,7 +36,16 @@ Orientation for coding agents working in this repository.
 - Work is ticketed in `.rohrpost` (the `rp` CLI) under epic `[af]`, one
   ticket per milestone with its exit gate in the body. `rp ready` shows the
   unblocked work; claim with `rp claim`, resolve with a `rp comment` +
-  `rp close` that names the committed measurement.
+  `rp close` that names the committed measurement. Tickets live committed:
+  a ticket that exists only in the working tree does not exist.
+- **Snapshot the Rohrpost store around agent workflows.** Before any agent
+  workflow runs against this repository, run `scripts/rohrpost-snapshot.sh`
+  (records the commit, the store's git status and the sha256 of
+  `.rohrpost/log.jsonl` and `.rohrpost/tickets.jsonl`). After a workflow
+  that was supposed to be read-only, `scripts/rohrpost-snapshot.sh --check`
+  must exit zero; a workflow that legitimately changes tickets commits the
+  store and takes a fresh snapshot. Read-only means byte-identical
+  (docs/DECISIONS.md, 2026-09-01).
 - Numbers in documents must come from a measurement with a source (a doc
   section, a test, or a spike under `research/` with runnable code).
 - Threat research runs through `research/threats/README.md` (skill:

@@ -16,7 +16,7 @@
 //! marker. A sample that redacts too much is a smaller sample. A sample
 //! that leaks a credential is a product failure.
 //!
-//! [RESEARCH.md §4]: https://github.com/agent-firewall/agent-firewall/blob/main/docs/RESEARCH.md
+//! [RESEARCH.md §4]: https://github.com/opinicus-ai/opinicus/blob/main/docs/RESEARCH.md
 
 use std::collections::BTreeMap;
 

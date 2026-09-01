@@ -363,13 +363,13 @@ that ships with it.
 
 ### What the floor carries, and what it does not
 
-The pack holds 155 rules today; 75 stop the user. The floor answers 6 of the
-66 questions the pack can ask (`filesystem.etc.write`,
+The pack holds 160 rules today; 77 stop the user. The floor answers 6 of the
+68 questions the pack can ask (`filesystem.etc.write`,
 `filesystem.delete.system-path`, `filesystem.delete.mount-root`,
 `filesystem.credentials.write` on the paths it hides,
 `filesystem.device.truncate`, `process.signal.kill-everything`) and backs 3
 of the 9 `deny` rules with the same guarantee. Twenty-one classes are denied in
-part and keep their question; 125 are blind to Landlock, which sees a path
+part and keep their question; 130 are blind to Landlock, which sees a path
 and a TCP port and nothing else.
 
 The floor is deliberately conservative about which questions it removes. A
@@ -426,12 +426,25 @@ person rules. The measurement behind this section is
    not tamper: the monitor reports it at the end of the session root.
 
 3. **A rule judges every fact.** Each fact becomes an action of the schema
-   (`signal_send` or `tamper`), reaches the same engine as an exec, and the
-   rules of `policies/tamper.yaml` decide. Three of them carry
-   `quarantine: true`. Two report instead, because a normal session makes
-   the same shape: `git maintenance run --detach` detaches on every commit,
-   and the corpus of M1 proved the question wrong — the interruption budget
-   wins over the severity.
+   (`signal_send`, `tamper` or `file_open`), reaches the same engine as an
+   exec, and the rules of `policies/tamper.yaml` decide. Since M8 five
+   audit-trail rules join them, measured by
+   `research/bypass/evidence.sh`: a write-open of the session's own trace
+   file quarantines (the launcher is the only writer of that file, so a
+   refusal stops a truncation or a forgery before any evidence is lost);
+   the sensor's two records, the rohrpost log and snapshot, and the agent
+   transcript stores and shell histories are reports, because their honest
+   writers live inside normal sessions — the sensor appends to its own
+   records from every instrumented child (72 report firings, zero
+   questions, on the sensor-active corpus), `rp` appends to the rohrpost
+   log, and the agent harness appends to its transcript on every turn; an
+   open cannot tell an append from a rewrite, so the budget wins. The
+   erase of the rohrpost log by name (`rm`, `mv`, `shred`, `truncate`,
+   `unlink`) is a question — no legitimate workflow erases the log. Of
+   the tamper rules, five carry `quarantine: true`; the rest report,
+   because a normal session makes the same shape: `git maintenance run
+   --detach` detaches on every commit, and the corpus of M1 proved the
+   question wrong — the interruption budget wins over the severity.
 
 4. **A quarantine suspends the tree, shows the evidence and takes one
    ruling.** The monitor sends `SIGSTOP` to every process of the session and
@@ -468,6 +481,17 @@ person rules. The measurement behind this section is
   executable, because a process identifier is gone once the process died.
 * The sensor instance list is a snapshot from launch. Whether an instance
   still speaks is the correlation question of M5.
+* An `unlink` of an evidence file reaches no rule: the kernel filter holds
+  no `unlink` and no `rename` (§3a), so a session process that unlinks the
+  trace file — or removes the rohrpost log from inside a running
+  interpreter with no erase verb on any exec — is a measured gap
+  (`research/bypass/evidence.sh`, rows b3 and d1). The unlink of the trace
+  is the total-loss case: the recorder keeps writing to the unlinked
+  inode, and the record dies when the monitor closes it.
+* The evidence-path facts compare the absolute path string the launcher
+  recorded. A session that reaches the same file through a symlink, a bind
+  mount or a hard link under another name matches nothing — a path shape
+  is a fact of the name, not of the file.
 
 ## 3e. The path of one discrepancy
 

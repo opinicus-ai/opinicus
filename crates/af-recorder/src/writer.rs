@@ -1,8 +1,8 @@
 //! Writing of a trace as JSON Lines.
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use af_core::{Event, EventSink, Pid, Result};
@@ -72,14 +72,22 @@ impl TraceWriter {
     /// Makes a writer for a new trace file.
     ///
     /// The function makes the directory of the file when it is missing, so
-    /// that a caller can point at a fresh session directory.
+    /// that a caller can point at a fresh session directory. The file is
+    /// created with the permission mode 0600, because a trace holds command
+    /// lines, paths and environment names that no other local user may
+    /// read, whatever the umask of the session is.
     pub fn create(path: &Path, retention: Retention) -> Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let file = File::create(path)?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
         Ok(Self::to_writer(BufWriter::new(file), retention))
     }
 

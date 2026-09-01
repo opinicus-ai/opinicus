@@ -40,6 +40,21 @@ struct ReplayHit {
 pub fn replay(args: ReplayArgs) -> Result<i32> {
     let events =
         read_trace(&args.trace).with_context(|| format!("cannot read {}", args.trace.display()))?;
+    // A trace that starts a session and never ends it is the shape an
+    // assassination of the monitor leaves: the writer of the record is the
+    // monitor itself, so a kill from outside the tree takes no cleanup path
+    // and no `session_end` is ever written. The note names the shape after
+    // the fact, from the durable lines that survived — the only place this
+    // detection can live (`research/bypass/FINDINGS.md`, the hostile
+    // same-UID matrix of [af-12]).
+    if let Some(monitor) = monitor_of_unended_session(&events) {
+        eprintln!(
+            "agent-firewall: the trace holds a session_start and no session_end: the session \
+             that wrote it never closed its record. Either it still runs, or its monitor \
+             (pid {monitor}) died before the end — a kill of the monitor from outside the \
+             tree leaves exactly this shape, and no event names the killer."
+        );
+    }
     let policy = load_policy(&args.policy)?;
     let graph = ProcessGraph::from_trace(&events);
     let session = session_of(&events);
@@ -138,12 +153,13 @@ pub fn replay(args: ReplayArgs) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&hits)?);
     } else {
         println!(
-            "\n{} exec, {} file, {} network, {} signal, {} tamper and {} discrepancy \
+            "\n{} exec, {} file, {} network, {} signal, {} io_uring, {} tamper and {} discrepancy \
              event(s) evaluated, {} rule match(es)",
             counted.exec,
             counted.file,
             counted.network,
             counted.signal,
+            counted.uring,
             counted.tamper,
             counted.discrepancy,
             hits.len()
@@ -159,6 +175,7 @@ struct Counts {
     file: usize,
     network: usize,
     signal: usize,
+    uring: usize,
     tamper: usize,
     discrepancy: usize,
 }
@@ -170,6 +187,7 @@ impl Counts {
             Action::FileOpen { .. } => self.file += 1,
             Action::NetworkConnect { .. } => self.network += 1,
             Action::SignalSend { .. } => self.signal += 1,
+            Action::IoUring { .. } => self.uring += 1,
             Action::Tamper { .. } => self.tamper += 1,
             Action::Discrepancy { .. } => self.discrepancy += 1,
             _ => self.exec += 1,
@@ -266,6 +284,10 @@ fn action_of(event: &Event, graph: &ProcessGraph) -> Option<(ProcessInfo, Action
                     signal: *signal,
                 },
             ))
+        }
+        EventKind::IoUring { call } => {
+            let process = actor(event.pid, graph);
+            Some((process, Action::IoUring { call: *call }))
         }
         EventKind::Tamper { kind, detail } => {
             let process = actor(event.pid, graph);
@@ -366,6 +388,30 @@ pub fn doctor(args: DoctorArgs) -> Result<i32> {
     Ok(0)
 }
 
+/// Returns the monitor of a session whose trace starts a session and never
+/// ends it, and `None` otherwise.
+///
+/// The launcher and the monitor are one process, so a monitor that an
+/// external process kills mid-session writes nothing after the kill: the
+/// durable events the recorder already flushed are the whole record, and
+/// the missing `session_end` is the marker of the abrupt end. This check
+/// reads that marker after the fact — it is the teardown observation of
+/// requirement B.6 done at the only moment it can be done, and it is not a
+/// boundary: it names the shape of a lost record, it never senses the kill
+/// before the loss, and a session that is still running holds the same
+/// shape.
+fn monitor_of_unended_session(events: &[Event]) -> Option<af_core::Pid> {
+    let mut monitor = None;
+    for event in events {
+        match &event.kind {
+            EventKind::SessionStart { meta, .. } => monitor = Some(meta.monitor_pid),
+            EventKind::SessionEnd { .. } => return None,
+            _ => {}
+        }
+    }
+    monitor
+}
+
 /// Finds the session metadata of a trace, or makes a replacement.
 fn session_of(events: &[Event]) -> SessionMeta {
     for event in events {
@@ -378,4 +424,67 @@ fn session_of(events: &[Event]) -> SessionMeta {
         meta.session_id = first.session_id.clone();
     }
     meta
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use af_core::SessionId;
+
+    /// Makes a session-start event whose session names `monitor`.
+    fn started(monitor: af_core::Pid) -> Event {
+        let mut meta = SessionMeta::new(vec!["sleep".to_string()], "/tmp".to_string());
+        meta.monitor_pid = monitor;
+        Event::new(
+            meta.session_id.clone(),
+            monitor,
+            EventKind::SessionStart {
+                meta: Box::new(meta),
+                capabilities: Vec::new(),
+            },
+        )
+    }
+
+    /// Makes a session-end event.
+    fn ended() -> Event {
+        Event::new(
+            SessionId::from("af-test"),
+            1,
+            EventKind::SessionEnd {
+                exit_code: Some(0),
+                process_count: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn a_trace_that_never_closes_names_its_monitor() {
+        // The shape a monitor killed from outside the tree leaves behind:
+        // the durable lines survived, and no session_end was ever written.
+        let events = vec![started(42)];
+        assert_eq!(monitor_of_unended_session(&events), Some(42));
+    }
+
+    #[test]
+    fn a_closed_session_is_not_an_abrupt_end() {
+        let events = vec![started(42), ended()];
+        assert_eq!(monitor_of_unended_session(&events), None);
+    }
+
+    #[test]
+    fn a_trace_without_a_session_start_stays_quiet() {
+        // An emitted-findings trace (af-correlate `--emit`) holds no
+        // session of its own and must not read as a lost one.
+        let events = vec![ended()];
+        assert_eq!(monitor_of_unended_session(&events), None);
+        assert_eq!(monitor_of_unended_session(&[]), None);
+    }
+
+    #[test]
+    fn the_monitor_named_is_the_one_of_the_session() {
+        // A monitor that does not know itself yet (pid 0, the placeholder
+        // before the root starts) still names the shape, with its zero.
+        let events = vec![started(0)];
+        assert_eq!(monitor_of_unended_session(&events), Some(0));
+    }
 }

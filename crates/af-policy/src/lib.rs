@@ -6,6 +6,12 @@
 //! The engine uses no model, no network, no clock and no random number. The
 //! same input always gives the same verdict.
 //!
+//! One input has a provenance, and the provenance decides what a fact may
+//! do: a path read out of the memory of the judged program is advisory and
+//! can refuse, ask or report, but it can never be the reason an action
+//! continues. The [`facts`] module carries that rule in types, with a
+//! runtime guard behind them.
+//!
 //! # Example
 //!
 //! ```
@@ -40,6 +46,7 @@
 #![warn(missing_docs)]
 
 mod builtin;
+pub mod facts;
 mod glob;
 mod lint;
 mod matcher;
@@ -53,6 +60,7 @@ use af_core::{
     RuleInfo, RuleMatch, SessionMemory, Verdict,
 };
 
+pub use facts::{AdvisoryPath, GroundFacts, GroundPath, PathFact};
 pub use lint::{Diagnostic, Severity};
 pub use testing::{TestFailure, TestReport};
 
@@ -118,6 +126,16 @@ pub(crate) struct Threshold {
 
 impl CompiledRule {
     /// Returns true when the rule matches and no exception holds.
+    ///
+    /// The body of the rule reads every fact of the action — a rule that
+    /// refuses, asks or reports may match on a path read out of the memory
+    /// of the judged program. An exception is the other thing: it is the one
+    /// condition that **allows** a stopped action, so it matches on ground
+    /// facts only ([`Matcher::matches_ground`]); a path-naming exception is
+    /// dead and the lint names it, and a path condition under an odd number
+    /// of `not`s inside the body flips to the same ground-only view. A path
+    /// read out of the memory of the judged program can never quiet a rule
+    /// that holds.
     pub(crate) fn matches(&self, subject: &Subject<'_>) -> bool {
         if !self.enabled {
             return false;
@@ -125,7 +143,7 @@ impl CompiledRule {
         if !self.matcher.matches(subject) {
             return false;
         }
-        !self.exceptions.iter().any(|e| e.matches(subject))
+        !self.exceptions.iter().any(|e| e.matches_ground(subject))
     }
 
     /// Evaluates one action against this rule alone.
@@ -408,16 +426,94 @@ impl PolicySet {
     /// the caller in rule order, so two runs of the same trace write the same
     /// records in the same order.
     fn judge(&self, subject: &Subject<'_>) -> (Verdict, Vec<MemoryEffect>) {
-        let mut matches: Vec<RuleMatch> = Vec::new();
+        let mut judgement = Judgement::default();
         let mut effects: Vec<MemoryEffect> = Vec::new();
         for rule in &self.rules {
             let (fires, mut wanted) = rule.evaluate_one(subject);
             effects.append(&mut wanted);
             if fires {
-                matches.push(rule.to_match());
+                if rule.decision.needs_intervention() {
+                    judgement.hold(rule.to_match());
+                } else {
+                    judgement.note(rule.to_match());
+                }
             }
         }
-        (Verdict::from_matches(matches), effects)
+        (judgement.into_verdict(), effects)
+    }
+}
+
+/// What the fired rules of one action may do with the verdict.
+///
+/// A rule that holds the action — it asks, denies or ends it — puts its
+/// match in the holds. A rule that lets the action continue puts its match
+/// in the notes, and a note decides nothing: the allow that answers when
+/// nothing held is the default of a quiet action, and it rests on no fact.
+/// That is the second half of the pointer-derived-facts invariant: a rule
+/// that reports on a path read out of the memory of the judged program
+/// (`filesystem.credentials.read` and its kin) keeps reporting, but its
+/// match can never be wired into the decision, so a future change cannot
+/// make an allow rest on that path without touching this type.
+#[derive(Debug, Default)]
+struct Judgement {
+    /// Matches of rules that hold the action.
+    holds: Vec<RuleMatch>,
+    /// Matches of rules that only report.
+    notes: Vec<RuleMatch>,
+}
+
+impl Judgement {
+    /// Records the match of a rule that holds the action.
+    fn hold(&mut self, matched: RuleMatch) {
+        self.holds.push(matched);
+    }
+
+    /// Records the match of a rule that only reports.
+    fn note(&mut self, matched: RuleMatch) {
+        self.notes.push(matched);
+    }
+
+    /// Makes the verdict of the action.
+    ///
+    /// The decision comes from the holds; a note can never lift the verdict
+    /// above the weakest hold, because a note never enters the decision.
+    /// When nothing held, the allow is the default that answers for every
+    /// quiet action — it rests on no fact — and the notes ride along for the
+    /// report.
+    fn into_verdict(mut self) -> Verdict {
+        // Every hold decision is stronger than every note decision (a note
+        // is a note because its decision needs no ruling), so the strongest
+        // hold decides and the notes only name the default when nothing
+        // held.
+        let decision = self
+            .holds
+            .iter()
+            .map(|m| m.decision)
+            .max()
+            .or_else(|| self.notes.iter().map(|m| m.decision).max());
+        let Some(decision) = decision else {
+            return Verdict::allow();
+        };
+        let mut matches = self.holds;
+        matches.append(&mut self.notes);
+        matches.sort_by(|a, b| {
+            b.decision
+                .cmp(&a.decision)
+                .then(b.risk.cmp(&a.risk))
+                .then(a.rule_id.cmp(&b.rule_id))
+        });
+        let risk = matches
+            .iter()
+            .map(|m| m.risk)
+            .max()
+            .unwrap_or(RiskLevel::Info);
+        let quarantine = matches.iter().any(|m| m.quarantine);
+        Verdict {
+            decision,
+            risk,
+            quarantine,
+            matches,
+        }
     }
 }
 
@@ -540,4 +636,73 @@ fn read_directory(path: &Path) -> Result<Vec<PathBuf>> {
     }
     files.sort();
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One match of a rule, for the verdict test below.
+    fn matched(id: &str, risk: RiskLevel, decision: Decision) -> RuleMatch {
+        RuleMatch {
+            rule_id: id.to_string(),
+            title: id.to_string(),
+            category: "test".to_string(),
+            risk,
+            decision,
+            reason: String::new(),
+            quarantine: false,
+        }
+    }
+
+    /// The split verdict must give the answer of `Verdict::from_matches`
+    /// over the same matches, for every mix of holds and notes: a note can
+    /// never lift the decision above the weakest hold, and when nothing
+    /// held the allow is the default of a quiet action.
+    #[test]
+    fn the_split_verdict_equals_the_verdict_of_all_matches() {
+        let holds = [
+            None,
+            Some(matched("hold.deny", RiskLevel::Blocked, Decision::Deny)),
+            Some(matched(
+                "hold.ask",
+                RiskLevel::ApprovalRequired,
+                Decision::ApprovalRequired,
+            )),
+            Some(matched("hold.end", RiskLevel::Blocked, Decision::Terminate)),
+        ];
+        let notes = [
+            None,
+            Some(matched("note.read", RiskLevel::Info, Decision::Allow)),
+            Some(matched(
+                "note.report",
+                RiskLevel::Suspicious,
+                Decision::Allow,
+            )),
+            Some(matched(
+                "note.session",
+                RiskLevel::Low,
+                Decision::AllowSession,
+            )),
+        ];
+        for hold in &holds {
+            for note in &notes {
+                let mut judgement = Judgement::default();
+                let mut all: Vec<RuleMatch> = Vec::new();
+                if let Some(hold) = hold {
+                    judgement.hold(hold.clone());
+                    all.push(hold.clone());
+                }
+                if let Some(note) = note {
+                    judgement.note(note.clone());
+                    all.push(note.clone());
+                }
+                assert_eq!(
+                    judgement.into_verdict(),
+                    Verdict::from_matches(all),
+                    "one hold {hold:?} and one note {note:?} must split into the same verdict"
+                );
+            }
+        }
+    }
 }

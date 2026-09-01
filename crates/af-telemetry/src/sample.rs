@@ -13,7 +13,7 @@
 //! outbox directory as plain JSON, one file per sample, where the user can
 //! read it and delete it. No code anywhere sends it.
 //!
-//! [DIRECTION.md §7]: https://github.com/agent-firewall/agent-firewall/blob/main/docs/DIRECTION.md
+//! [DIRECTION.md §7]: https://github.com/opinicus-ai/opinicus/blob/main/docs/DIRECTION.md
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -254,6 +254,9 @@ pub fn default_outbox_path() -> PathBuf {
 ///
 /// The file is pretty JSON, so a text editor is a complete inspector. The
 /// name counts the samples of one session: `sample-<session>-001.json`.
+/// The file is created with the permission mode 0600
+/// ([`crate::write_private`]), because a sample names the machine and its
+/// sessions even after redaction.
 pub fn write_sample(dir: &Path, sample: &Sample) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let prefix = format!("sample-{}-", sample.session);
@@ -275,7 +278,7 @@ pub fn write_sample(dir: &Path, sample: &Sample) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("{prefix}{next:03}.json"));
     let text = serde_json::to_string_pretty(sample)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    std::fs::write(&path, text.as_bytes())?;
+    crate::write_private(&path, text.as_bytes())?;
     Ok(path)
 }
 
@@ -694,6 +697,10 @@ impl Packer<'_> {
                 "target": self.pseu.pid(*target),
                 "signal": signal,
             }),
+            EventKind::IoUring { call } => json!({
+                "type": "io_uring",
+                "call": call.label(),
+            }),
             EventKind::Tamper { kind, detail } => {
                 let mut body = json!({"type": "tamper", "kind": kind});
                 if self.allows(Scope::Actions) {
@@ -974,6 +981,10 @@ impl Packer<'_> {
                 "action": "signal_send",
                 "target": self.pseu.pid(*target),
                 "signal": signal,
+            }),
+            Action::IoUring { call } => json!({
+                "action": "io_uring",
+                "call": call.label(),
             }),
             Action::Tamper { kind, detail } => {
                 let mut body = json!({"action": "tamper", "kind": kind});
